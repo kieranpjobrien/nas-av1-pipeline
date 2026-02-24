@@ -111,6 +111,14 @@ PROCESS_CONFIGS = {
         "cmd": [sys.executable, "-m", "pipeline", "--resume"],
         "cwd": str(Path(__file__).parent.parent),
     },
+    "strip_tags": {
+        "cmd": [sys.executable, "-m", "tools.strip_tags", "--execute"],
+        "cwd": str(Path(__file__).parent.parent),
+    },
+    "duplicates": {
+        "cmd": [sys.executable, "-m", "tools.duplicates", "--delete", "--execute"],
+        "cwd": str(Path(__file__).parent.parent),
+    },
 }
 
 STOP_TIMEOUT = 15  # seconds to wait for graceful stop before terminate

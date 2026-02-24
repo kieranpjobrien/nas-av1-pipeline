@@ -15,6 +15,7 @@ No extra ffprobe calls -- works entirely from the scan report.
 import argparse
 import csv
 import json
+import os
 import re
 import sys
 from collections import defaultdict
@@ -141,6 +142,67 @@ def find_duration_resolution_dupes(files: list[dict], duration_tolerance: float 
     return groups
 
 
+_CODEC_SCORES = {"av1": 30, "hevc": 20, "h264": 10}
+_RES_SCORES = {"4K": 30, "1080p": 20, "720p": 10, "480p": 0, "SD": 0}
+_AUDIO_CODEC_SCORES = {"truehd": 20, "flac": 20, "dts": 15, "eac3": 10, "ac3": 10, "aac": 5, "opus": 5}
+
+
+def score_file(f: dict) -> int:
+    """Score a file 0-100+ based on codec, resolution, audio quality, size, and HDR."""
+    video = f.get("video", {})
+
+    # Codec (0-30)
+    codec = (video.get("codec_raw") or "").lower()
+    score = _CODEC_SCORES.get(codec, 0)
+
+    # Resolution (0-30)
+    res = video.get("resolution_class", "")
+    score += _RES_SCORES.get(res, 0)
+
+    # Audio quality (0-20) — best stream wins
+    best_audio = 0
+    for stream in f.get("audio_streams", []):
+        raw = (stream.get("codec_raw") or "").lower()
+        if stream.get("lossless"):
+            s = 20
+        elif raw in _AUDIO_CODEC_SCORES:
+            s = _AUDIO_CODEC_SCORES[raw]
+        else:
+            s = 0
+        # Bump surround formats (channels >= 6) by a small margin within tier
+        if stream.get("channels", 0) >= 6 and s < 20:
+            s = min(s + 2, 20)
+        best_audio = max(best_audio, s)
+    score += best_audio
+
+    # HDR bonus (+5)
+    if video.get("hdr"):
+        score += 5
+
+    return score
+
+
+def pick_best(group: list[dict]) -> tuple[dict, list[dict]]:
+    """Return (keeper, deletions) for a duplicate group, scored and tie-broken."""
+    if not group:
+        return group[0], []
+
+    max_size = max(f.get("file_size_gb", 0) for f in group) or 1.0
+
+    scored = []
+    for f in group:
+        base = score_file(f)
+        # File size tiebreaker (0-10), proportional within group
+        size_score = int(10 * f.get("file_size_gb", 0) / max_size)
+        scored.append((base + size_score, f))
+
+    # Sort: highest score first, then shortest filename on tie
+    scored.sort(key=lambda x: (-x[0], len(x[1].get("filename", ""))))
+    keeper = scored[0][1]
+    deletions = [s[1] for s in scored[1:]]
+    return keeper, deletions
+
+
 def main():
     parser = argparse.ArgumentParser(description="Find potential duplicate files in media report")
     parser.add_argument("--report", type=str, default=str(MEDIA_REPORT),
@@ -149,7 +211,15 @@ def main():
                         help="Output CSV file")
     parser.add_argument("--mode", choices=["title", "duration", "both"], default="both",
                         help="Detection mode (default: both)")
+    parser.add_argument("--delete", action="store_true",
+                        help="Score duplicates and show keep/delete recommendations (dry-run)")
+    parser.add_argument("--execute", action="store_true",
+                        help="Actually delete lower-scored copies (requires --delete)")
     args = parser.parse_args()
+
+    if args.execute and not args.delete:
+        print("ERROR: --execute requires --delete", file=sys.stderr)
+        sys.exit(1)
 
     report_path = Path(args.report)
     if not report_path.exists():
@@ -179,14 +249,63 @@ def main():
         print("No duplicates found.")
         return
 
-    fieldnames = ["group_id", "mode", "filepath", "filename", "resolution", "codec", "duration", "file_size_gb"]
-    with open(args.output, "w", newline="", encoding="utf-8") as fh:
-        w = csv.DictWriter(fh, fieldnames=fieldnames, extrasaction="ignore")
-        w.writeheader()
-        w.writerows(results)
+    if not args.delete:
+        # Original CSV output mode
+        fieldnames = ["group_id", "mode", "filepath", "filename", "resolution", "codec", "duration", "file_size_gb"]
+        with open(args.output, "w", newline="", encoding="utf-8") as fh:
+            w = csv.DictWriter(fh, fieldnames=fieldnames, extrasaction="ignore")
+            w.writeheader()
+            w.writerows(results)
+        total_groups = len({r["group_id"] for r in results})
+        print(f"\nWrote {len(results)} rows ({total_groups} groups) to {args.output}")
+        return
 
-    total_groups = len({r["group_id"] for r in results})
-    print(f"\nWrote {len(results)} rows ({total_groups} groups) to {args.output}")
+    # --delete mode: score each group and pick best
+    # Build lookup from filepath -> full file record for scoring
+    file_lookup = {f["filepath"]: f for f in files}
+
+    # Group results by group_id
+    grouped = defaultdict(list)
+    for r in results:
+        grouped[r["group_id"]].append(r)
+
+    total_deleted = 0
+    total_kept = 0
+    for gid, group_rows in sorted(grouped.items()):
+        # Resolve full file records for scoring
+        full_records = []
+        for row in group_rows:
+            rec = file_lookup.get(row["filepath"])
+            if rec:
+                full_records.append(rec)
+        if len(full_records) < 2:
+            continue
+
+        keeper, deletions = pick_best(full_records)
+        keeper_score = score_file(keeper)
+        max_size = max(f.get("file_size_gb", 0) for f in full_records) or 1.0
+        keeper_total = keeper_score + int(10 * keeper.get("file_size_gb", 0) / max_size)
+
+        print(f"\n--- Group {gid} ---")
+        print(f"  KEEP  [{keeper_total:3d} pts] {keeper['filepath']}")
+        for d in deletions:
+            d_score = score_file(d)
+            d_total = d_score + int(10 * d.get("file_size_gb", 0) / max_size)
+            print(f"  DEL   [{d_total:3d} pts] {d['filepath']}")
+
+            if args.execute:
+                try:
+                    os.remove(d["filepath"])
+                    print(f"        -> DELETED")
+                    total_deleted += 1
+                except OSError as e:
+                    print(f"        -> FAILED: {e}")
+            else:
+                total_deleted += 1  # count for dry-run summary
+        total_kept += 1
+
+    action = "Deleted" if args.execute else "Would delete"
+    print(f"\n{action} {total_deleted} files across {total_kept} groups")
 
 
 if __name__ == "__main__":
