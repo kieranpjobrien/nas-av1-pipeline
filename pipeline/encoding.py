@@ -140,7 +140,7 @@ def _remux_to_mkv(input_path: str) -> Optional[str]:
     """
     remuxed_path = input_path + ".remux.mkv"
     cmd = ["ffmpeg", "-y", "-i", input_path, "-map", "0",
-           "-c:v", "copy", "-c:a", "flac", "-c:s", "copy", remuxed_path]
+           "-c", "copy", remuxed_path]
     logging.info(f"Remuxing to MKV: {os.path.basename(input_path)}")
 
     try:
