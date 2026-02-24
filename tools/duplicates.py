@@ -51,17 +51,29 @@ def normalize_title(filename: str) -> str:
     return " ".join(cleaned.lower().split())
 
 
-def find_title_duration_dupes(files: list[dict], duration_tolerance: float = 30.0) -> list[dict]:
-    """Group by normalised title, then sub-group by duration within tolerance."""
+def find_title_duration_dupes(
+    files: list[dict], duration_tolerance: float = 30.0, same_dir: bool = False
+) -> list[dict]:
+    """Group by normalised title, then sub-group by duration within tolerance.
+
+    If same_dir is True, only files in the same parent directory can be grouped
+    together (prevents cross-show matches like different shows' "Pilot" episodes).
+    """
     by_title = defaultdict(list)
     for f in files:
-        key = normalize_title(f["filename"])
-        if key:
-            by_title[key].append(f)
+        title = normalize_title(f["filename"])
+        if not title:
+            continue
+        if same_dir:
+            parent = str(Path(f["filepath"]).parent)
+            key = (title, parent)
+        else:
+            key = (title, "")
+        by_title[key].append(f)
 
     groups = []
     group_id = 0
-    for title, items in by_title.items():
+    for (title, _dir_key), items in by_title.items():
         if len(items) < 2:
             continue
         # Sub-group by duration
@@ -221,6 +233,12 @@ def main():
         print("ERROR: --execute requires --delete", file=sys.stderr)
         sys.exit(1)
 
+    # --delete only uses title matching (duration-only produces false positives
+    # across unrelated episodes with similar runtimes)
+    if args.delete and args.mode != "title":
+        args.mode = "title"
+        print("NOTE: --delete forces --mode title (duration-only matching is too broad)")
+
     report_path = Path(args.report)
     if not report_path.exists():
         print(f"ERROR: Report not found: {report_path}", file=sys.stderr)
@@ -234,7 +252,7 @@ def main():
 
     results = []
     if args.mode in ("title", "both"):
-        title_dupes = find_title_duration_dupes(files)
+        title_dupes = find_title_duration_dupes(files, same_dir=args.delete)
         results.extend(title_dupes)
         title_groups = len({r["group_id"] for r in title_dupes})
         print(f"Title matching: {title_groups} groups, {len(title_dupes)} files")
