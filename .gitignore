@@ -1,0 +1,31 @@
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# Python
+__pycache__/
+.venv/
+*.egg-info/
+
+# Node
+node_modules/
+frontend/dist/
+
+# IDE
+.vscode/
+.idea/
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# Generated data / reports
+media_report.json
+*.csv
+series_filenames.txt
+series_fix_ext_report.txt
+
+# Database files
+databaseBackup*
+extracted_plex_library.db

@@ -1,0 +1,10 @@
+{
+    "paths": {
+        "Z:\\Movies\\Interstellar (2014)\\Interstellar (2014).mkv": {"cq_offset": -3, "preset": "p7"}
+    },
+    "patterns": {
+        "*anime*": {"cq_offset": -2},
+        "*Handycam*": {"cq_offset": 4, "preset": "p4"}
+    },
+    "default_offset": 0
+}

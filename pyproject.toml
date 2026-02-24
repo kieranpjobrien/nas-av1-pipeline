@@ -1,0 +1,14 @@
+[project]
+name = "nas-cleanup"
+version = "2.0.0"
+description = "AV1 re-encoding pipeline, dashboard, and NAS utility tools"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.34",
+]
+
+[project.scripts]
+pipeline = "pipeline.__main__:main"
+scan = "tools.scanner:main"
+dashboard = "server:run"
