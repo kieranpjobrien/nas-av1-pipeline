@@ -38,7 +38,12 @@ class PathListRequest(BaseModel):
     paths: list[str]
 
 class GentleRequest(BaseModel):
-    overrides: dict
+    paths: dict = {}
+    patterns: dict = {}
+    default_offset: int = 0
+
+class KeywordListRequest(BaseModel):
+    keywords: list[str]
 
 
 # --- Control file helpers ---
@@ -254,7 +259,20 @@ def get_priority():
 @app.get("/api/control/gentle")
 def get_gentle():
     data = read_json_safe(CONTROL_DIR / "gentle.json")
-    return data or {"overrides": {}}
+    return data or {"paths": {}, "patterns": {}, "default_offset": 0}
+
+
+@app.get("/api/control/custom-tags")
+def get_custom_tags():
+    data = read_json_safe(CONTROL_DIR / "custom_tags.json")
+    return data or {"keywords": []}
+
+
+@app.put("/api/control/custom-tags")
+def set_custom_tags(req: KeywordListRequest):
+    clean = list(dict.fromkeys(k.strip() for k in req.keywords if k.strip()))
+    drop_file("custom_tags.json", {"keywords": clean})
+    return {"ok": True, "count": len(clean)}
 
 
 # -- Write endpoints --
@@ -294,7 +312,11 @@ def set_priority(req: PathListRequest):
 
 @app.put("/api/control/gentle")
 def set_gentle(req: GentleRequest):
-    drop_file("gentle.json", {"overrides": req.overrides})
+    drop_file("gentle.json", {
+        "paths": req.paths,
+        "patterns": req.patterns,
+        "default_offset": req.default_offset,
+    })
     return {"ok": True}
 
 

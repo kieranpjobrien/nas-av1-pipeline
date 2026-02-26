@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import threading
+import time
 from datetime import datetime
 from enum import Enum
 from typing import Optional
@@ -59,7 +60,16 @@ class PipelineState:
             tmp = self.state_file + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(self.data, f, indent=2, ensure_ascii=False)
-            os.replace(tmp, self.state_file)
+            # Retry os.replace — Windows antivirus/indexer can hold transient locks
+            for attempt in range(5):
+                try:
+                    os.replace(tmp, self.state_file)
+                    return
+                except PermissionError:
+                    if attempt < 4:
+                        time.sleep(0.1 * (attempt + 1))
+                    else:
+                        raise
 
     def get_file(self, filepath: str) -> Optional[dict]:
         with self._lock:

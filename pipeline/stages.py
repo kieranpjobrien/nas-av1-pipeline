@@ -66,7 +66,21 @@ def stage_fetch(item: dict, staging_dir: str, config: dict, state: PipelineState
         logging.info(f"Fetch buffer full ({format_bytes(fetch_usage)}). Waiting for encodes to complete...")
         return None
 
-    state.set_file(source, FileStatus.FETCHING, local_path=local_path)
+    # Check source still exists on NAS (may have been renamed/deleted since scan)
+    if not os.path.exists(source):
+        logging.warning(f"Source file not found, skipping: {item['filename']}")
+        state.set_file(source, FileStatus.SKIPPED, reason="source file not found")
+        return None
+
+    # Atomically claim this file for fetching — prevents the prefetch thread
+    # and main loop from copying the same file concurrently (WinError 32).
+    with state._lock:
+        existing = state.data["files"].get(source)
+        current = existing["status"] if existing else None
+        if current == FileStatus.FETCHING.value:
+            return None  # Another thread is already fetching this file
+        state.set_file(source, FileStatus.FETCHING, local_path=local_path)
+
     logging.info(f"Fetching: {item['filename']} ({format_bytes(file_size)})")
 
     try:
@@ -80,9 +94,12 @@ def stage_fetch(item: dict, staging_dir: str, config: dict, state: PipelineState
     except Exception as e:
         logging.error(f"Fetch failed: {e}")
         state.set_file(source, FileStatus.ERROR, error=str(e), stage="fetch")
-        # Clean up partial
-        if os.path.exists(local_path):
-            os.remove(local_path)
+        # Clean up partial — may fail if another process holds a lock
+        try:
+            if os.path.exists(local_path):
+                os.remove(local_path)
+        except OSError:
+            pass
         return None
 
 
@@ -115,7 +132,7 @@ def stage_upload(source_filepath: str, item: dict, staging_dir: str,
         return True
 
     state.set_file(source_filepath, FileStatus.UPLOADING, dest_path=dest_path)
-    logging.info(f"Uploading: {dest_filename} → {source_dir}")
+    logging.info(f"Uploading: {dest_filename} -> {source_dir}")
 
     try:
         start = time.time()
@@ -196,7 +213,7 @@ def stage_verify(source_filepath: str, item: dict, config: dict, state: Pipeline
 
     state.save()
 
-    logging.info(f"Verified: {item['filename']} → saved {format_bytes(saved)}")
+    logging.info(f"Verified: {item['filename']} -> saved {format_bytes(saved)}")
 
     return True
 
@@ -231,12 +248,12 @@ def stage_replace(source_filepath: str, item: dict, config: dict, state: Pipelin
         # Step 1: Rename original → .original.bak (if original still exists)
         if os.path.exists(source_filepath) and not os.path.exists(backup_path):
             os.rename(source_filepath, backup_path)
-            logging.info(f"  Backed up original: {os.path.basename(source_filepath)} → .original.bak")
+            logging.info(f"  Backed up original: {os.path.basename(source_filepath)} -> .original.bak")
 
         # Step 2: Rename .av1.mkv → final name
         if os.path.exists(dest_path) and not os.path.exists(final_path):
             os.rename(dest_path, final_path)
-            logging.info(f"  Renamed AV1 file → {final_name}")
+            logging.info(f"  Renamed AV1 file -> {final_name}")
         elif os.path.exists(dest_path) and dest_path != final_path:
             # final_path already exists (maybe from a previous partial), overwrite
             os.replace(dest_path, final_path)
@@ -247,7 +264,7 @@ def stage_replace(source_filepath: str, item: dict, config: dict, state: Pipelin
             logging.info(f"  Deleted original backup")
 
         state.set_file(source_filepath, FileStatus.REPLACED, final_path=final_path)
-        logging.info(f"Replaced: {item['filename']} → {final_name}")
+        logging.info(f"Replaced: {item['filename']} -> {final_name}")
         return True
 
     except Exception as e:

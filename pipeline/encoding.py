@@ -48,7 +48,8 @@ def format_duration(secs: float) -> str:
     return f"{secs / 3600:.0f}h {(secs % 3600) / 60:.0f}m"
 
 
-def build_ffmpeg_cmd(input_path: str, output_path: str, item: dict, config: dict) -> list[str]:
+def build_ffmpeg_cmd(input_path: str, output_path: str, item: dict, config: dict,
+                     include_subs: bool = True) -> list[str]:
     """Build the ffmpeg command for NVENC AV1 encoding."""
     is_hdr = item.get("hdr", False)
     params = resolve_encode_params(config, item)
@@ -59,8 +60,14 @@ def build_ffmpeg_cmd(input_path: str, output_path: str, item: dict, config: dict
     cmd = [
         "ffmpeg", "-y",
         "-i", input_path,
-        "-map", "0",
+        # Map only the first video stream, all audio, and (optionally) subs.
+        # Excludes data streams, cover art (mjpeg/bmp), and other junk
+        # that NVENC or MKV can't handle.
+        "-map", "0:v:0",
+        "-map", "0:a?",
     ]
+    if include_subs:
+        cmd.extend(["-map", "0:s?"])
 
     # Video: NVENC AV1
     cmd.extend([
@@ -124,8 +131,9 @@ def build_ffmpeg_cmd(input_path: str, output_path: str, item: dict, config: dict
                 else:
                     cmd.extend([f"-c:a:{i}", "copy"])
 
-    # Subtitles: copy all
-    cmd.extend(["-c:s", "copy"])
+    # Subtitles: copy all (when mapped)
+    if include_subs:
+        cmd.extend(["-c:s", "copy"])
 
     # Output (mkv container — no -movflags needed)
     cmd.append(output_path)
@@ -136,33 +144,50 @@ def build_ffmpeg_cmd(input_path: str, output_path: str, item: dict, config: dict
 def _remux_to_mkv(input_path: str) -> Optional[str]:
     """Remux a problematic container to .mkv (stream copy, no re-encoding).
 
+    If the first attempt fails (commonly due to incompatible subtitle formats
+    like mov_text), retries without subtitles.
+
     Returns the remuxed file path on success, or None on failure.
     """
     remuxed_path = input_path + ".remux.mkv"
-    cmd = ["ffmpeg", "-y", "-i", input_path, "-map", "0",
-           "-c", "copy", remuxed_path]
+    base_cmd = ["ffmpeg", "-y", "-i", input_path]
+    attempts = [
+        # First video + all audio + all subs (skips data streams, cover art)
+        (base_cmd + ["-map", "0:v:0", "-map", "0:a", "-map", "0:s?", "-c", "copy", remuxed_path], None),
+        # Drop subs too (handles mov_text / other incompatible sub formats)
+        (base_cmd + ["-map", "0:v:0", "-map", "0:a", "-c", "copy", remuxed_path],
+         "retrying without subtitles"),
+    ]
+
     logging.info(f"Remuxing to MKV: {os.path.basename(input_path)}")
 
-    try:
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
-        )
-        if result.returncode != 0:
-            logging.error(f"Remux failed (exit {result.returncode})")
-            for line in result.stderr.strip().split("\n")[-5:]:
-                logging.error(f"  ffmpeg: {line}")
-            if os.path.exists(remuxed_path):
-                os.remove(remuxed_path)
-            return None
+    last_stderr = ""
+    for i, (cmd, retry_msg) in enumerate(attempts):
+        if retry_msg:
+            logging.info(f"  {retry_msg}")
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
+            )
+            if result.returncode == 0:
+                logging.info(f"Remuxed: {format_bytes(os.path.getsize(remuxed_path))}")
+                return remuxed_path
 
-        logging.info(f"Remuxed: {format_bytes(os.path.getsize(remuxed_path))}")
-        return remuxed_path
+            last_stderr = result.stderr
+            logging.warning(f"Remux attempt {i + 1}/{len(attempts)} failed (exit {result.returncode})")
 
-    except Exception as e:
-        logging.error(f"Remux exception: {e}")
+        except Exception as e:
+            logging.error(f"Remux exception: {e}")
+
         if os.path.exists(remuxed_path):
             os.remove(remuxed_path)
-        return None
+
+    # All attempts failed — log stderr from last attempt
+    logging.error("Remux failed after all attempts")
+    for line in last_stderr.strip().split("\n")[-5:]:
+        logging.error(f"  ffmpeg: {line}")
+
+    return None
 
 
 def stage_encode(source_filepath: str, item: dict, staging_dir: str,
@@ -201,35 +226,48 @@ def stage_encode(source_filepath: str, item: dict, staging_dir: str,
     state.set_file(source_filepath, FileStatus.ENCODING,
                    local_path=local_input, output_path=output_path)
 
-    cmd = build_ffmpeg_cmd(encode_input, output_path, item, config)
     logging.info(f"Encoding: {item['filename']}")
     enc_params = resolve_encode_params(config, item)
     logging.info(f"  {enc_params['content_type'].upper()} | {item['resolution']} | "
                  f"HDR: {item.get('hdr', False)} | "
                  f"CQ: {enc_params['cq']} | Preset: {enc_params['preset']} | "
                  f"Multipass: {enc_params['multipass']}")
-    logging.debug(f"  CMD: {' '.join(cmd)}")
 
     try:
-        start = time.time()
-        process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            encoding="utf-8",
-            errors="replace",
-        )
-        _, stderr = process.communicate()
-        elapsed = time.time() - start
+        # Try with subs first, retry without if subtitle codec is unsupported
+        for include_subs in (True, False):
+            cmd = build_ffmpeg_cmd(encode_input, output_path, item, config,
+                                   include_subs=include_subs)
+            logging.debug(f"  CMD: {' '.join(cmd)}")
 
-        if process.returncode != 0:
+            start = time.time()
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                encoding="utf-8",
+                errors="replace",
+            )
+            _, stderr = process.communicate()
+            elapsed = time.time() - start
+
+            if process.returncode == 0:
+                break  # success
+
+            if os.path.exists(output_path):
+                os.remove(output_path)
+
+            # If first attempt failed and subs look like the cause, retry without
+            if include_subs and ("subtitle" in stderr.lower() or "codec none" in stderr.lower()):
+                logging.warning(f"Encode failed due to subtitle issue, retrying without subs")
+                continue
+
+            # Non-subtitle failure or second attempt failed
             logging.error(f"Encode failed (exit {process.returncode})")
             for line in stderr.strip().split("\n")[-5:]:
                 logging.error(f"  ffmpeg: {line}")
             state.set_file(source_filepath, FileStatus.ERROR,
                            error=f"ffmpeg exit {process.returncode}", stage="encode")
-            if os.path.exists(output_path):
-                os.remove(output_path)
             if remuxed_path and os.path.exists(remuxed_path):
                 os.remove(remuxed_path)
             return None
@@ -260,7 +298,7 @@ def stage_encode(source_filepath: str, item: dict, staging_dir: str,
         speed = input_size / elapsed / (1024**2) if elapsed > 0 else 0
 
         logging.info(f"Encoded in {format_duration(elapsed)}: "
-                     f"{format_bytes(input_size)} → {format_bytes(output_size)} "
+                     f"{format_bytes(input_size)} -> {format_bytes(output_size)} "
                      f"({ratio:.1f}% reduction, {format_bytes(saved)} saved)")
 
         state.set_file(source_filepath, FileStatus.ENCODED,

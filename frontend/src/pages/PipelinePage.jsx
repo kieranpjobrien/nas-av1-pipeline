@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { PALETTE } from "../theme";
 import { usePolling } from "../lib/usePolling";
 import { api } from "../lib/api";
@@ -23,53 +23,31 @@ function formatETA(secs) {
   return rm > 0 ? `~${h}h ${rm}m` : `~${h}h`;
 }
 
-function computeETAs(data) {
+function computeOverallETA(data) {
   const stats = data.stats || {};
   const files = data.files || {};
   const completed = stats.completed || 0;
   const totalEncodeTime = stats.total_encode_time_secs || 0;
   const tierStats = stats.tier_stats || {};
 
-  const result = { overallETA: null, currentFileElapsed: null, currentFileETA: null };
-
   const overallAvg = completed > 0 && totalEncodeTime > 0 ? totalEncodeTime / completed : 0;
+  if (overallAvg <= 0) return null;
 
-  // Tier-aware ETA: sum per-file estimates using tier avg where available
-  if (overallAvg > 0) {
-    const doneStatuses = ["completed", "replaced", "done", "skipped", "error", "failed", "verified"];
-    let totalSecs = 0;
-    let remaining = 0;
-    for (const info of Object.values(files)) {
-      if (doneStatuses.includes((info.status || "").toLowerCase())) continue;
-      remaining++;
-      const resKey = info.res_key || "";
-      const tier = tierStats[resKey];
-      if (tier && tier.completed >= 2 && tier.total_encode_time_secs > 0) {
-        totalSecs += tier.total_encode_time_secs / tier.completed;
-      } else {
-        totalSecs += overallAvg;
-      }
-    }
-    if (remaining > 0) result.overallETA = totalSecs;
-  }
-
-  // Current file ETA
-  const activeStatuses = ["fetching", "encoding", "uploading", "verifying", "replacing"];
+  const doneStatuses = ["completed", "replaced", "done", "skipped", "error", "failed", "verified"];
+  let totalSecs = 0;
+  let remaining = 0;
   for (const info of Object.values(files)) {
-    const s = (info.status || "").toLowerCase();
-    if (!activeStatuses.includes(s)) continue;
-    if (info.last_updated) {
-      const elapsed = (Date.now() - new Date(info.last_updated).getTime()) / 1000;
-      result.currentFileElapsed = Math.max(0, elapsed);
-      if (s === "encoding" && overallAvg > 0) {
-        const remaining = overallAvg - elapsed;
-        result.currentFileETA = Math.max(0, remaining);
-      }
+    if (doneStatuses.includes((info.status || "").toLowerCase())) continue;
+    remaining++;
+    const resKey = info.res_key || "";
+    const tier = tierStats[resKey];
+    if (tier && tier.completed >= 2 && tier.total_encode_time_secs > 0) {
+      totalSecs += tier.total_encode_time_secs / tier.completed;
+    } else {
+      totalSecs += overallAvg;
     }
-    break;
   }
-
-  return result;
+  return remaining > 0 ? totalSecs : null;
 }
 
 function getTierSavings(stats) {
@@ -88,9 +66,9 @@ function getTierSavings(stats) {
 }
 
 const STATUS_GROUPS = {
-  Queued: ["queued", "pending", "waiting"],
+  Queued: ["queued", "pending", "waiting", "fetched", "encoded", "uploaded"],
   "In Progress": ["fetching", "encoding", "uploading", "verifying", "replacing"],
-  Done: ["completed", "replaced", "done"],
+  Done: ["completed", "replaced", "done", "verified"],
   Skipped: ["skipped"],
   Error: ["error", "failed"],
 };
@@ -115,7 +93,7 @@ function getTierProgress(files) {
     if (!tiers[tier]) tiers[tier] = { total: 0, done: 0 };
     tiers[tier].total++;
     const s = (info.status || "").toLowerCase();
-    if (["completed", "replaced", "done"].includes(s)) tiers[tier].done++;
+    if (["completed", "replaced", "done", "verified"].includes(s)) tiers[tier].done++;
   }
   return Object.entries(tiers).sort((a, b) => b[1].total - a[1].total);
 }
@@ -126,21 +104,75 @@ function getErrors(files) {
     .map(([path, info]) => ({ path, error: info.error || info.status }));
 }
 
-function getCurrentActivity(data) {
+function getActiveFiles(data) {
   const files = data.files || {};
+  const active = [];
   for (const [path, info] of Object.entries(files)) {
     const s = (info.status || "").toLowerCase();
     if (["fetching", "encoding", "uploading", "verifying", "replacing"].includes(s)) {
-      return { path, status: info.status, encode_time: info.encode_time, last_updated: info.last_updated };
+      const elapsed = info.last_updated
+        ? Math.max(0, (Date.now() - new Date(info.last_updated).getTime()) / 1000)
+        : null;
+      active.push({ path, status: info.status, elapsed, last_updated: info.last_updated });
     }
   }
-  return null;
+  // Most recently updated first
+  active.sort((a, b) => (b.last_updated || "").localeCompare(a.last_updated || ""));
+  return active;
+}
+
+function getUpNext(data, priorityPaths, limit = 15) {
+  const files = data.files || {};
+  const doneStatuses = ["completed", "replaced", "done", "verified", "skipped", "error", "failed"];
+  const activeStatuses = ["fetching", "encoding", "uploading", "verifying", "replacing"];
+  const seen = new Set();
+  const upcoming = [];
+
+  // Priority items first — show them unless they're done or actively processing
+  for (const path of priorityPaths) {
+    const info = files[path];
+    const s = info ? (info.status || "").toLowerCase() : "";
+    if (doneStatuses.includes(s) || activeStatuses.includes(s)) continue;
+    const filename = path.split(/[\\/]/).pop();
+    const status = info?.status || "priority";
+    upcoming.push({ path, filename, status, priority: true });
+    seen.add(path);
+  }
+
+  // Then pipeline state items (fetched/pending/encoded/uploaded)
+  for (const [path, info] of Object.entries(files)) {
+    if (seen.has(path)) continue;
+    const s = (info.status || "").toLowerCase();
+    if (["fetched", "pending", "encoded", "uploaded"].includes(s)) {
+      const filename = path.split(/[\\/]/).pop();
+      upcoming.push({ path, filename, status: info.status, priority: false, added: info.added || info.last_updated });
+    }
+  }
+
+  // Sort: priority first, then by readiness (fetched > encoded > uploaded > pending)
+  const statusOrder = { fetched: 0, encoded: 1, uploaded: 2, pending: 3, priority: 4 };
+  upcoming.sort((a, b) => {
+    if (a.priority !== b.priority) return a.priority ? -1 : 1;
+    const oa = statusOrder[(a.status || "").toLowerCase()] ?? 9;
+    const ob = statusOrder[(b.status || "").toLowerCase()] ?? 9;
+    if (oa !== ob) return oa - ob;
+    return (a.added || "").localeCompare(b.added || "");
+  });
+  return upcoming.slice(0, limit);
 }
 
 export function PipelinePage() {
   const { data, error } = usePolling(api.getPipeline, 3000);
   const [starting, setStarting] = useState(false);
   const [resetting, setResetting] = useState(false);
+  const [priorityPaths, setPriorityPaths] = useState([]);
+
+  useEffect(() => {
+    const load = () => api.getPriority().then((p) => setPriorityPaths(p?.paths || [])).catch(() => {});
+    load();
+    const id = setInterval(load, 10000);
+    return () => clearInterval(id);
+  }, []);
 
   const handleResetErrors = async () => {
     setResetting(true);
@@ -192,8 +224,9 @@ export function PipelinePage() {
   const tierProgress = getTierProgress(files);
   const tierSavings = getTierSavings(stats);
   const errors = getErrors(files);
-  const activity = getCurrentActivity(data);
-  const etas = computeETAs(data);
+  const activeFiles = getActiveFiles(data);
+  const upNext = getUpNext(data, priorityPaths);
+  const overallETA = computeOverallETA(data);
 
   const GROUP_COLOURS = { Queued: PALETTE.textMuted, "In Progress": PALETTE.accent, Done: PALETTE.green, Skipped: PALETTE.textMuted, Error: PALETTE.red };
 
@@ -210,9 +243,9 @@ export function PipelinePage() {
         <div style={{ color: PALETTE.textMuted, fontSize: 13 }}>
           {completed} / {total} files · {fmt(stats.bytes_saved || 0)} saved
         </div>
-        {completed > 0 && etas.overallETA != null ? (
+        {completed > 0 && overallETA != null ? (
           <div style={{ color: PALETTE.accent, fontSize: 13, marginTop: 4, fontFamily: "'JetBrains Mono', monospace" }}>
-            ETA: {formatETA(etas.overallETA)} remaining
+            ETA: {formatETA(overallETA)} remaining
           </div>
         ) : completed === 0 && total > 0 ? (
           <div style={{ color: PALETTE.textMuted, fontSize: 12, marginTop: 4, fontStyle: "italic" }}>
@@ -227,24 +260,80 @@ export function PipelinePage() {
       </div>
 
       {/* Current activity */}
-      {activity && (
+      {activeFiles.length > 0 && (
         <>
-          <SectionTitle>Current Activity</SectionTitle>
-          <div style={{ background: PALETTE.surface, border: `1px solid ${PALETTE.border}`, borderRadius: 12, padding: 20, marginBottom: 24 }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-              <div style={{ width: 10, height: 10, borderRadius: "50%", background: PALETTE.accent, animation: "pulse 1.5s infinite" }} />
-              <div>
-                <div style={{ color: PALETTE.text, fontSize: 14, fontWeight: 600 }}>{activity.status}</div>
-                <div style={{ color: PALETTE.textMuted, fontSize: 12, marginTop: 2, wordBreak: "break-all" }}>{activity.path}</div>
-                {activity.encode_time && <div style={{ color: PALETTE.textMuted, fontSize: 11, marginTop: 2 }}>Encode time: {activity.encode_time}</div>}
-                {etas.currentFileElapsed != null && (
-                  <div style={{ color: PALETTE.textMuted, fontSize: 11, marginTop: 2, fontFamily: "'JetBrains Mono', monospace" }}>
-                    Elapsed: {formatETA(etas.currentFileElapsed)}
-                    {etas.currentFileETA != null && <span style={{ color: PALETTE.accent }}> · {formatETA(etas.currentFileETA)} remaining</span>}
+          <SectionTitle>Current Activity ({activeFiles.length})</SectionTitle>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 24 }}>
+            {activeFiles.map(({ path, status, elapsed }, i) => {
+              const isStale = elapsed != null && elapsed > 3600;
+              return (
+                <div key={i} style={{
+                  background: PALETTE.surface,
+                  border: `1px solid ${isStale ? PALETTE.red + "44" : PALETTE.border}`,
+                  borderRadius: 10, padding: "12px 16px",
+                  display: "flex", alignItems: "center", gap: 12,
+                }}>
+                  <div style={{
+                    width: 8, height: 8, borderRadius: "50%", flexShrink: 0,
+                    background: isStale ? PALETTE.red : PALETTE.accent,
+                    animation: isStale ? "none" : "pulse 1.5s infinite",
+                  }} />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ color: PALETTE.textMuted, fontSize: 12, wordBreak: "break-all" }}>{path}</div>
                   </div>
-                )}
+                  <div style={{ display: "flex", alignItems: "center", gap: 12, flexShrink: 0 }}>
+                    <span style={{
+                      fontSize: 11, fontWeight: 600, padding: "2px 8px", borderRadius: 4,
+                      background: PALETTE.surfaceLight, color: PALETTE.accent,
+                    }}>{status}</span>
+                    {elapsed != null && (
+                      <span style={{
+                        fontSize: 11, fontFamily: "'JetBrains Mono', monospace",
+                        color: isStale ? PALETTE.red : PALETTE.textMuted,
+                      }}>{formatETA(elapsed)}</span>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </>
+      )}
+
+      {/* Up Next */}
+      {upNext.length > 0 && (
+        <>
+          <SectionTitle>Up Next</SectionTitle>
+          <div style={{ display: "flex", flexDirection: "column", gap: 4, marginBottom: 24 }}>
+            {upNext.map(({ path, filename, status, priority: isPrio }, i) => {
+              const sl = (status || "").toLowerCase();
+              const badgeColor = isPrio ? PALETTE.accentWarm : sl === "fetched" ? PALETTE.green : PALETTE.textMuted;
+              const badgeBg = isPrio ? PALETTE.accentWarm + "22" : sl === "fetched" ? PALETTE.green + "22" : PALETTE.surfaceLight;
+              return (
+                <div key={i} style={{
+                  background: PALETTE.surface,
+                  border: `1px solid ${isPrio ? PALETTE.accentWarm + "44" : PALETTE.border}`,
+                  borderRadius: 8, padding: "8px 14px",
+                  display: "flex", alignItems: "center", gap: 10,
+                }}>
+                  <span style={{ color: PALETTE.textMuted, fontSize: 11, fontFamily: "'JetBrains Mono', monospace", width: 20, textAlign: "right", flexShrink: 0 }}>{i + 1}</span>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ color: PALETTE.text, fontSize: 12, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{filename}</div>
+                    <div style={{ color: PALETTE.textMuted, fontSize: 10, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{path}</div>
+                  </div>
+                  {isPrio && <span style={{ fontSize: 9, fontWeight: 700, color: PALETTE.accentWarm, letterSpacing: 0.5 }}>PRIORITY</span>}
+                  <span style={{
+                    fontSize: 10, fontWeight: 600, padding: "2px 8px", borderRadius: 4, flexShrink: 0,
+                    background: badgeBg, color: badgeColor,
+                  }}>{status}</span>
+                </div>
+              );
+            })}
+            {groups.Queued > upNext.length && (
+              <div style={{ color: PALETTE.textMuted, fontSize: 11, padding: "4px 0", textAlign: "center" }}>
+                +{groups.Queued - upNext.length} more queued
               </div>
-            </div>
+            )}
           </div>
         </>
       )}

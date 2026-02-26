@@ -4,7 +4,7 @@
 DEFAULT_CONFIG = {
     # Staging limits (bytes)
     "max_staging_bytes": 2_500_000_000_000,       # 2.5 TB total local staging
-    "max_fetch_buffer_bytes": 500_000_000_000,     # 500 GB fetch buffer
+    "max_fetch_buffer_bytes": 1_000_000_000_000,   # 1 TB fetch buffer
     "min_free_space_bytes": 50_000_000_000,        # 50 GB minimum free on staging drive
 
     # Encoding: NVENC AV1 (RTX 4080)
@@ -36,15 +36,16 @@ DEFAULT_CONFIG = {
     "pixel_format_hdr": "p010le",  # 10-bit for HDR (mandatory) — NVENC uses p010le
     "pixel_format_sdr": "p010le",  # 10-bit for SDR too (better banding resistance)
 
-    # Audio: smart mode — lossless→EAC3, lossy→copy
-    "audio_mode": "smart",  # "copy" = passthrough, "smart" = lossless→EAC3/lossy→copy
+    # Audio: smart mode — bulky→EAC3, efficient lossy→copy
+    "audio_mode": "smart",  # "copy" = passthrough, "smart" = bulky→EAC3/efficient→copy
     "audio_eac3_surround_bitrate": "640k",   # EAC3 for surround (>2 channels)
     "audio_eac3_stereo_bitrate": "256k",     # EAC3 for stereo/mono
 
-    # Lossless audio codecs to transcode (all others are copied as-is)
-    "lossless_audio_codecs": {"truehd", "dts-hd ma", "dts-hd.ma", "flac", "pcm_s16le",
-                              "pcm_s24le", "pcm_s32le", "pcm_f32le", "pcm_s16be",
-                              "pcm_s24be", "pcm_s32be", "pcm_f32be", "alac"},
+    # Audio codecs to transcode to EAC3 (lossless + wasteful lossy like DTS)
+    "lossless_audio_codecs": {"truehd", "dts-hd ma", "dts-hd.ma", "dts", "flac",
+                              "pcm_s16le", "pcm_s24le", "pcm_s32le", "pcm_f32le",
+                              "pcm_s16be", "pcm_s24be", "pcm_s32be", "pcm_f32be",
+                              "alac"},
 
     # Behaviour
     "overwrite_existing": False,

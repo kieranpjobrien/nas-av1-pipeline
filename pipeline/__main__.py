@@ -120,7 +120,7 @@ Examples:
         return
 
     # Run pipeline
-    pipeline = Pipeline(config, state, args.staging)
+    pipeline = Pipeline(config, state, args.staging, report_path=args.report)
     pipeline.run(queue, dry_run=args.dry_run)
 
 
