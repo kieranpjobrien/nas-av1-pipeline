@@ -13,6 +13,7 @@ export function MediaSearch({ onAdd }) {
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState(new Set());
   const [loading, setLoading] = useState(true);
+  const [reencodeCq, setReencodeCq] = useState(30);
 
   useEffect(() => {
     api.getMediaReport()
@@ -60,14 +61,18 @@ export function MediaSearch({ onAdd }) {
     }
   };
 
-  const handleAdd = (list) => {
+  const handleAdd = (list, extra) => {
     const paths = [...selected];
     if (paths.length === 0) return;
-    onAdd(list, paths);
+    onAdd(list, paths, extra);
     setSelected(new Set());
   };
 
   const selectedCount = selected.size;
+  const hasAv1Selected = useMemo(() => {
+    if (selectedCount === 0) return false;
+    return files.some((f) => selected.has(f.filepath) && f.video?.codec_raw === "av1");
+  }, [selected, files, selectedCount]);
 
   return (
     <div style={{ background: PALETTE.surface, border: `1px solid ${PALETTE.border}`, borderRadius: 12, padding: 20, marginBottom: 16 }}>
@@ -196,6 +201,40 @@ export function MediaSearch({ onAdd }) {
             >
               Gentle +2 CQ ({selectedCount})
             </button>
+          </div>
+
+          {/* Re-encode row — only useful for AV1 files */}
+          <div style={{ display: "flex", gap: 8, marginTop: 8, alignItems: "center" }}>
+            <button
+              onClick={() => handleAdd("reencode", { cq: reencodeCq })}
+              disabled={!hasAv1Selected}
+              style={{
+                flex: 1, padding: "8px 0", borderRadius: 8, border: "none",
+                fontSize: 13, fontWeight: 600,
+                cursor: hasAv1Selected ? "pointer" : "default",
+                background: hasAv1Selected ? PALETTE.orange : PALETTE.surfaceLight,
+                color: hasAv1Selected ? "#000" : PALETTE.textMuted,
+              }}
+            >
+              Re-encode AV1 ({selectedCount})
+            </button>
+            <label style={{ display: "flex", alignItems: "center", gap: 4, color: PALETTE.textMuted, fontSize: 12 }}>
+              CQ
+              <input
+                type="number"
+                min={1}
+                max={51}
+                value={reencodeCq}
+                onChange={(e) => setReencodeCq(Number(e.target.value) || 30)}
+                style={{
+                  width: 48, background: PALETTE.surfaceLight,
+                  border: `1px solid ${PALETTE.border}`, borderRadius: 6,
+                  color: PALETTE.text, fontSize: 13, padding: "4px 6px",
+                  textAlign: "center",
+                  fontFamily: "'JetBrains Mono', monospace",
+                }}
+              />
+            </label>
           </div>
         </>
       )}

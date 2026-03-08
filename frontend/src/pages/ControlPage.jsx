@@ -14,11 +14,13 @@ export function ControlPage() {
   const [skip, setSkip] = useState(null);
   const [priority, setPriority] = useState(null);
   const [gentle, setGentle] = useState(null);
+  const [reencode, setReencode] = useState(null);
   const [flash, setFlash] = useState(null);
 
   useEffect(() => {
     api.getSkip().then(setSkip);
     api.getGentle().then(setGentle);
+    api.getReencode().then(setReencode);
     // Load priority and auto-clean completed items
     Promise.all([api.getPriority(), api.getPipeline()]).then(([prio, pipeline]) => {
       const paths = prio?.paths || [];
@@ -70,7 +72,7 @@ export function ControlPage() {
     refresh();
   };
 
-  const handleSearchAdd = async (list, paths) => {
+  const handleSearchAdd = async (list, paths, extra) => {
     if (list === "skip") {
       const current = skip?.paths || [];
       const merged = [...new Set([...current, ...paths])];
@@ -95,6 +97,17 @@ export function ControlPage() {
       await api.setGentle(updated);
       setGentle(updated);
       showFlash(`Added ${paths.length} to gentle overrides`);
+    } else if (list === "reencode") {
+      const cq = extra?.cq || 30;
+      const current = reencode?.files || {};
+      const updated = { ...current };
+      for (const p of paths) {
+        updated[p] = { cq };
+      }
+      const patterns = reencode?.patterns || {};
+      await api.setReencode(updated, patterns);
+      setReencode({ files: updated, patterns });
+      showFlash(`Added ${paths.length} to re-encode list (CQ ${cq})`);
     }
   };
 
@@ -176,6 +189,169 @@ export function ControlPage() {
           gentle={gentle}
           onSave={async (data) => { await api.setGentle(data); setGentle(data); }}
         />
+      )}
+
+      {/* Re-encode list */}
+      <SectionTitle>Re-encode List</SectionTitle>
+      {reencode && (
+        <div style={{ background: PALETTE.surface, border: `1px solid ${PALETTE.border}`, borderRadius: 12, padding: 16 }}>
+          {Object.keys(reencode.files || {}).length === 0 && Object.keys(reencode.patterns || {}).length === 0 ? (
+            <div style={{ color: PALETTE.textMuted, fontSize: 13 }}>
+              No files or patterns flagged for re-encoding. Use Search above to add files, or add a glob pattern below.
+            </div>
+          ) : null}
+
+          {/* Patterns sub-section */}
+          {Object.keys(reencode.patterns || {}).length > 0 && (
+            <div style={{ marginBottom: Object.keys(reencode.files || {}).length > 0 ? 12 : 0 }}>
+              <div style={{ color: PALETTE.textMuted, fontSize: 11, fontWeight: 600, textTransform: "uppercase", letterSpacing: 1, marginBottom: 6 }}>Patterns</div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                {Object.entries(reencode.patterns).map(([pattern, opts]) => (
+                  <div key={pattern} style={{
+                    display: "flex", alignItems: "center", gap: 10,
+                    padding: "8px 12px", borderRadius: 8,
+                    background: PALETTE.surfaceLight,
+                  }}>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{
+                        color: PALETTE.accent, fontSize: 12,
+                        fontFamily: "'JetBrains Mono', monospace",
+                      }}>
+                        {pattern}
+                      </div>
+                      <div style={{ color: PALETTE.textMuted, fontSize: 10, marginTop: 2 }}>
+                        CQ {opts.cq}
+                      </div>
+                    </div>
+                    <button
+                      onClick={async () => {
+                        const updated = { ...reencode.patterns };
+                        delete updated[pattern];
+                        const files = reencode.files || {};
+                        await api.setReencode(files, updated);
+                        setReencode({ files, patterns: updated });
+                        showFlash("Removed pattern from re-encode list");
+                      }}
+                      style={{
+                        background: "transparent", border: `1px solid ${PALETTE.red}`,
+                        color: PALETTE.red, borderRadius: 6, padding: "4px 10px",
+                        fontSize: 11, cursor: "pointer", flexShrink: 0,
+                      }}
+                    >
+                      Remove
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Exact files sub-section */}
+          {Object.keys(reencode.files || {}).length > 0 && (
+            <div>
+              {Object.keys(reencode.patterns || {}).length > 0 && (
+                <div style={{ color: PALETTE.textMuted, fontSize: 11, fontWeight: 600, textTransform: "uppercase", letterSpacing: 1, marginBottom: 6 }}>Files</div>
+              )}
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                {Object.entries(reencode.files).map(([path, opts]) => (
+                  <div key={path} style={{
+                    display: "flex", alignItems: "center", gap: 10,
+                    padding: "8px 12px", borderRadius: 8,
+                    background: PALETTE.surfaceLight,
+                  }}>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{
+                        color: PALETTE.text, fontSize: 12,
+                        whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+                        fontFamily: "'JetBrains Mono', monospace",
+                      }}>
+                        {path.split("\\").pop() || path}
+                      </div>
+                      <div style={{ color: PALETTE.textMuted, fontSize: 10, marginTop: 2 }}>
+                        CQ {opts.cq}
+                      </div>
+                    </div>
+                    <button
+                      onClick={async () => {
+                        const updated = { ...reencode.files };
+                        delete updated[path];
+                        const patterns = reencode.patterns || {};
+                        await api.setReencode(updated, patterns);
+                        setReencode({ files: updated, patterns });
+                        showFlash("Removed from re-encode list");
+                      }}
+                      style={{
+                        background: "transparent", border: `1px solid ${PALETTE.red}`,
+                        color: PALETTE.red, borderRadius: 6, padding: "4px 10px",
+                        fontSize: 11, cursor: "pointer", flexShrink: 0,
+                      }}
+                    >
+                      Remove
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Add pattern form */}
+          <form
+            onSubmit={async (e) => {
+              e.preventDefault();
+              const form = e.target;
+              const pattern = form.pattern.value.trim();
+              const cq = parseInt(form.cq.value, 10) || 30;
+              if (!pattern) return;
+              const patterns = { ...(reencode.patterns || {}), [pattern]: { cq } };
+              const files = reencode.files || {};
+              await api.setReencode(files, patterns);
+              setReencode({ files, patterns });
+              form.pattern.value = "";
+              showFlash(`Added pattern "${pattern}" at CQ ${cq}`);
+            }}
+            style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 12 }}
+          >
+            <input
+              name="pattern"
+              placeholder="*Seinfeld*"
+              style={{
+                flex: 1, padding: "8px 12px", borderRadius: 8,
+                background: PALETTE.surfaceLight, border: `1px solid ${PALETTE.border}`,
+                color: PALETTE.text, fontSize: 13,
+                fontFamily: "'JetBrains Mono', monospace",
+              }}
+            />
+            <input
+              name="cq"
+              type="number"
+              defaultValue={30}
+              min={1}
+              max={63}
+              style={{
+                width: 60, padding: "8px 10px", borderRadius: 8,
+                background: PALETTE.surfaceLight, border: `1px solid ${PALETTE.border}`,
+                color: PALETTE.text, fontSize: 13, textAlign: "center",
+              }}
+            />
+            <button
+              type="submit"
+              style={{
+                background: PALETTE.accent,
+                color: "#000",
+                border: "none",
+                borderRadius: 8,
+                padding: "8px 16px",
+                fontSize: 12,
+                fontWeight: 600,
+                cursor: "pointer",
+                flexShrink: 0,
+                whiteSpace: "nowrap",
+              }}
+            >
+              Add Pattern
+            </button>
+          </form>
+        </div>
       )}
     </div>
   );

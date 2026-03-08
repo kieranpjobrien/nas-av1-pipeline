@@ -59,6 +59,7 @@ def build_ffmpeg_cmd(input_path: str, output_path: str, item: dict, config: dict
 
     cmd = [
         "ffmpeg", "-y",
+        "-err_detect", "ignore_err",  # continue past corrupt data in input
         "-i", input_path,
         # Map only the first video stream, all audio, and (optionally) subs.
         # Excludes data streams, cover art (mjpeg/bmp), and other junk
@@ -150,7 +151,10 @@ def _remux_to_mkv(input_path: str) -> Optional[str]:
     Returns the remuxed file path on success, or None on failure.
     """
     remuxed_path = input_path + ".remux.mkv"
-    base_cmd = ["ffmpeg", "-y", "-i", input_path]
+    # AVI/MPEG containers often have unset timestamps — generate them
+    needs_genpts = Path(input_path).suffix.lower() in {".avi", ".mpg", ".mpeg", ".vob"}
+    genpts_flags = ["-fflags", "+genpts"] if needs_genpts else []
+    base_cmd = ["ffmpeg", "-y"] + genpts_flags + ["-i", input_path]
     attempts = [
         # First video + all audio + all subs (skips data streams, cover art)
         (base_cmd + ["-map", "0:v:0", "-map", "0:a", "-map", "0:s?", "-c", "copy", remuxed_path], None),

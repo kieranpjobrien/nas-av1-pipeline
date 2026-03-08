@@ -3,8 +3,21 @@
 import os
 from pathlib import Path
 
+# Load .env file if present (stdlib only — no dotenv dependency)
+_env_file = Path(__file__).parent / ".env"
+if _env_file.exists():
+    for line in _env_file.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            key, _, value = line.partition("=")
+            os.environ.setdefault(key.strip(), value.strip())
+
 STAGING_DIR = Path(os.environ.get("AV1_STAGING", r"E:\AV1_Staging"))
 NAS_MOVIES = Path(os.environ.get("NAS_MOVIES", r"Z:\Movies"))
 NAS_SERIES = Path(os.environ.get("NAS_SERIES", r"Z:\Series"))
 
 MEDIA_REPORT = STAGING_DIR / "media_report.json"
+
+# Plex server config (for triggering library scans after renames/encodes)
+PLEX_URL = os.environ.get("PLEX_URL", "http://192.168.4.43:32400")
+PLEX_TOKEN = os.environ.get("PLEX_TOKEN", "")

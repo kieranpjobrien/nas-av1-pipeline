@@ -244,32 +244,46 @@ def stage_replace(source_filepath: str, item: dict, config: dict, state: Pipelin
     state.set_file(source_filepath, FileStatus.REPLACING,
                    dest_path=dest_path, final_path=final_path, backup_path=backup_path)
 
-    try:
-        # Step 1: Rename original → .original.bak (if original still exists)
-        if os.path.exists(source_filepath) and not os.path.exists(backup_path):
-            os.rename(source_filepath, backup_path)
-            logging.info(f"  Backed up original: {os.path.basename(source_filepath)} -> .original.bak")
+    max_retries = 5
+    for attempt in range(max_retries):
+        try:
+            # Step 1: Rename original → .original.bak (if original still exists)
+            if os.path.exists(source_filepath) and not os.path.exists(backup_path):
+                os.rename(source_filepath, backup_path)
+                logging.info(f"  Backed up original: {os.path.basename(source_filepath)} -> .original.bak")
 
-        # Step 2: Rename .av1.mkv → final name
-        if os.path.exists(dest_path) and not os.path.exists(final_path):
-            os.rename(dest_path, final_path)
-            logging.info(f"  Renamed AV1 file -> {final_name}")
-        elif os.path.exists(dest_path) and dest_path != final_path:
-            # final_path already exists (maybe from a previous partial), overwrite
-            os.replace(dest_path, final_path)
+            # Step 2: Rename .av1.mkv → final name
+            if os.path.exists(dest_path) and not os.path.exists(final_path):
+                os.rename(dest_path, final_path)
+                logging.info(f"  Renamed AV1 file -> {final_name}")
+            elif os.path.exists(dest_path) and dest_path != final_path:
+                # final_path already exists (maybe from a previous partial), overwrite
+                os.replace(dest_path, final_path)
 
-        # Step 3: Delete backup
-        if os.path.exists(backup_path):
-            os.remove(backup_path)
-            logging.info(f"  Deleted original backup")
+            # Step 3: Delete backup
+            if os.path.exists(backup_path):
+                os.remove(backup_path)
+                logging.info(f"  Deleted original backup")
 
-        state.set_file(source_filepath, FileStatus.REPLACED, final_path=final_path)
-        logging.info(f"Replaced: {item['filename']} -> {final_name}")
-        return True
+            state.set_file(source_filepath, FileStatus.REPLACED, final_path=final_path)
+            logging.info(f"Replaced: {item['filename']} -> {final_name}")
+            return True
 
-    except Exception as e:
-        logging.error(f"Replace failed: {e}")
-        logging.error(f"  Manual recovery may be needed. Check: {source_dir}")
-        logging.error(f"  Backup: {backup_path}, AV1: {dest_path}, Target: {final_path}")
-        state.set_file(source_filepath, FileStatus.ERROR, error=str(e), stage="replace")
-        return False
+        except PermissionError as e:
+            if attempt < max_retries - 1:
+                wait = 30 * (attempt + 1)
+                logging.warning(f"Replace blocked (file in use), retry {attempt + 1}/{max_retries} in {wait}s: {e}")
+                time.sleep(wait)
+                continue
+            logging.error(f"Replace failed after {max_retries} retries: {e}")
+            logging.error(f"  Manual recovery may be needed. Check: {source_dir}")
+            logging.error(f"  Backup: {backup_path}, AV1: {dest_path}, Target: {final_path}")
+            state.set_file(source_filepath, FileStatus.ERROR, error=str(e), stage="replace")
+            return False
+
+        except Exception as e:
+            logging.error(f"Replace failed: {e}")
+            logging.error(f"  Manual recovery may be needed. Check: {source_dir}")
+            logging.error(f"  Backup: {backup_path}, AV1: {dest_path}, Target: {final_path}")
+            state.set_file(source_filepath, FileStatus.ERROR, error=str(e), stage="replace")
+            return False

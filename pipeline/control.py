@@ -40,6 +40,10 @@ class PipelineControl:
         "priority.json": {
             "paths": [],
         },
+        "reencode.json": {
+            "files": {},
+            "patterns": {},
+        },
     }
 
     def __init__(self, staging_dir: str):
@@ -124,14 +128,19 @@ class PipelineControl:
         return pause.get("type", "all")
 
     def check_pause(self, shutdown_flag: callable) -> None:
-        """Block if any pause file exists. Delete the file to resume."""
+        """Block if paused in a way that affects the main encode loop.
+
+        Only blocks on 'all' or 'encode_only' pauses. Fetch-only pauses are
+        handled separately by the prefetch worker via is_fetch_paused().
+        """
         pause_type = self._get_pause_type()
-        if pause_type is None:
+        if pause_type not in ("all", "encode_only"):
             return
 
         logging.info(f"PAUSED ({pause_type}). Delete the pause file from control/ to resume.")
         while not shutdown_flag():
-            if self._get_pause_type() is None:
+            pt = self._get_pause_type()
+            if pt not in ("all", "encode_only"):
                 break
             time.sleep(5)
         if not shutdown_flag():
@@ -199,6 +208,61 @@ class PipelineControl:
             return {"cq_offset": default_offset}
 
         return None
+
+    def get_reencode_list(self) -> dict:
+        """Get the reencode list: {filepath: {cq: N}, ...}."""
+        data = self._read_control_file("reencode.json")
+        if not data:
+            return {}
+        return data.get("files", {})
+
+    def get_reencode_override(self, filepath: str) -> Optional[dict]:
+        """Get reencode overrides for a file (exact match first, then patterns).
+
+        Returns the override dict (e.g. {"cq": 32}) or None.
+        """
+        data = self._read_control_file("reencode.json")
+        if not data:
+            return None
+
+        norm = os.path.normpath(filepath).lower()
+
+        # Exact file match
+        files = data.get("files", {})
+        for p, overrides in files.items():
+            if os.path.normpath(p).lower() == norm:
+                return overrides
+
+        # Pattern match (glob-style)
+        patterns = data.get("patterns", {})
+        for pattern, overrides in patterns.items():
+            if fnmatch.fnmatch(norm, pattern.lower()):
+                return overrides
+
+        return None
+
+    def remove_reencode(self, filepath: str) -> None:
+        """Remove a completed file from reencode.json."""
+        path = os.path.join(self.control_dir, "reencode.json")
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            return
+
+        files = data.get("files", {})
+        norm = os.path.normpath(filepath).lower()
+        to_remove = [k for k in files if os.path.normpath(k).lower() == norm]
+        if not to_remove:
+            return
+        for k in to_remove:
+            del files[k]
+
+        # Invalidate mtime cache so next read picks up the change
+        self._last_read.pop(path, None)
+
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=4, ensure_ascii=False)
 
     def get_priority_bumps(self) -> list[str]:
         """Get list of filepaths that should be bumped to front of queue."""

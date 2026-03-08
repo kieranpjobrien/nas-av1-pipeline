@@ -312,6 +312,8 @@ def main():
                         help="Output JSON file")
     parser.add_argument("--workers", type=int, default=4,
                         help="Parallel ffprobe workers")
+    parser.add_argument("--full", action="store_true",
+                        help="Force full rescan (ignore cached results)")
     parser.add_argument("--limit", type=int, default=0,
                         help="Limit files to scan (0 = all, useful for testing)")
     parser.add_argument("--non-english-csv", type=str, default=None, metavar="PATH",
@@ -333,11 +335,45 @@ def main():
     if args.limit > 0:
         all_files = all_files[:args.limit]
 
-    print(f"\nScanning {len(all_files)} files with {args.workers} workers...")
+    # Incremental scan: reuse results from existing report for unchanged files
+    # A file is "unchanged" if its filepath and size on disk match the report.
+    cached = {}
+    if not args.full and os.path.exists(args.output):
+        try:
+            with open(args.output, "r", encoding="utf-8") as f:
+                old_report = json.load(f)
+            for entry in old_report.get("files", []):
+                fp = entry.get("filepath", "")
+                sz = entry.get("file_size_bytes", -1)
+                cached[(fp, sz)] = entry
+            print(f"Loaded {len(cached)} cached entries from previous report")
+        except Exception:
+            pass
 
     results = []
+    reused = 0
+    to_probe = []
+
+    for filepath, lib_type in all_files:
+        try:
+            sz = os.path.getsize(filepath)
+        except OSError:
+            sz = -1
+        key = (filepath, sz)
+        if key in cached:
+            results.append(cached[key])
+            reused += 1
+        else:
+            to_probe.append((filepath, lib_type))
+
+    if reused:
+        print(f"Reused {reused} cached results, {len(to_probe)} files need probing")
+
+    print(f"\nScanning {len(to_probe)} files with {args.workers} workers...")
+
     errors = []
     completed = 0
+    total_to_probe = len(to_probe)
 
     def process_file(filepath_and_type):
         filepath, lib_type = filepath_and_type
@@ -347,11 +383,11 @@ def main():
         return extract_info(filepath, probe, lib_type), None
 
     with ThreadPoolExecutor(max_workers=args.workers) as executor:
-        futures = {executor.submit(process_file, f): f for f in all_files}
+        futures = {executor.submit(process_file, f): f for f in to_probe}
         for future in as_completed(futures):
             completed += 1
-            if completed % 50 == 0 or completed == len(all_files):
-                print(f"  Progress: {completed}/{len(all_files)} ({100*completed/len(all_files):.1f}%)")
+            if total_to_probe > 0 and (completed % 50 == 0 or completed == total_to_probe):
+                print(f"  Progress: {completed}/{total_to_probe} ({100*completed/total_to_probe:.1f}%)")
 
             result, error_path = future.result()
             if result:

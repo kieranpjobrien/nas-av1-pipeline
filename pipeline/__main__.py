@@ -8,6 +8,7 @@ import sys
 
 from paths import STAGING_DIR, MEDIA_REPORT
 from pipeline.config import DEFAULT_CONFIG
+from pipeline.control import PipelineControl
 from pipeline.queue import build_priority_queue
 from pipeline.runner import Pipeline
 from pipeline.state import PipelineState
@@ -108,7 +109,15 @@ Examples:
         logging.error(f"Report not found: {args.report}")
         sys.exit(1)
 
-    queue = build_priority_queue(args.report, config, state)
+    control = PipelineControl(args.staging)
+
+    def is_reencode(filepath: str) -> bool:
+        return control.get_reencode_override(filepath) is not None
+
+    reencode_data = control._read_control_file("reencode.json") or {}
+    has_reencode = bool(reencode_data.get("files") or reencode_data.get("patterns"))
+    queue = build_priority_queue(args.report, config, state,
+                                 is_reencode=is_reencode if has_reencode else None)
 
     # Filter by tier if requested
     if args.tier:

@@ -10,6 +10,7 @@ Usage:
 """
 
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -41,6 +42,10 @@ class GentleRequest(BaseModel):
     paths: dict = {}
     patterns: dict = {}
     default_offset: int = 0
+
+class ReencodeRequest(BaseModel):
+    files: dict = {}
+    patterns: dict = {}
 
 class KeywordListRequest(BaseModel):
     keywords: list[str]
@@ -192,6 +197,60 @@ class ProcessManager:
             proc.terminate()
             return {"ok": True, "method": "terminated"}
 
+    def force_kill(self, name: str) -> dict:
+        """Kill any OS process matching this pipeline command, even if not started by us."""
+        import signal
+        cfg = PROCESS_CONFIGS.get(name)
+        if not cfg:
+            raise ValueError(f"Unknown process: {name}")
+
+        # The module name to search for (e.g. "-m pipeline" or "-m tools.scanner")
+        module_flag = cfg["cmd"][-1] if "-m" in cfg["cmd"] else None
+        if not module_flag:
+            return {"ok": False, "error": "Cannot identify process command"}
+
+        killed = []
+        try:
+            # Use tasklist /v to find python processes, then filter by command line
+            result = subprocess.run(
+                ["wmic", "process", "where", "name='python.exe'", "get",
+                 "processid,commandline", "/format:csv"],
+                capture_output=True, text=True, timeout=10,
+            )
+            my_pid = os.getpid()
+            for line in result.stdout.strip().splitlines():
+                if module_flag not in line:
+                    continue
+                # CSV format: Node,CommandLine,ProcessId
+                parts = line.strip().split(",")
+                if len(parts) < 3:
+                    continue
+                try:
+                    pid = int(parts[-1])
+                except ValueError:
+                    continue
+                if pid == my_pid:
+                    continue  # don't kill the dashboard
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                    killed.append(pid)
+                except OSError:
+                    pass
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+        # Also clean up our tracked process if it matches
+        with self._lock:
+            proc = self._procs.get(name)
+            if proc and proc.poll() is None:
+                proc.terminate()
+                if proc.pid not in killed:
+                    killed.append(proc.pid)
+
+        if not killed:
+            return {"ok": False, "error": f"No {name} process found"}
+        return {"ok": True, "killed": killed}
+
     def status(self, name: str) -> dict:
         proc = self._procs.get(name)
         if not proc:
@@ -241,6 +300,7 @@ def get_control_status():
         "has_skip": file_exists("skip.json"),
         "has_priority": file_exists("priority.json"),
         "has_gentle": file_exists("gentle.json"),
+        "has_reencode": file_exists("reencode.json"),
     }
 
 
@@ -260,6 +320,18 @@ def get_priority():
 def get_gentle():
     data = read_json_safe(CONTROL_DIR / "gentle.json")
     return data or {"paths": {}, "patterns": {}, "default_offset": 0}
+
+
+@app.get("/api/control/reencode")
+def get_reencode():
+    data = read_json_safe(CONTROL_DIR / "reencode.json")
+    return data or {"files": {}, "patterns": {}}
+
+
+@app.put("/api/control/reencode")
+def set_reencode(req: ReencodeRequest):
+    drop_file("reencode.json", {"files": req.files, "patterns": req.patterns})
+    return {"ok": True, "count": len(req.files), "pattern_count": len(req.patterns)}
 
 
 @app.get("/api/control/custom-tags")
@@ -369,6 +441,16 @@ def stop_process(name: str):
     if name not in VALID_PROCESS_NAMES:
         raise HTTPException(404, f"Unknown process: {name}")
     result = pm.stop(name)
+    if not result["ok"]:
+        raise HTTPException(409, result["error"])
+    return result
+
+
+@app.post("/api/process/{name}/kill")
+def kill_process(name: str):
+    if name not in VALID_PROCESS_NAMES:
+        raise HTTPException(404, f"Unknown process: {name}")
+    result = pm.force_kill(name)
     if not result["ok"]:
         raise HTTPException(409, result["error"])
     return result

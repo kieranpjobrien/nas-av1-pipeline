@@ -4,7 +4,7 @@
 DEFAULT_CONFIG = {
     # Staging limits (bytes)
     "max_staging_bytes": 2_500_000_000_000,       # 2.5 TB total local staging
-    "max_fetch_buffer_bytes": 1_000_000_000_000,   # 1 TB fetch buffer
+    "max_fetch_buffer_bytes": 200_000_000_000,      # 200 GB fetch buffer
     "min_free_space_bytes": 50_000_000_000,        # 50 GB minimum free on staging drive
 
     # Encoding: NVENC AV1 (RTX 4080)

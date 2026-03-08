@@ -89,8 +89,14 @@ const FILENAME_PATTERNS = [
   { key: "resolution", label: "Resolution tags", test: (stem) => /\b(1080p|720p|480p|2160p|4K|UHD)\b/i.test(stem) },
   { key: "source", label: "Source tags", test: (stem) => /\b(WEB[-.]?DL|WEBRip|BluRay|BDRip|HDTV|DVDRip|REMUX)\b/i.test(stem) },
   { key: "codec", label: "Codec tags", test: (stem) => /\b(x264|x265|H\.?264|H\.?265|HEVC|AVC)\b/i.test(stem) },
-  { key: "group", label: "Release groups", test: (stem) => /\[-?[A-Za-z0-9]+\]\s*$/.test(stem) || /\[[-A-Za-z0-9.]+\]/.test(stem) },
-  { key: "service", label: "Service tags", test: (stem) => /\b(AMZN|DSNP|NF|HULU|MAX|HBO|ATVP|PCOK|PMTP)\b/i.test(stem) },
+  { key: "group", label: "Release groups", test: (stem) => {
+    // Bracket at end: [GROUP] but not common words like [Halloween], [Extended]
+    const endBracket = stem.match(/\[([A-Za-z0-9.-]+)\]\s*$/);
+    if (endBracket && /[0-9]|^[A-Z]{2,}$|x26[45]|rip|web|blu/i.test(endBracket[1])) return true;
+    // Bracket with tech content anywhere
+    return /\[[-A-Za-z0-9.]*(?:x264|x265|WEB|BluRay|HDTV|DL|Rip|720|1080|2160)[-A-Za-z0-9.]*\]/i.test(stem);
+  }},
+  { key: "service", label: "Service tags", test: (stem) => /\b(AMZN|DSNP|HULU|HBO|ATVP|PCOK|PMTP)\b/i.test(stem) || /\bMAX\b/.test(stem) },
 ];
 
 function analyseFilenames(files) {

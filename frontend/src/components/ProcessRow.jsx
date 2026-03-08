@@ -62,8 +62,26 @@ export function ProcessRow({ name, label, startLabel, onFlash }) {
     try {
       await api.stopProcess(name);
       onFlash(`${label} stopped`);
+    } catch {
+      // Stop failed (process not started by dashboard) — try force kill
+      try {
+        const res = await api.killProcess(name);
+        onFlash(`${label} killed (pids: ${res.killed?.join(", ")})`);
+      } catch (e2) {
+        onFlash(`Failed to stop ${label}: ${e2.message}`);
+      }
+    }
+    setBusy(false);
+    poll();
+  };
+
+  const handleKill = async () => {
+    setBusy(true);
+    try {
+      const res = await api.killProcess(name);
+      onFlash(`${label} killed (pids: ${res.killed?.join(", ")})`);
     } catch (e) {
-      onFlash(`Failed to stop ${label}: ${e.message}`);
+      onFlash(`No ${label} process found`);
     }
     setBusy(false);
     poll();
@@ -105,6 +123,20 @@ export function ProcessRow({ name, label, startLabel, onFlash }) {
             }}
           >
             Stop
+          </button>
+          <button
+            onClick={handleKill}
+            disabled={busy}
+            title="Kill any running instance, even if started from terminal"
+            style={{
+              background: busy ? PALETTE.surfaceLight : PALETTE.accentWarm,
+              color: busy ? PALETTE.textMuted : "#fff",
+              border: "none", borderRadius: 8, padding: "8px 12px",
+              fontSize: 13, fontWeight: 600,
+              cursor: busy ? "default" : "pointer",
+            }}
+          >
+            Kill
           </button>
           <button
             onClick={() => setLogsOpen(!logsOpen)}

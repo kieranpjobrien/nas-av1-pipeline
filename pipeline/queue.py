@@ -2,11 +2,14 @@
 
 import json
 import logging
+import os
+from typing import Callable, Optional
 
 from pipeline.state import FileStatus, PipelineState
 
 
-def build_priority_queue(report_path: str, config: dict, state: PipelineState) -> list[dict]:
+def build_priority_queue(report_path: str, config: dict, state: PipelineState,
+                         is_reencode: Optional[Callable] = None) -> list[dict]:
     """Load report, filter already-AV1 files, sort by priority tier then file size."""
     with open(report_path, "r", encoding="utf-8") as f:
         report = json.load(f)
@@ -22,12 +25,13 @@ def build_priority_queue(report_path: str, config: dict, state: PipelineState) -
         resolution = video.get("resolution_class", "")
         bitrate = f.get("overall_bitrate_kbps", 0) or 0
 
-        # Skip already AV1
+        # Skip already AV1 (unless flagged for re-encode)
         if codec_raw in ("av1",):
-            existing = state.get_file(filepath)
-            if not existing:
-                state.set_file(filepath, FileStatus.SKIPPED, reason="already AV1")
-            continue
+            if not (is_reencode and is_reencode(filepath)):
+                existing = state.get_file(filepath)
+                if not existing:
+                    state.set_file(filepath, FileStatus.SKIPPED, reason="already AV1")
+                continue
 
         # Skip unknown codec
         if codec == "unknown":
@@ -39,7 +43,11 @@ def build_priority_queue(report_path: str, config: dict, state: PipelineState) -
         # Check if already completed
         existing = state.get_file(filepath)
         if existing and existing["status"] in (FileStatus.VERIFIED.value, FileStatus.SKIPPED.value):
-            continue
+            # Re-encode files get their state reset so they re-enter the queue
+            if is_reencode and is_reencode(filepath):
+                state.set_file(filepath, FileStatus.PENDING, reason="flagged for re-encode")
+            else:
+                continue
 
         # Assign priority tier
         tier_idx = len(config["priority_tiers"])  # default: lowest

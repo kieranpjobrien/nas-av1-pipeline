@@ -91,24 +91,47 @@ class Pipeline:
         while not self._shutdown:
             usage = get_staging_usage(self.staging_dir)
             free = get_free_space(self.staging_dir)
+            # Also check fetch buffer — stage_fetch has its own limit
+            fetch_dir = os.path.join(self.staging_dir, "fetch")
+            fetch_usage = 0
+            if os.path.exists(fetch_dir):
+                for f in os.listdir(fetch_dir):
+                    try:
+                        fetch_usage += os.path.getsize(os.path.join(fetch_dir, f))
+                    except OSError:
+                        pass
             if (usage < self.config["max_staging_bytes"] and
-                    free > self.config["min_free_space_bytes"]):
+                    free > self.config["min_free_space_bytes"] and
+                    fetch_usage < self.config["max_fetch_buffer_bytes"]):
                 return True
             logging.info(f"Waiting for staging space... "
-                         f"(used: {format_bytes(usage)}, free: {format_bytes(free)})")
+                         f"(used: {format_bytes(usage)}, fetch: {format_bytes(fetch_usage)}, free: {format_bytes(free)})")
             time.sleep(30)
         return False
 
     def _prefetch_worker(self, queue: list[dict]):
         """Background thread: pre-fetch files from NAS while encoder is busy.
 
-        Loops through the queue repeatedly until all items are fetched or
-        the pipeline shuts down. This ensures priority items (which may be
-        added after the initial queue is built) eventually get fetched.
+        Keeps a small lookahead buffer of pre-fetched files so the GPU never
+        idles waiting on network. Limits to MAX_PREFETCH_AHEAD files to avoid
+        filling the entire staging drive with pre-fetched data.
         """
+        MAX_PREFETCH_AHEAD = 5  # max un-encoded files in fetch buffer
+
         logging.info("Prefetch thread started")
         while not self._shutdown:
             fetched_any = False
+
+            # Count how many files are fetched but not yet encoded
+            pending_fetched = len(self.state.get_files_by_status(FileStatus.FETCHED))
+            if pending_fetched >= MAX_PREFETCH_AHEAD:
+                # Enough files queued for encoding, wait before fetching more
+                for _ in range(6):
+                    if self._shutdown:
+                        break
+                    time.sleep(5)
+                continue
+
             for item in queue:
                 if self._shutdown:
                     break
@@ -125,6 +148,11 @@ class Pipeline:
                 # Skip if control system says so
                 if self.control.should_skip(filepath):
                     continue
+
+                # Re-check lookahead limit before each fetch
+                pending_fetched = len(self.state.get_files_by_status(FileStatus.FETCHED))
+                if pending_fetched >= MAX_PREFETCH_AHEAD:
+                    break
 
                 # Respect fetch pause
                 while self.control.is_fetch_paused() and not self._shutdown:
@@ -148,9 +176,13 @@ class Pipeline:
         logging.info("Prefetch thread finished")
 
     def _apply_gentle_overrides(self, item: dict) -> dict:
-        """Apply per-file CQ/preset overrides from gentle.json. Returns modified config."""
+        """Apply per-file CQ/preset overrides from gentle.json and reencode.json."""
         overrides = self.control.get_gentle_override(item["filepath"])
-        if not overrides:
+
+        # Check reencode list for absolute CQ override (exact files + patterns)
+        reencode_entry = self.control.get_reencode_override(item["filepath"])
+
+        if not overrides and not reencode_entry:
             return self.config
 
         config = copy.deepcopy(self.config)
@@ -158,18 +190,24 @@ class Pipeline:
         content_type = params["content_type"]
         res_key = params["res_key"]
 
-        if "cq_offset" in overrides:
-            current_cq = config["cq"][content_type][res_key]
-            config["cq"][content_type][res_key] = max(1, current_cq + overrides["cq_offset"])
-            logging.info(f"  Gentle override: CQ {current_cq} -> {config['cq'][content_type][res_key]}")
+        if overrides:
+            if "cq_offset" in overrides:
+                current_cq = config["cq"][content_type][res_key]
+                config["cq"][content_type][res_key] = max(1, current_cq + overrides["cq_offset"])
+                logging.info(f"  Gentle override: CQ {current_cq} -> {config['cq'][content_type][res_key]}")
 
-        if "cq" in overrides:
-            config["cq"][content_type][res_key] = overrides["cq"]
-            logging.info(f"  Gentle override: CQ -> {overrides['cq']}")
+            if "cq" in overrides:
+                config["cq"][content_type][res_key] = overrides["cq"]
+                logging.info(f"  Gentle override: CQ -> {overrides['cq']}")
 
-        if "preset" in overrides:
-            config["nvenc_preset"][content_type][res_key] = overrides["preset"]
-            logging.info(f"  Gentle override: Preset -> {overrides['preset']}")
+            if "preset" in overrides:
+                config["nvenc_preset"][content_type][res_key] = overrides["preset"]
+                logging.info(f"  Gentle override: Preset -> {overrides['preset']}")
+
+        # Reencode CQ takes final priority (absolute value, not offset)
+        if reencode_entry and "cq" in reencode_entry:
+            config["cq"][content_type][res_key] = reencode_entry["cq"]
+            logging.info(f"  Reencode override: CQ -> {reencode_entry['cq']}")
 
         return config
 
@@ -256,9 +294,10 @@ class Pipeline:
             if not entry:
                 continue
 
-            # Skip already-AV1
+            # Skip already-AV1 (unless in reencode list/patterns)
             if (entry.get("video", {}).get("codec_raw") or "") == "av1":
-                continue
+                if self.control.get_reencode_override(path) is None:
+                    continue
 
             item = self._build_queue_item(entry)
             new_items.append(item)
@@ -280,13 +319,31 @@ class Pipeline:
         # Apply gentle overrides for this file
         effective_config = self._apply_gentle_overrides(item)
 
-        # Recover zombie states from crashed runs: if stuck in FETCHING/ENCODING/UPLOADING
+        # Recover zombie states from crashed runs: if stuck in ENCODING/UPLOADING
         # and the local file is gone, reset to PENDING so we re-fetch.
-        if current_status in (FileStatus.FETCHING.value, FileStatus.ENCODING.value,
-                               FileStatus.UPLOADING.value):
+        # Note: FETCHING recovery is done at startup only (run() method) to avoid
+        # racing with the active prefetch thread during normal operation.
+        if current_status in (FileStatus.ENCODING.value, FileStatus.UPLOADING.value):
             local_path = (existing or {}).get("local_path", "")
             if not local_path or not os.path.exists(local_path):
-                logging.info(f"Recovering stale {current_status} state: {item['filename']}")
+                logging.info(f"Recovering stale {current_status} state (file gone): {item['filename']}")
+                self.state.set_file(filepath, FileStatus.PENDING)
+                current_status = FileStatus.PENDING.value
+
+        # If FETCHING, the prefetch thread is actively copying — wait for it
+        if current_status == FileStatus.FETCHING.value:
+            logging.debug(f"Waiting for prefetch to complete: {item['filename']}")
+            for _ in range(120):  # wait up to 10 minutes
+                if self._shutdown:
+                    return False
+                time.sleep(5)
+                existing = self.state.get_file(filepath)
+                current_status = existing["status"] if existing else None
+                if current_status != FileStatus.FETCHING.value:
+                    break
+            if current_status == FileStatus.FETCHING.value:
+                # Still fetching after 10 min — likely stale, reset
+                logging.warning(f"Fetch timed out, resetting: {item['filename']}")
                 self.state.set_file(filepath, FileStatus.PENDING)
                 current_status = FileStatus.PENDING.value
 
@@ -421,6 +478,72 @@ class Pipeline:
         os.makedirs(os.path.join(self.staging_dir, "fetch"), exist_ok=True)
         os.makedirs(os.path.join(self.staging_dir, "encoded"), exist_ok=True)
 
+        # Recover zombie states from any previous crashed run before processing.
+        # This runs once at startup so stale FETCHING/ENCODING/UPLOADING entries
+        # don't block the main loop or fill staging forever.
+        zombie_count = 0
+        for item in queue:
+            filepath = item["filepath"]
+            existing = self.state.get_file(filepath)
+            if not existing:
+                continue
+            status = existing["status"]
+            local_path = existing.get("local_path", "")
+            output_path = existing.get("output_path", "")
+            dest_path = existing.get("dest_path", "")
+
+            if status == FileStatus.FETCHING.value:
+                if local_path and os.path.exists(local_path):
+                    self.state.set_file(filepath, FileStatus.FETCHED, local_path=local_path)
+                else:
+                    self.state.set_file(filepath, FileStatus.PENDING)
+                zombie_count += 1
+            elif status == FileStatus.ENCODING.value:
+                if output_path and os.path.exists(output_path):
+                    self.state.set_file(filepath, FileStatus.ENCODED)
+                elif local_path and os.path.exists(local_path):
+                    self.state.set_file(filepath, FileStatus.FETCHED)
+                else:
+                    self.state.set_file(filepath, FileStatus.PENDING)
+                zombie_count += 1
+            elif status == FileStatus.UPLOADING.value:
+                if dest_path and os.path.exists(dest_path):
+                    self.state.set_file(filepath, FileStatus.UPLOADED)
+                elif output_path and os.path.exists(output_path):
+                    self.state.set_file(filepath, FileStatus.ENCODED)
+                else:
+                    self.state.set_file(filepath, FileStatus.PENDING)
+                zombie_count += 1
+
+        if zombie_count:
+            logging.info(f"Recovered {zombie_count} zombie states from previous crash")
+
+        # Clean up orphaned fetch files — files in state that aren't in the queue
+        # (e.g. after strip_tags renamed files on the NAS and a rescan updated the report)
+        queue_fps = {item["filepath"] for item in queue}
+        orphan_count = 0
+        orphan_bytes = 0
+        for filepath, info in list(self.state.data["files"].items()):
+            if filepath in queue_fps:
+                continue
+            if info["status"] not in (FileStatus.FETCHED.value, FileStatus.FETCHING.value):
+                continue
+            local_path = info.get("local_path", "")
+            if local_path and os.path.exists(local_path):
+                try:
+                    orphan_bytes += os.path.getsize(local_path)
+                    os.remove(local_path)
+                except OSError:
+                    pass
+            info["status"] = FileStatus.SKIPPED.value
+            info["reason"] = "orphaned after rename"
+            orphan_count += 1
+
+        if orphan_count:
+            self.state.save()
+            logging.info(f"Cleaned up {orphan_count} orphaned fetch files "
+                         f"({format_bytes(orphan_bytes)} freed)")
+
         # Apply control overrides to queue (skip, priority bumps)
         queue = self.control.apply_queue_overrides(queue)
 
@@ -473,8 +596,9 @@ class Pipeline:
 
                 all_done = False
 
-                # Ready to process: fetched, or mid-pipeline resume states.
-                if status in (FileStatus.FETCHED.value,
+                # Ready to process: fetched, mid-pipeline resume states, or
+                # stale FETCHING from a crashed run (zombie recovery handles it).
+                if status in (FileStatus.FETCHING.value, FileStatus.FETCHED.value,
                                FileStatus.ENCODING.value, FileStatus.ENCODED.value,
                                FileStatus.UPLOADING.value, FileStatus.UPLOADED.value,
                                FileStatus.REPLACING.value):
@@ -483,11 +607,6 @@ class Pipeline:
 
                 # Track first pending item for inline-fetch fallback
                 if first_pending is None and status in (None, FileStatus.PENDING.value):
-                    # If this pending item is priority, immediately prefer it
-                    # over any fetched non-priority items deeper in the queue
-                    if os.path.normpath(filepath).lower() in priority_set:
-                        ready_item = item
-                        break
                     first_pending = item
 
             if all_done:
@@ -515,7 +634,16 @@ class Pipeline:
                          f"{ready_item['filename']} ({format_bytes(ready_item['file_size_bytes'])})")
 
             success = self.process_item(ready_item)
-            if not success and not self._shutdown:
+            if not success:
+                # If item is still PENDING after process_item failed, the fetch
+                # buffer is likely full — wait before retrying to avoid tight loop
+                existing = self.state.get_file(filepath)
+                if existing and existing["status"] in (None, FileStatus.PENDING.value):
+                    time.sleep(30)
+            if success:
+                # Auto-clean reencode list after completion
+                self.control.remove_reencode(filepath)
+            elif not self._shutdown:
                 self.state.stats["errors"] += 1
                 self.state.save()
 
