@@ -32,20 +32,25 @@ _BASE_TAG_PARTS = (
     r"|WEB[-.]?DL|WEBRip|BluRay|Blu[-.]?Ray|BDRip|BDRemux|HDTV|DVDRip|REMUX|WEB"
     # Streaming services
     r"|NF|AMZN|DSNP|HULU|MAX|HBO|ATVP|PCOK|PMTP|STAN|CRAV|Netflix"
+    r"|BINGE|ROKU|iT|MA|CRITERION|MUBI|TUBI|SHUDDER|PMNP|SHO|STRP"
     # Video codecs
-    r"|x264|x265|H\.?264|H\.?265|HEVC|AVC|AV1|XviD|DivX"
+    r"|x264|x265|H\.?264|H\.?265|HEVC|AVC|AV1|XviD|DivX|VP9|VP8|MPEG[24]"
     # Audio codecs / channels
     r"|TrueHD\d*\.?\d*|AAC\d*\.?\d*|DDP?\d*\.?\d*|DD\+?\d*\.?\d*"
-    r"|Atmos|DTS(?:[-.]?HD)?|FLAC|AC3|EAC3"
+    r"|Atmos|DTS(?:[-.]?HD(?:[\s.]?MA)?)?|FLAC|AC3|EAC3|LPCM|Opus"
     r"|5[\s.]1|7[\s.]1|2[\s.]0|51"
-    # HDR / color
+    # HDR / color / bit depth
     r"|SDR|HDR\d*|HDR10\+?|DV|DoVi|Dolby[\s.]?Vision|HLG"
+    r"|10bit|8bit|12bit"
     # Language tags
     r"|DUAL|MULTi|English|German|POLISH|iTALiAN|FRENCH|SPANISH"
     r"|NORDiC|DUTCH|SWEDISH|FINNISH|DANISH|NORWEGIAN|CZECH"
     r"|HUNGARIAN|TURKISH|ARABIC|DL"
+    r"|PORTUGUESE|RUSSIAN|JAPANESE|KOREAN|CHINESE|HINDI|THAI"
+    r"|ROMANIAN|GREEK|BULGARIAN|CROATIAN|SERBIAN|UKRAINIAN"
     # Release tags
     r"|REPACK\d*|INTERNAL|PROPER|HYBRID|Hybrid"
+    r"|EXTENDED|UNRATED|THEATRICAL|IMAX|OPEN[\s.]?MATTE"
     # Lone resolution "p" (from stripped "1080p") — lowercase only, as standalone token
     # Uses inline (?-i:p) to match only lowercase despite global IGNORECASE flag
     r"|(?<=[\s.])(?-i:p)(?=[\s.]|$|[A-Z])"
@@ -225,7 +230,8 @@ def clean_series_name(stem: str, tag_re: re.Pattern = TAG_BOUNDARY_RE) -> str | 
     _JUNK_WORDS = re.compile(
         r"\b(Hybrid|DDP|AAC|AC3|TrueHD|Atmos|BluRay|Bluray|HDTV|Dtsa|AVC"
         r"|WebHD|DLWeb|DLAudio|WEBRip|Webrip|REMUX|REPACK|HLG|WEBh264"
-        r"|iTALiAN|MULTi|NORDiC)\b",
+        r"|iTALiAN|MULTi|NORDiC|LPCM|Opus|VP9|MPEG[24]"
+        r"|PORTUGUESE|RUSSIAN|JAPANESE|KOREAN|CHINESE|HINDI)\b",
         re.IGNORECASE,
     )
     # Catch concatenated junk like "Hybrid1English", "SDR1English", "10+DDP...",
@@ -265,8 +271,18 @@ def clean_series_name(stem: str, tag_re: re.Pattern = TAG_BOUNDARY_RE) -> str | 
     return f"{title} {episode_marker}"
 
 
+    # Edition tags to preserve after movie year (these are part of the title identity)
+_EDITION_RE = re.compile(
+    r"(?:Director'?s?[\s.]?Cut|Extended[\s.]?(?:Edition|Cut)?|Unrated[\s.]?(?:Edition|Cut)?"
+    r"|Theatrical[\s.]?(?:Cut)?|IMAX[\s.]?(?:Edition)?|Open[\s.]?Matte"
+    r"|Remastered|Criterion[\s.]?(?:Edition)?|Special[\s.]?Edition"
+    r"|Ultimate[\s.]?(?:Edition|Cut)?)",
+    re.IGNORECASE,
+)
+
+
 def clean_movie_name(stem: str, tag_re: re.Pattern = TAG_BOUNDARY_RE) -> str | None:
-    """Find year anchor, keep title + (year), strip everything after.
+    """Find year anchor, keep title + (year) + edition tag, strip everything after.
 
     Returns cleaned name or None if no year anchor found.
     """
@@ -284,6 +300,15 @@ def clean_movie_name(stem: str, tag_re: re.Pattern = TAG_BOUNDARY_RE) -> str | N
         title = _dots_to_spaces(title).strip()
         if not title:
             continue
+
+        # Check for edition tag after the year
+        after_year = stem[m.end():]
+        after_year_clean = _dots_to_spaces(after_year).strip()
+        edition_match = _EDITION_RE.match(after_year_clean)
+        if edition_match:
+            edition = edition_match.group(0).strip()
+            return f"{title} ({year}) {edition}"
+
         return f"{title} ({year})"
 
     return None
