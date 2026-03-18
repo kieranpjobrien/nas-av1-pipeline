@@ -12,4 +12,5 @@ dependencies = [
 pipeline = "pipeline.__main__:main"
 scan = "tools.scanner:main"
 subtitles = "tools.subtitles:main"
+plex-collections = "tools.plex_collections:main"
 dashboard = "server:run"
