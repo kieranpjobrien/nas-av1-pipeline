@@ -11,4 +11,5 @@ dependencies = [
 [project.scripts]
 pipeline = "pipeline.__main__:main"
 scan = "tools.scanner:main"
+subtitles = "tools.subtitles:main"
 dashboard = "server:run"
