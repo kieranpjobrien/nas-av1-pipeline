@@ -175,21 +175,38 @@ class Pipeline:
 
         logging.info("Prefetch thread finished")
 
+    def _resolve_profile(self, filepath: str) -> str:
+        """Get the quality profile for a file from profiles.json."""
+        return self.control.get_quality_profile(filepath)
+
     def _apply_gentle_overrides(self, item: dict) -> dict:
-        """Apply per-file CQ/preset overrides from gentle.json and reencode.json."""
-        overrides = self.control.get_gentle_override(item["filepath"])
+        """Apply quality profile, per-file CQ/preset overrides, and reencode overrides.
 
-        # Check reencode list for absolute CQ override (exact files + patterns)
-        reencode_entry = self.control.get_reencode_override(item["filepath"])
+        Priority order (later wins): profile → gentle.json → reencode.json
+        """
+        filepath = item["filepath"]
+        profile = self._resolve_profile(filepath)
+        overrides = self.control.get_gentle_override(filepath)
+        reencode_entry = self.control.get_reencode_override(filepath)
 
-        if not overrides and not reencode_entry:
+        if profile == "baseline" and not overrides and not reencode_entry:
             return self.config
 
         config = copy.deepcopy(self.config)
-        params = resolve_encode_params(config, item)
+        # Resolve with profile applied
+        params = resolve_encode_params(config, item, profile_name=profile)
         content_type = params["content_type"]
         res_key = params["res_key"]
 
+        if profile != "baseline":
+            # Bake profile-adjusted values into the config copy
+            config["cq"][content_type][res_key] = params["cq"]
+            config["nvenc_preset"][content_type][res_key] = params["preset"]
+            config["nvenc_multipass"][content_type][res_key] = params["multipass"]
+            config["nvenc_lookahead"][content_type][res_key] = params["lookahead"]
+            logging.info(f"  Quality profile: {profile} (CQ {params['cq']}, {params['preset']})")
+
+        # Gentle overrides stack on top of profile
         if overrides:
             if "cq_offset" in overrides:
                 current_cq = config["cq"][content_type][res_key]

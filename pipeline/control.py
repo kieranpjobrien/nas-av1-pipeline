@@ -44,6 +44,12 @@ class PipelineControl:
             "files": {},
             "patterns": {},
         },
+        "profiles.json": {
+            "_comment": "Assign content to quality profiles: protected, baseline, lossy",
+            "paths": {},
+            "patterns": {},
+            "default": "baseline",
+        },
     }
 
     def __init__(self, staging_dir: str):
@@ -208,6 +214,44 @@ class PipelineControl:
             return {"cq_offset": default_offset}
 
         return None
+
+    def get_quality_profile(self, filepath: str) -> str:
+        """Get the quality profile for a file (protected/baseline/lossy).
+
+        profiles.json format:
+        {
+            "paths": {
+                "Z:\\Series\\Seinfeld\\": "lossy",
+                "Z:\\Movies\\Interstellar (2014)\\": "protected"
+            },
+            "patterns": {
+                "*Seinfeld*": "lossy",
+                "*IMAX*": "protected"
+            },
+            "default": "baseline"
+        }
+        Path matching uses startswith so directory prefixes match all files within.
+        """
+        data = self._read_control_file("profiles.json")
+        if not data:
+            return "baseline"
+
+        norm = os.path.normpath(filepath).lower()
+
+        # Exact or prefix path match
+        paths = data.get("paths", {})
+        for p, profile in paths.items():
+            norm_p = os.path.normpath(p).lower()
+            if norm == norm_p or norm.startswith(norm_p + os.sep) or norm.startswith(norm_p):
+                return profile
+
+        # Pattern match (glob-style)
+        patterns = data.get("patterns", {})
+        for pattern, profile in patterns.items():
+            if fnmatch.fnmatch(norm, pattern.lower()):
+                return profile
+
+        return data.get("default", "baseline")
 
     def get_reencode_list(self) -> dict:
         """Get the reencode list: {filepath: {cq: N}, ...}."""

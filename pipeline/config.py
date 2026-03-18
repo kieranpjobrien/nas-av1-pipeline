@@ -1,5 +1,43 @@
 """Pipeline configuration defaults and constants."""
 
+# Quality profiles — named presets that modify encoding params.
+# "baseline" is the default. "protected" preserves quality (reference films).
+# "lossy" trades quality for space savings (sitcoms, reality TV, etc.).
+#
+# Each profile provides offsets or overrides applied on top of DEFAULT_CONFIG.
+# - cq_offset: added to base CQ (negative = better quality, positive = worse)
+# - preset_override: force a specific NVENC preset (None = use base)
+# - multipass_override: force multipass mode (None = use base)
+# - lookahead_override: force lookahead frames (None = use base)
+# - temporal_aq: override temporal AQ (None = use base)
+QUALITY_PROFILES = {
+    "protected": {
+        "description": "High quality — reference films, visually important content",
+        "cq_offset": -3,
+        "preset_override": "p7",
+        "multipass_override": "fullres",
+        "lookahead_override": 32,
+        "temporal_aq": True,
+    },
+    "baseline": {
+        "description": "Standard encoding — good balance of quality and space",
+        "cq_offset": 0,
+        "preset_override": None,
+        "multipass_override": None,
+        "lookahead_override": None,
+        "temporal_aq": None,
+    },
+    "lossy": {
+        "description": "Aggressive compression — expendable content (sitcoms, reality TV)",
+        "cq_offset": 6,
+        "preset_override": "p4",
+        "multipass_override": "disabled",
+        "lookahead_override": 16,
+        "temporal_aq": False,
+    },
+}
+
+
 # Default configuration — all values can be overridden via CLI args
 DEFAULT_CONFIG = {
     # Staging limits (bytes)
@@ -83,10 +121,10 @@ def get_res_key(item: dict) -> str:
     return "SD"
 
 
-def resolve_encode_params(config: dict, item: dict) -> dict:
-    """Resolve NVENC encode parameters based on content type and resolution.
+def resolve_encode_params(config: dict, item: dict, profile_name: str = "baseline") -> dict:
+    """Resolve NVENC encode parameters based on content type, resolution, and quality profile.
 
-    Returns dict with keys: cq, preset, multipass, lookahead, maxrate, bufsize.
+    Returns dict with keys: cq, preset, multipass, lookahead, maxrate, bufsize, profile.
     """
     library_type = item.get("library_type", "movie")
     content_type = "series" if library_type in ("series", "show", "tv", "anime") else "movie"
@@ -103,13 +141,27 @@ def resolve_encode_params(config: dict, item: dict) -> dict:
     else:
         res_key = "SD"
 
+    base_cq = config["cq"].get(content_type, {}).get(res_key, 30)
+    base_preset = config["nvenc_preset"].get(content_type, {}).get(res_key, "p4")
+    base_multipass = config["nvenc_multipass"].get(content_type, {}).get(res_key, "disabled")
+    base_lookahead = config["nvenc_lookahead"].get(content_type, {}).get(res_key, 16)
+
+    # Apply quality profile adjustments
+    profile = QUALITY_PROFILES.get(profile_name, QUALITY_PROFILES["baseline"])
+    cq = max(1, base_cq + profile["cq_offset"])
+    preset = profile["preset_override"] or base_preset
+    multipass = profile["multipass_override"] or base_multipass
+    lookahead = profile["lookahead_override"] or base_lookahead
+
     return {
-        "cq": config["cq"].get(content_type, {}).get(res_key, 30),
-        "preset": config["nvenc_preset"].get(content_type, {}).get(res_key, "p4"),
-        "multipass": config["nvenc_multipass"].get(content_type, {}).get(res_key, "disabled"),
-        "lookahead": config["nvenc_lookahead"].get(content_type, {}).get(res_key, 16),
+        "cq": cq,
+        "preset": preset,
+        "multipass": multipass,
+        "lookahead": lookahead,
         "maxrate": config["nvenc_maxrate"].get(content_type, {}).get(res_key, None),
         "bufsize": config["nvenc_bufsize"].get(content_type, {}).get(res_key, None),
         "content_type": content_type,
         "res_key": res_key,
+        "profile": profile_name,
+        "temporal_aq": profile.get("temporal_aq"),
     }

@@ -49,6 +49,11 @@ Control system:
   Encode overrides:
     gentle.json          - per-file or pattern CQ/preset overrides
                            {"paths": {...}, "patterns": {...}, "default_offset": 0}
+    profiles.json        - assign content to quality profiles
+                           {"paths": {...}, "patterns": {...}, "default": "baseline"}
+                           Profiles: protected (high quality), baseline, lossy (aggressive)
+    reencode.json        - re-encode already-AV1 files with different CQ
+                           {"files": {...}, "patterns": {...}}
 
 Examples:
   python -m pipeline --report media_report.json --dry-run

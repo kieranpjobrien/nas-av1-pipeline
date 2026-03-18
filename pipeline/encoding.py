@@ -91,8 +91,9 @@ def build_ffmpeg_cmd(input_path: str, output_path: str, item: dict, config: dict
 
     # Spatial/temporal AQ
     cmd.extend(["-spatial-aq", "1"])
-    # Temporal AQ only for movies (diminishing returns on series, adds encode time)
-    if params["content_type"] == "movie":
+    # Temporal AQ: profile can override, otherwise movies only
+    temporal_aq = params.get("temporal_aq")
+    if temporal_aq is True or (temporal_aq is None and params["content_type"] == "movie"):
         cmd.extend(["-temporal-aq", "1"])
 
     # Rate cap
@@ -232,10 +233,11 @@ def stage_encode(source_filepath: str, item: dict, staging_dir: str,
 
     logging.info(f"Encoding: {item['filename']}")
     enc_params = resolve_encode_params(config, item)
+    profile_str = f" | Profile: {enc_params['profile']}" if enc_params.get("profile", "baseline") != "baseline" else ""
     logging.info(f"  {enc_params['content_type'].upper()} | {item['resolution']} | "
                  f"HDR: {item.get('hdr', False)} | "
                  f"CQ: {enc_params['cq']} | Preset: {enc_params['preset']} | "
-                 f"Multipass: {enc_params['multipass']}")
+                 f"Multipass: {enc_params['multipass']}{profile_str}")
 
     try:
         # Try with subs first, retry without if subtitle codec is unsupported
