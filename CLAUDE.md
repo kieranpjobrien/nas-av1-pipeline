@@ -14,12 +14,12 @@ This project uses **uv** (not Poetry). Run scripts with `uv run python -m <modul
 ### Core pipeline (`pipeline/` package)
 The encoding pipeline is split into focused modules:
 
-- `config.py` — `DEFAULT_CONFIG`, encoding presets, constants
+- `config.py` — `DEFAULT_CONFIG`, encoding presets, `QUALITY_PROFILES`, constants
 - `state.py` — `FileStatus` enum, `PipelineState` (persistent JSON state tracker)
 - `queue.py` — `build_priority_queue()`, tier matching, filtering
 - `encoding.py` — `build_ffmpeg_cmd()`, `encode_file()`, audio codec logic, remuxing
 - `stages.py` — `fetch()`, `upload()`, `verify()`, `replace_original()`
-- `control.py` — `PipelineControl` class: pause/resume/skip/priority/gentle overrides
+- `control.py` — `PipelineControl` class: pause/resume/skip/priority/gentle/profiles overrides
 - `runner.py` — `Pipeline` class: main orchestration loop, prefetch thread, signal handling
 - `__main__.py` — `argparse` CLI + `main()` entry point
 
@@ -33,7 +33,9 @@ Run via: `python -m pipeline --resume`
 ### Utility tools (`tools/` package)
 - `tools/scanner.py` — Scans NAS directories with ffprobe, outputs `media_report.json`. Also supports `--non-english-csv` to find files missing English audio.
 - `tools/plex_languages.py` — Finds movies without English audio tracks via Plex database backup
-- `tools/strip_tags.py` — Strips release group tags from series filenames
+- `tools/plex_collections.py` — Plex collection/genre manager: audit, find missing genres, apply rules (studio→collection mapping)
+- `tools/subtitles.py` — Subtitle availability checker: finds files missing English subtitles (embedded + external)
+- `tools/strip_tags.py` — Strips release group tags from series/movie filenames (preserves edition tags)
 - `tools/fix_extensions.py` — Fixes missing `.mkv` extensions on series files
 
 ## Key paths
@@ -46,17 +48,31 @@ Run via: `python -m pipeline --resume`
 - Server: `fastapi`, `uvicorn` (managed via `pyproject.toml` + `uv`)
 - Frontend: `npm` (in `frontend/`)
 
+## Quality Profiles
+
+Three encoding quality profiles, assigned via `control/profiles.json`:
+- **protected** — Lower CQ (-3), p7 preset, full multipass, 32-frame lookahead (reference films, visually important content)
+- **baseline** — Default settings (standard balance)
+- **lossy** — Higher CQ (+6), p4 preset, no multipass (sitcoms, reality TV, expendable content)
+
+Assign by path prefix or glob pattern. Stacks with `gentle.json` and `reencode.json`.
+
 ## Running
 ```bash
 uv run python -m tools.scanner                    # Scan library
 uv run python -m pipeline                         # First run
 uv run python -m pipeline --resume                # Resume
 uv run python -m server                           # Dashboard
+uv run python -m tools.subtitles                  # Check subtitle availability
+uv run python -m tools.plex_collections audit     # Plex genre/collection stats
+uv run python -m tools.strip_tags                 # Preview filename cleanup
 ```
 
 ## Entry Points (pyproject.toml)
 ```
-pipeline  -> pipeline.__main__:main
-scan      -> tools.scanner:main
-dashboard -> server:run
+pipeline          -> pipeline.__main__:main
+scan              -> tools.scanner:main
+subtitles         -> tools.subtitles:main
+plex-collections  -> tools.plex_collections:main
+dashboard         -> server:run
 ```
