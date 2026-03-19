@@ -414,6 +414,116 @@ function SavingsEstimate({ files }) {
   );
 }
 
+function AudioSavingsEstimate({ files }) {
+  // Gather all audio streams with their file-level estimated size contribution
+  const streamEntries = [];
+  files.forEach((f) => {
+    const streams = f.audio_streams || [];
+    const totalBitrate = streams.reduce((s, a) => s + (a.bitrate_kbps || 0), 0);
+    streams.forEach((a) => {
+      const share = totalBitrate > 0 ? (a.bitrate_kbps || 0) / totalBitrate : 1 / streams.length;
+      streamEntries.push({ ...a, size_gb: (f.audio_estimated_size_gb || 0) * share });
+    });
+  });
+
+  const totalAudioGB = streamEntries.reduce((s, a) => s + a.size_gb, 0);
+
+  // Categorise each stream and estimate savings
+  const categories = {
+    "Lossless → EAC-3": { codecs: new Set(), size: 0, saving: 0, count: 0, fill: PALETTE.purple },
+    "DTS → EAC-3": { codecs: new Set(), size: 0, saving: 0, count: 0, fill: PALETTE.accent },
+    "AC-3 (high)": { codecs: new Set(), size: 0, saving: 0, count: 0, fill: PALETTE.accentWarm },
+    "Already efficient": { codecs: new Set(), size: 0, saving: 0, count: 0, fill: PALETTE.green },
+  };
+
+  for (const a of streamEntries) {
+    const codec = (a.codec || "").toUpperCase();
+    const br = a.bitrate_kbps || 0;
+
+    if (a.lossless) {
+      // Lossless (TrueHD, FLAC, PCM, DTS-HD MA) → EAC-3: ~80% reduction
+      const cat = categories["Lossless → EAC-3"];
+      cat.codecs.add(a.codec);
+      cat.size += a.size_gb;
+      cat.saving += a.size_gb * 0.80;
+      cat.count++;
+    } else if (codec.includes("DTS") && br > 700) {
+      // DTS core (1536kbps typical) → EAC-3 640kbps: ~58% reduction
+      const cat = categories["DTS → EAC-3"];
+      cat.codecs.add(a.codec);
+      cat.size += a.size_gb;
+      cat.saving += a.size_gb * 0.58;
+      cat.count++;
+    } else if ((codec.includes("AC-3") || codec.includes("AC3")) && br > 400) {
+      // High-bitrate AC-3 (640kbps) → EAC-3 at lower rate: ~35% reduction
+      const cat = categories["AC-3 (high)"];
+      cat.codecs.add(a.codec);
+      cat.size += a.size_gb;
+      cat.saving += a.size_gb * 0.35;
+      cat.count++;
+    } else {
+      // AAC, Opus, low-bitrate AC-3, EAC-3, MP3 — already efficient
+      const cat = categories["Already efficient"];
+      cat.codecs.add(a.codec);
+      cat.size += a.size_gb;
+      cat.count++;
+    }
+  }
+
+  const totalSaving = Object.values(categories).reduce((s, c) => s + c.saving, 0);
+  const efficientSize = categories["Already efficient"].size;
+
+  const chartData = Object.entries(categories)
+    .filter(([, c]) => c.count > 0)
+    .map(([name, c]) => ({
+      name: `${name}`,
+      current: c.size,
+      saving: c.saving,
+      count: c.count,
+      fill: c.fill,
+      detail: [...c.codecs].join(", "),
+    }));
+
+  return (
+    <div>
+      <SectionTitle>Estimated Audio Re-encoding Savings</SectionTitle>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 12, marginBottom: 20 }}>
+        <StatCard label="Current Audio" value={fmt(totalAudioGB)} />
+        <StatCard label="Est. After Re-encode" value={fmt(totalAudioGB - totalSaving)} colour={PALETTE.green} />
+        <StatCard label="Est. Savings" value={fmt(totalSaving)} sub={totalAudioGB > 0 ? `~${((totalSaving / totalAudioGB) * 100).toFixed(0)}% reduction` : ""} colour={PALETTE.accentWarm} />
+        <StatCard label="Already Efficient" value={fmt(efficientSize)} sub={`${categories["Already efficient"].count} streams`} colour={PALETTE.purple} />
+      </div>
+      <div style={{ background: PALETTE.surface, border: `1px solid ${PALETTE.border}`, borderRadius: 12, padding: 20 }}>
+        <div style={{ color: PALETTE.text, fontSize: 15, fontWeight: 600, marginBottom: 16 }}>Savings Breakdown</div>
+        <ResponsiveContainer width="100%" height={Math.max(160, chartData.length * 50)}>
+          <BarChart data={chartData} layout="vertical" margin={{ left: 130, right: 20, top: 5, bottom: 5 }}>
+            <XAxis type="number" tick={{ fill: PALETTE.textMuted, fontSize: 11 }} axisLine={false} tickLine={false} tickFormatter={(v) => fmt(v)} />
+            <YAxis dataKey="name" type="category" tick={{ fill: PALETTE.text, fontSize: 12 }} axisLine={false} tickLine={false} width={120} />
+            <Tooltip
+              contentStyle={{ background: PALETTE.surfaceLight, border: `1px solid ${PALETTE.border}`, borderRadius: 8, color: PALETTE.text, fontSize: 13 }}
+              formatter={(v, name, props) => {
+                const label = name === "current" ? "Current Size" : "Est. Saving";
+                return [fmt(v), label];
+              }}
+              labelFormatter={(label) => {
+                const item = chartData.find((d) => d.name === label);
+                return item ? `${label} (${item.detail})` : label;
+              }}
+            />
+            <Bar dataKey="current" fill={PALETTE.border} radius={[0, 4, 4, 0]} name="Current Size" />
+            <Bar dataKey="saving" radius={[0, 4, 4, 0]} name="Est. Saving">
+              {chartData.map((d, i) => <Cell key={i} fill={d.fill} />)}
+            </Bar>
+          </BarChart>
+        </ResponsiveContainer>
+        <div style={{ color: PALETTE.textMuted, fontSize: 11, marginTop: 12, fontStyle: "italic" }}>
+          Estimates only. Lossless→EAC-3 ~80%, DTS→EAC-3 ~58%, high-bitrate AC-3 ~35%. Already efficient streams (AAC, Opus, EAC-3, low-bitrate) are not re-encoded.
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /** Estimate per-file AV1 saving in GB using the same ratios as SavingsEstimate. */
 function estimateSaving(f) {
   const codec = f.video?.codec_raw;
@@ -641,6 +751,7 @@ export function LibraryPage() {
 
       {/* Audio */}
       <AudioAnalysis files={files} />
+      <AudioSavingsEstimate files={files} />
 
       {/* Filename Health */}
       <FilenameHealth files={files} onReload={loadReport} />

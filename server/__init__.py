@@ -161,7 +161,7 @@ class ProcessManager:
                 return {"ok": False, "error": f"{name} is already running (pid {existing.pid})"}
             creation_flags = 0
             if sys.platform == "win32":
-                creation_flags = subprocess.CREATE_NEW_PROCESS_GROUP
+                creation_flags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
             proc = subprocess.Popen(
                 cfg["cmd"],
                 cwd=cfg["cwd"],

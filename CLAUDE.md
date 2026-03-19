@@ -33,14 +33,15 @@ Run via: `python -m pipeline --resume`
 ### Utility tools (`tools/` package)
 - `tools/scanner.py` — Scans NAS directories with ffprobe, outputs `media_report.json`. Also supports `--non-english-csv` to find files missing English audio.
 - `tools/plex_languages.py` — Finds movies without English audio tracks via Plex database backup
-- `tools/plex_collections.py` — Plex collection/genre manager: audit, find missing genres, apply rules (studio→collection mapping)
+- `tools/plex_collections.py` — Plex collection/genre manager (legacy, kept for backwards compat)
+- `tools/plex_metadata.py` — Comprehensive Plex metadata manager: collections, genres, content ratings, labels. Audit, health report, rules-based application
 - `tools/subtitles.py` — Subtitle availability checker: finds files missing English subtitles (embedded + external)
 - `tools/strip_tags.py` — Strips release group tags from series/movie filenames (preserves edition tags)
 - `tools/fix_extensions.py` — Fixes missing `.mkv` extensions on series files
 
 ## Key paths
-- `E:\AV1_Staging\` — Local staging drive (pipeline state, control files, temp encodes)
-- `Z:\Movies\`, `Z:\Series\` — NAS media libraries (defaults, configurable via env/args)
+- `F:\AV1_Staging\` — Local staging drive (pipeline state, control files, temp encodes)
+- `\\KieranNAS\Media\Movies\`, `\\KieranNAS\Media\Series\` — NAS media libraries (UNC paths, configurable via env/args)
 - `control_templates/` — Template JSON files for pipeline control
 
 ## Dependencies
@@ -64,7 +65,9 @@ uv run python -m pipeline                         # First run
 uv run python -m pipeline --resume                # Resume
 uv run python -m server                           # Dashboard
 uv run python -m tools.subtitles                  # Check subtitle availability
-uv run python -m tools.plex_collections audit     # Plex genre/collection stats
+uv run python -m tools.plex_metadata audit        # Full Plex metadata stats
+uv run python -m tools.plex_metadata report       # Metadata health report
+uv run python -m tools.plex_metadata apply-rules  # Preview metadata changes
 uv run python -m tools.strip_tags                 # Preview filename cleanup
 ```
 
@@ -74,5 +77,6 @@ pipeline          -> pipeline.__main__:main
 scan              -> tools.scanner:main
 subtitles         -> tools.subtitles:main
 plex-collections  -> tools.plex_collections:main
+plex-metadata     -> tools.plex_metadata:main
 dashboard         -> server:run
 ```
