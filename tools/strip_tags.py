@@ -108,8 +108,8 @@ def clean_series_name(stem: str, tag_re: re.Pattern = TAG_BOUNDARY_RE) -> str | 
 
     # Title portion: everything before SxxExx
     title = stem[: m.start()]
-    # Strip trailing year (e.g. "ShowName2019 S01E01" or "ShowName.2019.S01E01")
-    title = re.sub(r"[\s.]?(19[2-9]\d|20[0-2]\d)[\s.]*$", "", title)
+    # Strip trailing year — bare or parenthesized (e.g. "Show.2019.", "Show (2019) -")
+    title = re.sub(r"[\s.]*\(?(19[2-9]\d|20[0-2]\d)\)?[\s.\-]*$", "", title)
     # Normalize episode marker: group(1) is SxxExx, groups 2+3 are Season/Episode long form
     if m.group(1):
         episode_marker = re.sub(r"\s+", "", m.group(1)).upper()
@@ -189,6 +189,8 @@ def clean_series_name(stem: str, tag_re: re.Pattern = TAG_BOUNDARY_RE) -> str | 
     # Strip trailing unclosed paren with tech junk: "( ATVP5 1" or "(p"
     # But NOT part numbers like "(1)" or "(2)" which are legitimate
     episode_title = re.sub(r"\s*\(\s*(?:p\b|[A-Z]{2,}|\d{2,}).*$", "", episode_title)
+    # Strip trailing unclosed bracket or dangling " - [" fragments
+    episode_title = re.sub(r"\s*-?\s*\[$", "", episode_title)
     # Strip trailing service/channel junk that wasn't in a paren: "ATVP5 1", "DS4K ATVP5 1"
     episode_title = re.sub(
         r"\s+(?:ATVP|DSNP|NF|AMZN|HULU|MAX|HBO|PCOK|PMTP|STAN|CRAV|PBS)\d*[\s.\d]*$",
