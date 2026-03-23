@@ -122,7 +122,7 @@ PROCESS_CONFIGS = {
         "cwd": str(Path(__file__).parent.parent),
     },
     "strip_tags": {
-        "cmd": [sys.executable, "-m", "tools.strip_tags", "--execute"],
+        "cmd": [sys.executable, "-m", "tools.strip_tags", "--execute", "--movies"],
         "cwd": str(Path(__file__).parent.parent),
     },
     "duplicates": {
