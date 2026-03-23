@@ -11,7 +11,7 @@ import time
 
 from pipeline.config import get_res_key, resolve_encode_params
 from pipeline.control import PipelineControl
-from pipeline.encoding import format_bytes, format_duration, stage_encode
+from pipeline.encoding import format_bytes, format_duration, has_bulky_audio, stage_audio_remux, stage_encode
 from pipeline.stages import get_free_space, get_staging_usage, stage_fetch, stage_replace, stage_upload, stage_verify
 from pipeline.state import FileStatus, PipelineState
 
@@ -264,6 +264,9 @@ class Pipeline:
                 tier_idx = idx
                 break
 
+        codec_raw = video.get("codec_raw", "").lower()
+        is_audio_only = codec_raw == "av1" and has_bulky_audio(report_entry, self.config)
+
         return {
             "filepath": report_entry["filepath"],
             "filename": report_entry["filename"],
@@ -278,9 +281,11 @@ class Pipeline:
             "audio_streams": report_entry.get("audio_streams", []),
             "subtitle_count": report_entry.get("subtitle_count", 0),
             "library_type": report_entry.get("library_type", ""),
-            "priority_tier": tier_idx,
-            "tier_name": (self.config["priority_tiers"][tier_idx]["name"]
-                          if tier_idx < len(self.config["priority_tiers"]) else "other"),
+            "priority_tier": 999 if is_audio_only else tier_idx,
+            "tier_name": ("Audio remux (AV1)" if is_audio_only else
+                          (self.config["priority_tiers"][tier_idx]["name"]
+                           if tier_idx < len(self.config["priority_tiers"]) else "other")),
+            **({"audio_only": True} if is_audio_only else {}),
         }
 
     def _inject_new_priority_items(self, queue: list[dict]) -> list[dict]:
@@ -384,7 +389,10 @@ class Pipeline:
         current_status = existing["status"] if existing else None
 
         if current_status == FileStatus.FETCHED.value:
-            output_path = stage_encode(filepath, item, self.staging_dir, effective_config, self.state)
+            if item.get("audio_only"):
+                output_path = stage_audio_remux(filepath, item, self.staging_dir, effective_config, self.state)
+            else:
+                output_path = stage_encode(filepath, item, self.staging_dir, effective_config, self.state)
             if output_path is None:
                 return False
 

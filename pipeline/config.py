@@ -85,6 +85,17 @@ DEFAULT_CONFIG = {
                               "pcm_s16be", "pcm_s24be", "pcm_s32be", "pcm_f32be",
                               "alac"},
 
+    # Audio re-encoding: codecs/bitrates considered "bulky" (transcode to EAC-3)
+    # - lossless codecs: always transcode (TrueHD, FLAC, PCM, DTS-HD MA, ALAC)
+    # - DTS core: transcode if >700kbps (typical 1536kbps → 640kbps EAC-3)
+    # - AC-3: transcode if >400kbps (640kbps AC-3 → ~448kbps EAC-3)
+    # - Everything else (AAC, Opus, EAC-3, MP3, low-bitrate AC-3): copy
+    "audio_bulky_threshold_kbps": {
+        "dts": 700,       # DTS core at 1536kbps is wasteful
+        "ac3": 400,       # AC-3 at 640kbps can be trimmed
+        "ac-3": 400,      # alternate name
+    },
+
     # Behaviour
     "overwrite_existing": False,
     "replace_original": True,   # Replace original on NAS after verify

@@ -5,12 +5,17 @@ import logging
 import os
 from typing import Callable, Optional
 
+from pipeline.encoding import has_bulky_audio
 from pipeline.state import FileStatus, PipelineState
 
 
 def build_priority_queue(report_path: str, config: dict, state: PipelineState,
                          is_reencode: Optional[Callable] = None) -> list[dict]:
-    """Load report, filter already-AV1 files, sort by priority tier then file size."""
+    """Load report, filter already-AV1 files, sort by priority tier then file size.
+
+    AV1 files with bulky audio (lossless, DTS, high-bitrate AC-3) are queued
+    for audio-only remux instead of being skipped.
+    """
     with open(report_path, "r", encoding="utf-8") as f:
         report = json.load(f)
 
@@ -25,9 +30,41 @@ def build_priority_queue(report_path: str, config: dict, state: PipelineState,
         resolution = video.get("resolution_class", "")
         bitrate = f.get("overall_bitrate_kbps", 0) or 0
 
-        # Skip already AV1 (unless flagged for re-encode)
+        # Already AV1: check if audio needs work, otherwise skip
         if codec_raw in ("av1",):
-            if not (is_reencode and is_reencode(filepath)):
+            if is_reencode and is_reencode(filepath):
+                pass  # flagged for full re-encode, fall through
+            elif has_bulky_audio(f, config):
+                # Queue for audio-only remux
+                existing = state.get_file(filepath)
+                if existing and existing["status"] in (FileStatus.VERIFIED.value, FileStatus.SKIPPED.value):
+                    # Already processed audio — check if it was an audio_only pass
+                    if existing.get("audio_only"):
+                        continue
+                    # Was a video encode skip — reset for audio pass
+                    if existing.get("reason") == "already AV1":
+                        state.set_file(filepath, FileStatus.PENDING, reason="audio remux needed")
+
+                queue.append({
+                    "filepath": filepath,
+                    "filename": f["filename"],
+                    "file_size_bytes": f["file_size_bytes"],
+                    "file_size_gb": f["file_size_gb"],
+                    "duration_seconds": f.get("duration_seconds", 0),
+                    "video_codec": codec,
+                    "resolution": resolution,
+                    "bitrate_kbps": bitrate,
+                    "hdr": video.get("hdr", False),
+                    "bit_depth": video.get("bit_depth", 8),
+                    "audio_streams": f.get("audio_streams", []),
+                    "subtitle_count": f.get("subtitle_count", 0),
+                    "library_type": f.get("library_type", ""),
+                    "priority_tier": 999,  # audio-only goes after video encodes
+                    "tier_name": "Audio remux (AV1)",
+                    "audio_only": True,
+                })
+                continue
+            else:
                 existing = state.get_file(filepath)
                 if not existing:
                     state.set_file(filepath, FileStatus.SKIPPED, reason="already AV1")
