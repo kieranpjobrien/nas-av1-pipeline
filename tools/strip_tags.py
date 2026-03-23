@@ -27,7 +27,7 @@ EPISODE_RE = re.compile(
 _BASE_TAG_PARTS = (
     r"(?:19[2-9]\d|20[0-2]\d)(?=[\s.)\-]|$)"  # bare year (Fargo.S02E04.2015.)
     # Resolution / quality
-    r"|1080[pi]|720p|480p|2160p|4K|UHD|DS4K"
+    r"|1080[pi]|720[pi]|480[pi]|2160[pi]|4K|UHD|DS4K"
     # Source
     r"|WEB[-.]?DL|WEBRip|BluRay|Blu[-.]?Ray|BDRip|BDRemux|HDTV|DVDRip|REMUX|WEB"
     # Streaming services
@@ -130,6 +130,9 @@ def clean_series_name(stem: str, tag_re: re.Pattern = TAG_BOUNDARY_RE) -> str | 
     # Strip trailing bracket fragments: [WEBDL...], [h264-WEBDL-720p AAC-2 0], etc.
     after = re.sub(r"\s*\[[^\]]*(?:1080|720|480|2160|WEB|Blu|DDP|AAC|h\.?264|h\.?265|HEVC|AVC|HDTV|DVDRip)[^\]]*\]", "", after, flags=re.IGNORECASE)
 
+    # Strip leading absolute episode number (e.g. " - 095 - " after SxxExx)
+    after = re.sub(r"^[\s\-]*\d{2,4}[\s\-]+", " ", after)
+
     # Normalize separators before tag search so concatenated blobs get boundaries
     after = _dots_to_spaces(after)
 
@@ -142,13 +145,19 @@ def clean_series_name(stem: str, tag_re: re.Pattern = TAG_BOUNDARY_RE) -> str | 
         episode_title = after
 
     # Clean up each part
-    title = _dots_to_spaces(title).strip()
+    title = _dots_to_spaces(title).strip().rstrip(" -")
+    # Title-case all-lowercase titles: "mythbusters" -> "Mythbusters"
+    if title and title == title.lower():
+        title = title.title()
     # CamelCase split title: "TheSopranos" -> "The Sopranos"
     if re.search(r"[a-z][A-Z]", title):
         title = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", title)
         # Rejoin name prefixes that got split: "Mc Beal" -> "McBeal", "Bo Jack" -> "BoJack"
-        title = re.sub(r"\b(Mc|Mac|De|Le|La|Bo) (?=[A-Z])", r"\1", title)
+        title = re.sub(r"\b(Mc|Mac|De|Le|La|Bo|Myth) (?=[A-Z])", r"\1",title)
     episode_title = episode_title.strip()
+    # Title-case all-lowercase episode titles: "electrified escape" -> "Electrified Escape"
+    if episode_title and episode_title == episode_title.lower():
+        episode_title = episode_title.title()
     # Strip leading hyphens/spaces (but preserve trailing parens for part numbers)
     episode_title = episode_title.lstrip("- ")
 
@@ -212,7 +221,7 @@ def clean_series_name(stem: str, tag_re: re.Pattern = TAG_BOUNDARY_RE) -> str | 
             # "AlligatorMan" -> "Alligator Man"
             w = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", word)
             # Rejoin name prefixes: "Mc Beal" -> "McBeal", "De Lorean" -> "DeLorean"
-            w = re.sub(r"\b(Mc|Mac|De|Le|La|Bo) (?=[A-Z])", r"\1", w)
+            w = re.sub(r"\b(Mc|Mac|De|Le|La|Bo|Myth) (?=[A-Z])", r"\1",w)
             # Single letter + CamelCase word: "AHit" -> "A Hit", "AGoing" -> "A Going"
             w = re.sub(r"^([A-Z])(?=[A-Z][a-z]{2,})", r"\1 ", w)
             # Digit-to-letter boundary: "46Long" -> "46 Long"
