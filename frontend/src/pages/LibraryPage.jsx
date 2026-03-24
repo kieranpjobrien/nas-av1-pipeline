@@ -547,35 +547,126 @@ function getFolder(filepath) {
   return parts.join("\\");
 }
 
+const CQ_TABLE_FOLDERS = {
+  movie:  { "4K": 22, "1080p": 28, "720p": 30, "480p": 30, "SD": 30 },
+  series: { "4K": 24, "1080p": 30, "720p": 32, "480p": 32, "SD": 32 },
+};
+
+const FBTN = {
+  border: "none", borderRadius: 6, padding: "6px 14px",
+  fontSize: 12, fontWeight: 600, cursor: "pointer",
+};
+
 function TopFolders({ files, limit = 15 }) {
   const [dismissed, setDismissed] = useState([]);
+  const [selected, setSelected] = useState(new Set());
+  const [cqValue, setCqValue] = useState(30);
+  const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     api.getDismissed("folders").then(setDismissed).catch(() => {});
   }, []);
 
-  const dismiss = async (path) => {
-    const next = [...dismissed, path];
-    setDismissed(next);
-    try { await api.setDismissed("folders", next); } catch { /* ignore */ }
-  };
-
-  const folders = {};
+  // Build folder map with file lists for path resolution
+  const folderMap = {};
   for (const f of files) {
     const folder = getFolder(f.filepath);
-    if (!folders[folder]) folders[folder] = { path: folder, size_gb: 0, saving_gb: 0, count: 0, duration_hrs: 0 };
-    folders[folder].size_gb += f.file_size_gb;
-    folders[folder].saving_gb += estimateSaving(f);
-    folders[folder].count += 1;
-    folders[folder].duration_hrs += (f.duration_seconds || 0) / 3600;
+    if (!folderMap[folder]) folderMap[folder] = { path: folder, size_gb: 0, saving_gb: 0, count: 0, duration_hrs: 0, filepaths: [] };
+    folderMap[folder].size_gb += f.file_size_gb;
+    folderMap[folder].saving_gb += estimateSaving(f);
+    folderMap[folder].count += 1;
+    folderMap[folder].duration_hrs += (f.duration_seconds || 0) / 3600;
+    folderMap[folder].filepaths.push(f.filepath);
   }
-  const allSorted = Object.values(folders)
+  const sorted = Object.values(folderMap)
     .filter((f) => !dismissed.includes(f.path))
     .sort((a, b) => b.size_gb - a.size_gb).slice(0, limit);
-  const sorted = allSorted;
   const maxSize = sorted[0]?.size_gb || 1;
   const folderLabel = (p) => p.split("\\").pop() || p;
   const mono = { fontFamily: "'JetBrains Mono', monospace" };
+
+  const toggle = (path) => {
+    const next = new Set(selected);
+    if (next.has(path)) next.delete(path);
+    else next.add(path);
+    setSelected(next);
+  };
+
+  const toggleAll = () => {
+    if (selected.size === sorted.length) setSelected(new Set());
+    else setSelected(new Set(sorted.map((f) => f.path)));
+  };
+
+  // Resolve selected folders to all constituent filepaths
+  const getSelectedFilePaths = () => {
+    const paths = [];
+    for (const folderPath of selected) {
+      const folder = folderMap[folderPath];
+      if (folder) paths.push(...folder.filepaths);
+    }
+    return paths;
+  };
+
+  const dismissSelected = async () => {
+    const next = [...dismissed, ...selected];
+    setDismissed(next);
+    setSelected(new Set());
+    try { await api.setDismissed("folders", next); } catch { /* ignore */ }
+  };
+
+  const addToPriority = async () => {
+    setBusy(true);
+    try {
+      const filePaths = getSelectedFilePaths();
+      const current = await api.getPriority().catch(() => ({ paths: [] }));
+      const merged = [...new Set([...(current.paths || []), ...filePaths])];
+      await api.setPriority(merged);
+      await dismissSelected();
+    } catch { /* ignore */ }
+    setBusy(false);
+  };
+
+  const addToSkip = async () => {
+    setBusy(true);
+    try {
+      const filePaths = getSelectedFilePaths();
+      const current = await api.getSkip().catch(() => ({ paths: [] }));
+      const merged = [...new Set([...(current.paths || []), ...filePaths])];
+      await api.setSkip(merged);
+      await dismissSelected();
+    } catch { /* ignore */ }
+    setBusy(false);
+  };
+
+  const addToGentle = async () => {
+    setBusy(true);
+    try {
+      const filePaths = getSelectedFilePaths();
+      const current = await api.getGentle().catch(() => ({ paths: {}, patterns: {}, default_offset: 0 }));
+      const updated = { ...current, paths: { ...current.paths } };
+      for (const p of filePaths) {
+        if (!updated.paths[p]) updated.paths[p] = { cq_offset: 2 };
+      }
+      await api.setGentle(updated);
+      await dismissSelected();
+    } catch { /* ignore */ }
+    setBusy(false);
+  };
+
+  const addToReencode = async () => {
+    setBusy(true);
+    try {
+      const filePaths = getSelectedFilePaths();
+      const current = await api.getReencode().catch(() => ({ files: {}, patterns: {} }));
+      const updatedFiles = { ...(current.files || {}) };
+      for (const p of filePaths) {
+        updatedFiles[p] = { cq: cqValue };
+      }
+      await api.setReencode(updatedFiles, current.patterns || {});
+      await dismissSelected();
+    } catch { /* ignore */ }
+    setBusy(false);
+  };
 
   return (
     <div style={{ background: PALETTE.surface, border: `1px solid ${PALETTE.border}`, borderRadius: 12, padding: 20, marginBottom: 8 }}>
@@ -590,12 +681,38 @@ function TopFolders({ files, limit = 15 }) {
         </div>
       )}
       <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+        {/* Header */}
+        <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 11, color: PALETTE.textMuted, marginBottom: 2 }}>
+          <input
+            type="checkbox"
+            checked={selected.size === sorted.length && sorted.length > 0}
+            onChange={toggleAll}
+            style={{ width: 14, height: 14, cursor: "pointer", accentColor: PALETTE.accent }}
+          />
+          <span style={{ width: 20 }} />
+          <span style={{ flex: "0 1 45%" }}>Folder</span>
+          <span style={{ ...mono, minWidth: 60, textAlign: "right" }}>Size</span>
+          <span style={{ ...mono, minWidth: 56, textAlign: "right" }}>Saving</span>
+          <span style={{ ...mono, minWidth: 44, textAlign: "right" }}>Dur</span>
+          <span style={{ ...mono, minWidth: 50, textAlign: "right" }}>Files</span>
+        </div>
         {sorted.map((f, i) => {
           const afterSize = f.size_gb - f.saving_gb;
+          const isSelected = selected.has(f.path);
           return (
-            <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
+            <div key={i} style={{
+              display: "flex", alignItems: "center", gap: 8, fontSize: 12,
+              background: isSelected ? `${PALETTE.accent}11` : "transparent",
+              borderRadius: 4, padding: "1px 0",
+            }}>
+              <input
+                type="checkbox"
+                checked={isSelected}
+                onChange={() => toggle(f.path)}
+                style={{ width: 14, height: 14, cursor: "pointer", accentColor: PALETTE.accent }}
+              />
               <span style={{ ...mono, color: PALETTE.textMuted, width: 20, textAlign: "right", fontSize: 11 }}>{i + 1}</span>
-              <div style={{ flex: "0 1 45%", position: "relative", height: 22, background: PALETTE.surfaceLight, borderRadius: 4, overflow: "hidden" }}>
+              <div style={{ flex: "0 1 45%", position: "relative", height: 22, background: PALETTE.surfaceLight, borderRadius: 4, overflow: "hidden", cursor: "pointer" }} onClick={() => toggle(f.path)}>
                 <div style={{
                   position: "absolute", left: 0, top: 0, bottom: 0,
                   width: `${(f.size_gb / maxSize) * 100}%`,
@@ -618,11 +735,6 @@ function TopFolders({ files, limit = 15 }) {
               )}
               <span style={{ ...mono, color: PALETTE.accent, fontSize: 11, minWidth: 44, textAlign: "right" }}>{fmtHrs(f.duration_hrs)}</span>
               <span style={{ ...mono, color: PALETTE.textMuted, fontSize: 11, minWidth: 50, textAlign: "right" }}>{f.count} file{f.count !== 1 ? "s" : ""}</span>
-              <span
-                onClick={() => dismiss(f.path)}
-                style={{ cursor: "pointer", color: PALETTE.textMuted, fontSize: 11, opacity: 0.4, marginLeft: 2 }}
-                title="Dismiss from list"
-              >✕</span>
             </div>
           );
         })}
@@ -631,6 +743,42 @@ function TopFolders({ files, limit = 15 }) {
         <span><span style={{ display: "inline-block", width: 10, height: 10, borderRadius: 2, background: PALETTE.accent, opacity: 0.3, marginRight: 4, verticalAlign: "middle" }} />Current</span>
         <span><span style={{ display: "inline-block", width: 10, height: 10, borderRadius: 2, background: PALETTE.green, opacity: 0.5, marginRight: 4, verticalAlign: "middle" }} />Est. after AV1</span>
       </div>
+
+      {/* Action bar */}
+      {selected.size > 0 && (
+        <div style={{
+          marginTop: 12, padding: "10px 14px",
+          background: PALETTE.surfaceLight, border: `1px solid ${PALETTE.border}`,
+          borderRadius: 8, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap",
+        }}>
+          <span style={{ color: PALETTE.text, fontSize: 12, fontWeight: 600, marginRight: 4 }}>
+            {selected.size} folder{selected.size !== 1 ? "s" : ""} ({[...selected].reduce((s, p) => s + (folderMap[p]?.count || 0), 0)} files)
+          </span>
+          <button onClick={addToPriority} disabled={busy} style={{ ...FBTN, background: PALETTE.green, color: "#000" }}>Priority</button>
+          <button onClick={addToSkip} disabled={busy} style={{ ...FBTN, background: PALETTE.accentWarm, color: "#fff" }}>Skip</button>
+          <button onClick={addToGentle} disabled={busy} style={{ ...FBTN, background: "#8b8bef", color: "#fff" }}>Gentle +2</button>
+          <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
+            <button onClick={addToReencode} disabled={busy} style={{ ...FBTN, background: PALETTE.accent, color: "#fff" }}>Re-encode</button>
+            <span style={{ color: PALETTE.textMuted, fontSize: 11 }}>CQ</span>
+            <input
+              type="number"
+              value={cqValue}
+              onChange={(e) => setCqValue(parseInt(e.target.value, 10) || 30)}
+              min={1} max={63}
+              style={{
+                width: 44, ...mono, fontSize: 12, padding: "4px 6px",
+                background: PALETTE.surface, color: PALETTE.text,
+                border: `1px solid ${PALETTE.border}`, borderRadius: 4,
+                textAlign: "center",
+              }}
+            />
+          </span>
+          <button
+            onClick={() => setSelected(new Set())}
+            style={{ ...FBTN, background: "transparent", color: PALETTE.textMuted, padding: "6px 8px" }}
+          >Clear</button>
+        </div>
+      )}
     </div>
   );
 }
