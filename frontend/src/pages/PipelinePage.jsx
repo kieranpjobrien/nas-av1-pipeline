@@ -23,7 +23,7 @@ function formatETA(secs) {
   return rm > 0 ? `~${h}h ${rm}m` : `~${h}h`;
 }
 
-function computeOverallETA(data) {
+function computeOverallETA(data, libraryTotal) {
   const stats = data.stats || {};
   const files = data.files || {};
   const completed = stats.completed || 0;
@@ -35,10 +35,10 @@ function computeOverallETA(data) {
 
   const doneStatuses = ["completed", "replaced", "done", "skipped", "error", "failed", "verified"];
   let totalSecs = 0;
-  let remaining = 0;
+  let knownRemaining = 0;
   for (const info of Object.values(files)) {
     if (doneStatuses.includes((info.status || "").toLowerCase())) continue;
-    remaining++;
+    knownRemaining++;
     const resKey = info.res_key || "";
     const tier = tierStats[resKey];
     if (tier && tier.completed >= 2 && tier.total_encode_time_secs > 0) {
@@ -47,7 +47,16 @@ function computeOverallETA(data) {
       totalSecs += overallAvg;
     }
   }
-  return remaining > 0 ? totalSecs : null;
+
+  // Account for files not yet in the pipeline queue
+  const queueTotal = Object.keys(files).length;
+  if (libraryTotal && libraryTotal > queueTotal) {
+    const unseenFiles = libraryTotal - queueTotal;
+    totalSecs += unseenFiles * overallAvg;
+  }
+
+  const totalRemaining = knownRemaining + ((libraryTotal && libraryTotal > queueTotal) ? libraryTotal - queueTotal : 0);
+  return totalRemaining > 0 ? totalSecs : null;
 }
 
 function getTierSavings(stats) {
@@ -166,12 +175,20 @@ export function PipelinePage() {
   const [starting, setStarting] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [priorityPaths, setPriorityPaths] = useState([]);
+  const [libraryTotal, setLibraryTotal] = useState(null);
 
   useEffect(() => {
     const load = () => api.getPriority().then((p) => setPriorityPaths(p?.paths || [])).catch(() => {});
     load();
     const id = setInterval(load, 10000);
     return () => clearInterval(id);
+  }, []);
+
+  useEffect(() => {
+    fetch("/api/media-report")
+      .then((r) => r.ok ? r.json() : null)
+      .then((d) => { if (d?.summary?.total_files) setLibraryTotal(d.summary.total_files); })
+      .catch(() => {});
   }, []);
 
   const handleResetErrors = async () => {
@@ -217,7 +234,8 @@ export function PipelinePage() {
 
   const stats = data.stats || {};
   const files = data.files || {};
-  const total = Object.keys(files).length;
+  const queueTotal = Object.keys(files).length;
+  const total = libraryTotal || queueTotal;
   const completed = stats.completed || 0;
   const pct = total > 0 ? ((completed / total) * 100) : 0;
   const groups = groupStatuses(files);
@@ -226,7 +244,7 @@ export function PipelinePage() {
   const errors = getErrors(files);
   const activeFiles = getActiveFiles(data);
   const upNext = getUpNext(data, priorityPaths);
-  const overallETA = computeOverallETA(data);
+  const overallETA = computeOverallETA(data, libraryTotal);
 
   const GROUP_COLOURS = { Queued: PALETTE.textMuted, "In Progress": PALETTE.accent, Done: PALETTE.green, Skipped: PALETTE.textMuted, Error: PALETTE.red };
 
@@ -252,6 +270,16 @@ export function PipelinePage() {
             Calculating ETA...
           </div>
         ) : null}
+        {completed > 0 && stats.total_encode_time_secs > 0 && (
+          <div style={{ color: PALETTE.textMuted, fontSize: 11, marginTop: 8, display: "flex", justifyContent: "center", gap: 16 }}>
+            {stats.total_content_duration_secs > 0 && (
+              <span>⏱ {(stats.total_encode_time_secs / (stats.total_content_duration_secs / 3600)).toFixed(1)} min/hr of content</span>
+            )}
+            {stats.bytes_saved > 0 && (
+              <span>📦 {(stats.total_encode_time_secs / 60 / (stats.total_source_size_bytes > 0 ? stats.total_source_size_bytes / (1024 ** 3) : completed)).toFixed(1)} min/GB</span>
+            )}
+          </div>
+        )}
         {data.last_updated && (
           <div style={{ color: PALETTE.textMuted, fontSize: 11, marginTop: 4 }}>
             Updated: {new Date(data.last_updated).toLocaleString()}

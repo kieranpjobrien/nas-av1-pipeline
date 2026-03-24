@@ -192,6 +192,8 @@ def stage_verify(source_filepath: str, item: dict, config: dict, state: Pipeline
 
     state.stats["completed"] += 1
     state.stats["bytes_saved"] += saved
+    state.stats["total_source_size_bytes"] = state.stats.get("total_source_size_bytes", 0) + source_size
+    state.stats["total_content_duration_secs"] = state.stats.get("total_content_duration_secs", 0) + item.get("duration_seconds", 0)
 
     # Per-tier stats
     res_key = get_res_key(item)

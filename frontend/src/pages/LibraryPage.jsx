@@ -732,6 +732,13 @@ export function LibraryPage() {
       <div style={{ display: "flex", flexWrap: "wrap", gap: 12, marginBottom: 24 }}>
         <StatCard label="Total Files" value={fmtNum(files.length)} />
         <StatCard label="Total Size" value={fmt(files.reduce((s, f) => s + f.file_size_gb, 0))} />
+        <StatCard label="Content Duration" value={(() => {
+          const totalSecs = files.reduce((s, f) => s + (f.duration_seconds || 0), 0);
+          const days = Math.floor(totalSecs / 86400);
+          const hrs = Math.floor((totalSecs % 86400) / 3600);
+          if (days > 0) return `${fmtNum(days)}d ${hrs}h`;
+          return `${hrs}h`;
+        })()} sub={`${fmtNum(Math.round(files.reduce((s, f) => s + (f.duration_seconds || 0), 0) / 3600))} hours`} colour={PALETTE.accent} />
         <StatCard label="HDR Content" value={fmtNum(hdrFiles.length)} sub={files.length > 0 ? `${((hdrFiles.length / files.length) * 100).toFixed(1)}%` : ""} colour={PALETTE.purple} />
         <StatCard label="Avg File Size" value={files.length > 0 ? fmt(files.reduce((s, f) => s + f.file_size_gb, 0) / files.length) : "—"} />
       </div>
