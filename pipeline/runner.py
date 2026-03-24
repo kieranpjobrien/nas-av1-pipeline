@@ -658,6 +658,16 @@ class Pipeline:
             logging.info(f"\n[{processed}/{len(queue)}] {ready_item['tier_name']} | "
                          f"{ready_item['filename']} ({format_bytes(ready_item['file_size_bytes'])})")
 
+            # Store tier and res_key on file state for dashboard display
+            existing = self.state.get_file(filepath) or {}
+            if not existing.get("tier"):
+                self.state.set_file(
+                    filepath,
+                    FileStatus(existing.get("status", FileStatus.PENDING.value)),
+                    tier=ready_item.get("tier_name", "Unknown"),
+                    res_key=get_res_key(ready_item),
+                )
+
             success = self.process_item(ready_item)
             if not success:
                 # If item is still PENDING after process_item failed, the fetch
