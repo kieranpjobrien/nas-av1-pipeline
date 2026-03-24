@@ -48,4 +48,6 @@ export const api = {
   stopProcess: (name) => postJSON(`/process/${name}/stop`, {}),
   killProcess: (name) => postJSON(`/process/${name}/kill`, {}),
   getProcessLogs: (name, lastN = 50) => fetchJSON(`/process/${name}/logs?last_n=${lastN}`),
+  getDismissed: (section) => fetchJSON(`/dismissed/${section}`).then((d) => d.paths || []).catch(() => []),
+  setDismissed: (section, paths) => putJSON(`/dismissed/${section}`, { paths }),
 };

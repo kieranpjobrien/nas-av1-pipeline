@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell } from "recharts";
 import { PALETTE, getCodecColour, getResColour, getAudioColour } from "../theme";
-import { fmt, fmtNum, aggregate } from "../lib/format";
+import { fmt, fmtNum, fmtHrs, aggregate } from "../lib/format";
 import { api } from "../lib/api";
 import { usePolling } from "../lib/usePolling";
 import { StatCard } from "../components/StatCard";
@@ -548,57 +548,86 @@ function getFolder(filepath) {
 }
 
 function TopFolders({ files, limit = 15 }) {
+  const [dismissed, setDismissed] = useState([]);
+
+  useEffect(() => {
+    api.getDismissed("folders").then(setDismissed).catch(() => {});
+  }, []);
+
+  const dismiss = async (path) => {
+    const next = [...dismissed, path];
+    setDismissed(next);
+    try { await api.setDismissed("folders", next); } catch { /* ignore */ }
+  };
+
   const folders = {};
   for (const f of files) {
     const folder = getFolder(f.filepath);
-    if (!folders[folder]) folders[folder] = { path: folder, size_gb: 0, saving_gb: 0, count: 0 };
+    if (!folders[folder]) folders[folder] = { path: folder, size_gb: 0, saving_gb: 0, count: 0, duration_hrs: 0 };
     folders[folder].size_gb += f.file_size_gb;
     folders[folder].saving_gb += estimateSaving(f);
     folders[folder].count += 1;
+    folders[folder].duration_hrs += (f.duration_seconds || 0) / 3600;
   }
-  const sorted = Object.values(folders).sort((a, b) => b.size_gb - a.size_gb).slice(0, limit);
+  const allSorted = Object.values(folders)
+    .filter((f) => !dismissed.includes(f.path))
+    .sort((a, b) => b.size_gb - a.size_gb).slice(0, limit);
+  const sorted = allSorted;
   const maxSize = sorted[0]?.size_gb || 1;
   const folderLabel = (p) => p.split("\\").pop() || p;
+  const mono = { fontFamily: "'JetBrains Mono', monospace" };
 
   return (
     <div style={{ background: PALETTE.surface, border: `1px solid ${PALETTE.border}`, borderRadius: 12, padding: 20, marginBottom: 8 }}>
-      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+      {dismissed.length > 0 && (
+        <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 8 }}>
+          <button
+            onClick={async () => { setDismissed([]); try { await api.setDismissed("folders", []); } catch {} }}
+            style={{ background: "none", border: "none", color: PALETTE.textMuted, fontSize: 11, cursor: "pointer", textDecoration: "underline" }}
+          >
+            Reset {dismissed.length} dismissed
+          </button>
+        </div>
+      )}
+      <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
         {sorted.map((f, i) => {
           const afterSize = f.size_gb - f.saving_gb;
           return (
-            <div key={i} style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 12 }}>
-              <span style={{ color: PALETTE.textMuted, width: 24, textAlign: "right", fontFamily: "'JetBrains Mono', monospace" }}>{i + 1}</span>
-              <div style={{ flex: 1, position: "relative", height: 26, background: PALETTE.surfaceLight, borderRadius: 4, overflow: "hidden" }}>
-                {/* Current size bar */}
+            <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
+              <span style={{ ...mono, color: PALETTE.textMuted, width: 20, textAlign: "right", fontSize: 11 }}>{i + 1}</span>
+              <div style={{ flex: "0 1 45%", position: "relative", height: 22, background: PALETTE.surfaceLight, borderRadius: 4, overflow: "hidden" }}>
                 <div style={{
                   position: "absolute", left: 0, top: 0, bottom: 0,
                   width: `${(f.size_gb / maxSize) * 100}%`,
-                  background: PALETTE.accent,
-                  opacity: 0.2,
-                  borderRadius: 4,
+                  background: PALETTE.accent, opacity: 0.2, borderRadius: 4,
                 }} />
-                {/* Estimated post-AV1 bar */}
                 <div style={{
                   position: "absolute", left: 0, top: 0, bottom: 0,
                   width: `${(afterSize / maxSize) * 100}%`,
-                  background: PALETTE.green,
-                  opacity: 0.35,
-                  borderRadius: 4,
+                  background: PALETTE.green, opacity: 0.35, borderRadius: 4,
                 }} />
-                <div style={{ position: "relative", padding: "4px 8px", color: PALETTE.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                <div style={{ position: "relative", padding: "2px 8px", color: PALETTE.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", lineHeight: "18px" }}>
                   {folderLabel(f.path)}
                 </div>
               </div>
-              <span style={{ color: PALETTE.textMuted, fontFamily: "'JetBrains Mono', monospace", minWidth: 60, textAlign: "right" }}>{fmt(f.size_gb)}</span>
-              {f.saving_gb > 0.01 && (
-                <span style={{ color: PALETTE.green, fontFamily: "'JetBrains Mono', monospace", fontSize: 11, minWidth: 60, textAlign: "right" }}>-{fmt(f.saving_gb)}</span>
+              <span style={{ ...mono, color: PALETTE.textMuted, minWidth: 60, textAlign: "right", fontSize: 11 }}>{fmt(f.size_gb)}</span>
+              {f.saving_gb > 0.01 ? (
+                <span style={{ ...mono, color: PALETTE.green, fontSize: 11, minWidth: 56, textAlign: "right" }}>-{fmt(f.saving_gb)}</span>
+              ) : (
+                <span style={{ minWidth: 56 }} />
               )}
-              <span style={{ color: PALETTE.textMuted, fontSize: 11, minWidth: 50, textAlign: "right" }}>{f.count} file{f.count !== 1 ? "s" : ""}</span>
+              <span style={{ ...mono, color: PALETTE.accent, fontSize: 11, minWidth: 44, textAlign: "right" }}>{fmtHrs(f.duration_hrs)}</span>
+              <span style={{ ...mono, color: PALETTE.textMuted, fontSize: 11, minWidth: 50, textAlign: "right" }}>{f.count} file{f.count !== 1 ? "s" : ""}</span>
+              <span
+                onClick={() => dismiss(f.path)}
+                style={{ cursor: "pointer", color: PALETTE.textMuted, fontSize: 11, opacity: 0.4, marginLeft: 2 }}
+                title="Dismiss from list"
+              >✕</span>
             </div>
           );
         })}
       </div>
-      <div style={{ display: "flex", gap: 16, marginTop: 12, fontSize: 11, color: PALETTE.textMuted }}>
+      <div style={{ display: "flex", gap: 16, marginTop: 10, fontSize: 11, color: PALETTE.textMuted }}>
         <span><span style={{ display: "inline-block", width: 10, height: 10, borderRadius: 2, background: PALETTE.accent, opacity: 0.3, marginRight: 4, verticalAlign: "middle" }} />Current</span>
         <span><span style={{ display: "inline-block", width: 10, height: 10, borderRadius: 2, background: PALETTE.green, opacity: 0.5, marginRight: 4, verticalAlign: "middle" }} />Est. after AV1</span>
       </div>

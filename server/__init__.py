@@ -110,6 +110,12 @@ def read_json_safe(path: Path) -> dict | list | None:
         return None
 
 
+def write_json_safe(path: Path, data: dict | list) -> None:
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(path)
+
+
 # --- Process Manager ---
 
 PROCESS_CONFIGS = {
@@ -461,6 +467,26 @@ def get_process_logs(name: str, last_n: int = 50):
     if name not in VALID_PROCESS_NAMES:
         raise HTTPException(404, f"Unknown process: {name}")
     return {"lines": pm.get_logs(name, last_n)}
+
+
+# -- Dismissed items (persisted in staging dir) --
+
+DISMISSED_DIR = STAGING_DIR / "dismissed"
+
+
+@app.get("/api/dismissed/{section}")
+def get_dismissed(section: str):
+    path = DISMISSED_DIR / f"{section}.json"
+    data = read_json_safe(path)
+    return data or {"paths": []}
+
+
+@app.put("/api/dismissed/{section}")
+def set_dismissed(section: str, body: dict):
+    DISMISSED_DIR.mkdir(parents=True, exist_ok=True)
+    path = DISMISSED_DIR / f"{section}.json"
+    write_json_safe(path, {"paths": body.get("paths", [])})
+    return {"ok": True}
 
 
 # -- Static file serving (built frontend) --
