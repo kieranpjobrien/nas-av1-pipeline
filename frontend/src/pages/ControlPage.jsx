@@ -9,6 +9,95 @@ import { PathEditor } from "../components/PathEditor";
 import { GentleEditor } from "../components/GentleEditor";
 import { MediaSearch } from "../components/MediaSearch";
 
+// CQ values: lower = better quality, higher = more compression
+// Base CQ table from config.py
+const CQ_TABLE = {
+  movie:  { "4K HDR": 22, "4K SDR": 27, "1080p": 28, "720p": 30, "480p": 30 },
+  series: { "4K HDR": 24, "4K SDR": 30, "1080p": 30, "720p": 32, "480p": 32 },
+};
+const PROFILE_OFFSETS = { protected: -3, baseline: 0, lossy: 6 };
+
+const CQ_MARKERS = [
+  { cq: 19, label: "Nolan 4K HDR", desc: "Protected profile — Interstellar, Oppenheimer", colour: PALETTE.green, side: "top" },
+  { cq: 22, label: "Movies 4K HDR", desc: "Baseline — high quality reference", colour: PALETTE.accent, side: "bottom" },
+  { cq: 25, label: "Movies 1080p (protected)", desc: "Visually important films at 1080p", colour: PALETTE.green, side: "top" },
+  { cq: 27, label: "Movies 4K SDR", desc: "Baseline 4K without HDR", colour: PALETTE.accent, side: "bottom" },
+  { cq: 28, label: "Movies 1080p", desc: "Standard movie encode", colour: PALETTE.accent, side: "top" },
+  { cq: 30, label: "Series 1080p", desc: "Standard series — The Wire, Succession", colour: "#8b8bef", side: "bottom" },
+  { cq: 34, label: "Sitcoms 1080p", desc: "Lossy profile — Seinfeld, Friends", colour: PALETTE.accentWarm, side: "top" },
+  { cq: 36, label: "Series 720p (lossy)", desc: "Lossy 720p — older shows, reality TV", colour: PALETTE.accentWarm, side: "bottom" },
+];
+
+function CQGuide() {
+  const minCQ = 16, maxCQ = 42;
+  const range = maxCQ - minCQ;
+  const pct = (cq) => ((cq - minCQ) / range) * 100;
+  const mono = { fontFamily: "'JetBrains Mono', monospace" };
+
+  return (
+    <div style={{ background: PALETTE.surface, border: `1px solid ${PALETTE.border}`, borderRadius: 12, padding: 20, marginBottom: 4 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4, fontSize: 11, color: PALETTE.textMuted }}>
+        <span>← Higher quality (larger files)</span>
+        <span>More compression (smaller files) →</span>
+      </div>
+
+      {/* Scale */}
+      <div style={{ position: "relative", height: 140, marginBottom: 12 }}>
+        {/* Track */}
+        <div style={{
+          position: "absolute", left: 0, right: 0, top: 60, height: 8,
+          borderRadius: 4, overflow: "hidden",
+          background: `linear-gradient(90deg, ${PALETTE.green} 0%, ${PALETTE.accent} 40%, ${PALETTE.accentWarm} 80%, ${PALETTE.red} 100%)`,
+          opacity: 0.3,
+        }} />
+
+        {/* CQ tick marks */}
+        {Array.from({ length: (maxCQ - minCQ) / 2 + 1 }, (_, i) => minCQ + i * 2).map((cq) => (
+          <div key={cq} style={{
+            position: "absolute", left: `${pct(cq)}%`, top: 56, width: 1, height: cq % 10 === 0 ? 16 : 8,
+            background: PALETTE.textMuted, opacity: 0.3,
+          }}>
+            {cq % 10 === 0 && (
+              <div style={{ position: "absolute", top: 20, left: -8, fontSize: 9, color: PALETTE.textMuted, ...mono }}>{cq}</div>
+            )}
+          </div>
+        ))}
+
+        {/* Markers */}
+        {CQ_MARKERS.map((m, i) => {
+          const isTop = m.side === "top";
+          return (
+            <div key={i} style={{ position: "absolute", left: `${pct(m.cq)}%`, top: isTop ? 0 : 76, transform: "translateX(-50%)" }}>
+              {/* Connector line */}
+              <div style={{
+                position: "absolute",
+                left: "50%", width: 1,
+                background: m.colour, opacity: 0.5,
+                ...(isTop ? { bottom: 0, height: 20 } : { top: 0, height: 16 }),
+              }} />
+              {/* Label */}
+              <div style={{
+                whiteSpace: "nowrap", fontSize: 10,
+                ...(isTop ? { marginBottom: 20 } : { marginTop: 16 }),
+              }}>
+                <span style={{ ...mono, color: m.colour, fontSize: 11, fontWeight: 700 }}>CQ {m.cq}</span>
+                <span style={{ color: PALETTE.text, marginLeft: 4, fontSize: 10 }}>{m.label}</span>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Profile legend */}
+      <div style={{ display: "flex", gap: 16, fontSize: 11, color: PALETTE.textMuted, borderTop: `1px solid ${PALETTE.border}`, paddingTop: 12 }}>
+        <span><span style={{ color: PALETTE.green, fontWeight: 700 }}>●</span> Protected (CQ −3) — reference films, epics</span>
+        <span><span style={{ color: PALETTE.accent, fontWeight: 700 }}>●</span> Baseline (CQ ±0) — standard encode</span>
+        <span><span style={{ color: PALETTE.accentWarm, fontWeight: 700 }}>●</span> Lossy (CQ +6) — sitcoms, reality TV</span>
+      </div>
+    </div>
+  );
+}
+
 export function ControlPage() {
   const { data: status, refresh } = usePolling(api.getControlStatus, 3000);
   const [skip, setSkip] = useState(null);
@@ -181,6 +270,10 @@ export function ControlPage() {
           onSave={async (paths) => { await api.setPriority(paths); setPriority({ paths }); }}
         />
       )}
+
+      {/* CQ Heuristic Guide */}
+      <SectionTitle>CQ Quality Guide</SectionTitle>
+      <CQGuide />
 
       {/* Gentle overrides */}
       <SectionTitle>Gentle Overrides</SectionTitle>
