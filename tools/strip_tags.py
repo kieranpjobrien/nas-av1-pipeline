@@ -19,6 +19,7 @@ VIDEO_EXTS = {".mkv", ".mp4", ".avi", ".m4v", ".wmv", ".flv", ".mov", ".ts", ".w
 # Also matches "Season.01.Episode.01" long-form format.
 EPISODE_RE = re.compile(
     r"(S\d{1,4}\s?E\d{1,2}(?:\s?E\d{1,2})?)"
+    r"|(S\d{1,4})(?=[\s.\-](?:1080|720|480|2160|4K|UHD|WEB|BluRay|HDTV|DSNP|AMZN|NF|ATVP|HMAX))"
     r"|Season[\s.]?(\d{1,4})[\s.]?Episode[\s.]?(\d{1,2})",
     re.IGNORECASE,
 )
@@ -110,11 +111,13 @@ def clean_series_name(stem: str, tag_re: re.Pattern = TAG_BOUNDARY_RE) -> str | 
     title = stem[: m.start()]
     # Strip trailing year — bare or parenthesized (e.g. "Show.2019.", "Show (2019) -")
     title = re.sub(r"[\s.]*\(?(19[2-9]\d|20[0-2]\d)\)?[\s.\-]*$", "", title)
-    # Normalize episode marker: group(1) is SxxExx, groups 2+3 are Season/Episode long form
+    # Normalize episode marker: group(1) is SxxExx, group(2) is season-only, groups 3+4 are Season/Episode long form
     if m.group(1):
         episode_marker = re.sub(r"\s+", "", m.group(1)).upper()
+    elif m.group(2):
+        episode_marker = m.group(2).upper()
     else:
-        episode_marker = f"S{int(m.group(2)):02d}E{int(m.group(3)):02d}"
+        episode_marker = f"S{int(m.group(3)):02d}E{int(m.group(4)):02d}"
 
     # After SxxExx: might contain episode title then tags
     after = stem[m.end() :]
