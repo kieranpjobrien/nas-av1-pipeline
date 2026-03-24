@@ -112,13 +112,13 @@ class Pipeline:
     def _prefetch_worker(self, queue: list[dict]):
         """Background thread: pre-fetch files from NAS while encoder is busy.
 
-        Keeps a small lookahead buffer of pre-fetched files so the GPU never
-        idles waiting on network. Limits to MAX_PREFETCH_AHEAD files to avoid
-        filling the entire staging drive with pre-fetched data.
+        Keeps a large lookahead buffer of pre-fetched files so the GPU never
+        idles waiting on network. Priority items are fetched first, then the
+        queue order is followed.
         """
-        MAX_PREFETCH_AHEAD = 5  # max un-encoded files in fetch buffer
+        MAX_PREFETCH_AHEAD = 20  # max un-encoded files in fetch buffer
 
-        logging.info("Prefetch thread started")
+        logging.info("Prefetch thread started (buffer: %d files)", MAX_PREFETCH_AHEAD)
         while not self._shutdown:
             fetched_any = False
 
@@ -132,7 +132,21 @@ class Pipeline:
                     time.sleep(5)
                 continue
 
-            for item in queue:
+            # Build priority set — fetch these first
+            priority_set = {
+                os.path.normpath(p).lower()
+                for p in self.control.get_priority_bumps()
+            }
+
+            # Sort queue: priority items first, then original order
+            fetch_order = sorted(
+                queue,
+                key=lambda item: (
+                    0 if os.path.normpath(item["filepath"]).lower() in priority_set else 1,
+                ),
+            )
+
+            for item in fetch_order:
                 if self._shutdown:
                     break
 
@@ -604,15 +618,25 @@ class Pipeline:
                 for p in self.control.get_priority_bumps()
             }
 
-            # Find next item to process. Priority items that need fetching
-            # jump ahead of already-fetched non-priority items.
-            ready_item = None
+            # Find next item to process.
+            # Priority: 1) fetched priority items, 2) any fetched item (don't
+            # let the GPU idle), 3) inline-fetch a priority item if nothing
+            # else is ready.
+            READY_STATUSES = (FileStatus.FETCHING.value, FileStatus.FETCHED.value,
+                              FileStatus.ENCODING.value, FileStatus.ENCODED.value,
+                              FileStatus.UPLOADING.value, FileStatus.UPLOADED.value,
+                              FileStatus.REPLACING.value)
+
+            ready_priority = None
+            ready_any = None
             first_pending = None
+            first_priority_pending = None
             all_done = True
             for item in queue:
                 filepath = item["filepath"]
                 existing = self.state.get_file(filepath)
                 status = existing["status"] if existing else None
+                is_priority = os.path.normpath(filepath).lower() in priority_set
 
                 # Skip terminal states
                 if status in (FileStatus.VERIFIED.value, FileStatus.REPLACED.value,
@@ -621,30 +645,28 @@ class Pipeline:
 
                 all_done = False
 
-                # Ready to process: fetched, mid-pipeline resume states, or
-                # stale FETCHING from a crashed run (zombie recovery handles it).
-                if status in (FileStatus.FETCHING.value, FileStatus.FETCHED.value,
-                               FileStatus.ENCODING.value, FileStatus.ENCODED.value,
-                               FileStatus.UPLOADING.value, FileStatus.UPLOADED.value,
-                               FileStatus.REPLACING.value):
-                    ready_item = item
-                    break
+                if status in READY_STATUSES:
+                    if is_priority and ready_priority is None:
+                        ready_priority = item
+                    elif ready_any is None:
+                        ready_any = item
 
-                # Track first pending item for inline-fetch fallback
-                if first_pending is None and status in (None, FileStatus.PENDING.value):
-                    first_pending = item
+                if status in (None, FileStatus.PENDING.value):
+                    if first_pending is None:
+                        first_pending = item
+                    if is_priority and first_priority_pending is None:
+                        first_priority_pending = item
 
             if all_done:
                 break
 
+            # Pick best item: priority fetched > any fetched > priority pending > any pending
+            ready_item = ready_priority or ready_any or first_priority_pending or first_pending
             if ready_item is None:
-                # Nothing fetched or priority-pending — inline-fetch first pending
-                ready_item = first_pending
-                if ready_item is None:
-                    if not prefetch_thread.is_alive():
-                        break  # Everything is either done or errored
-                    time.sleep(5)
-                    continue
+                if not prefetch_thread.is_alive():
+                    break  # Everything is either done or errored
+                time.sleep(5)
+                continue
 
             filepath = ready_item["filepath"]
 
