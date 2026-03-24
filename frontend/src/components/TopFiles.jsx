@@ -130,15 +130,15 @@ export function TopFiles({ files, title, limit = 15 }) {
         <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 10, color: PALETTE.textMuted, marginBottom: 2, paddingRight: 2 }}>
           <span style={{ width: 20 }} />
           <span style={{ flex: "0 1 38%" }}>File</span>
-          <span style={{ ...mono, minWidth: 50, textAlign: "right" }}>Size</span>
-          <span style={{ ...mono, minWidth: 48, textAlign: "right" }}>Saving</span>
-          <span style={{ ...mono, minWidth: 36, textAlign: "right" }}>Dur</span>
-          <span style={{ minWidth: 62, textAlign: "right" }}>Codec</span>
-          <span style={{ minWidth: 36, textAlign: "right" }}>Res</span>
-          <span style={{ minWidth: 16, textAlign: "center", color: PALETTE.green }} title="Priority">⚡</span>
-          <span style={{ minWidth: 16, textAlign: "center", color: "#8b8bef" }} title="Gentle +2 CQ">G</span>
-          <span style={{ minWidth: 16, textAlign: "center", color: PALETTE.accentWarm }} title="Re-encode">R</span>
-          <span style={{ minWidth: 36 }} />
+          <span style={{ ...mono, width: 50, textAlign: "right" }}>Size</span>
+          <span style={{ ...mono, width: 48, textAlign: "right" }}>Saving</span>
+          <span style={{ ...mono, width: 36, textAlign: "right" }}>Dur</span>
+          <span style={{ width: 80, textAlign: "right" }}>Codec</span>
+          <span style={{ width: 36, textAlign: "right" }}>Res</span>
+          <span style={{ width: 16, textAlign: "center", color: PALETTE.green }} title="Priority">⚡</span>
+          <span style={{ width: 16, textAlign: "center", color: "#8b8bef" }} title="Gentle +2 CQ">G</span>
+          <span style={{ width: 16, textAlign: "center", color: PALETTE.accentWarm }} title="Re-encode">R</span>
+          <span style={{ width: 36 }} />
         </div>
         {sorted.map((f, i) => {
           const saving = fileSaving(f);
@@ -172,15 +172,15 @@ export function TopFiles({ files, title, limit = 15 }) {
                   {f.filename}
                 </div>
               </div>
-              <span style={{ ...mono, color: PALETTE.textMuted, minWidth: 50, textAlign: "right", fontSize: 11 }}>{fmt(f.file_size_gb)}</span>
+              <span style={{ ...mono, color: PALETTE.textMuted, width: 50, textAlign: "right", fontSize: 11 }}>{fmt(f.file_size_gb)}</span>
               {saving > 0.01 ? (
-                <span style={{ ...mono, color: PALETTE.green, fontSize: 11, minWidth: 48, textAlign: "right" }}>-{fmt(saving)}</span>
+                <span style={{ ...mono, color: PALETTE.green, fontSize: 11, width: 48, textAlign: "right" }}>-{fmt(saving)}</span>
               ) : (
-                <span style={{ minWidth: 48 }} />
+                <span style={{ width: 48 }} />
               )}
-              <span style={{ ...mono, color: PALETTE.accent, fontSize: 11, minWidth: 36, textAlign: "right" }}>{fmtHrs(hrs)}</span>
-              <span style={{ color: getCodecColour(f.video?.codec), minWidth: 62, textAlign: "right", fontSize: 11 }}>{f.video?.codec}</span>
-              <span style={{ color: getResColour(f.video?.resolution_class), minWidth: 36, textAlign: "right", fontSize: 11 }}>{f.video?.resolution_class}</span>
+              <span style={{ ...mono, color: PALETTE.accent, fontSize: 11, width: 36, textAlign: "right" }}>{fmtHrs(hrs)}</span>
+              <span style={{ color: getCodecColour(f.video?.codec), width: 80, textAlign: "right", fontSize: 11 }}>{f.video?.codec}</span>
+              <span style={{ color: getResColour(f.video?.resolution_class), width: 36, textAlign: "right", fontSize: 11 }}>{f.video?.resolution_class}</span>
               {/* Action checkboxes */}
               <input type="checkbox" checked={isPri} onChange={() => togglePriority(f.filepath)} title="Priority" style={{ ...CHK, accentColor: PALETTE.green }} />
               <input type="checkbox" checked={isGen} onChange={() => toggleGentle(f.filepath)} title="Gentle +2 CQ" style={{ ...CHK, accentColor: "#8b8bef" }} />
@@ -195,7 +195,7 @@ export function TopFiles({ files, title, limit = 15 }) {
                   title="CQ value"
                 />
               ) : (
-                <span style={{ minWidth: 36 }} />
+                <span style={{ width: 36 }} />
               )}
             </div>
           );
