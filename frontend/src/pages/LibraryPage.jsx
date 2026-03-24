@@ -547,20 +547,13 @@ function getFolder(filepath) {
   return parts.join("\\");
 }
 
-const CQ_TABLE_FOLDERS = {
-  movie:  { "4K": 22, "1080p": 28, "720p": 30, "480p": 30, "SD": 30 },
-  series: { "4K": 24, "1080p": 30, "720p": 32, "480p": 32, "SD": 32 },
-};
-
-const FBTN = {
-  border: "none", borderRadius: 6, padding: "6px 14px",
-  fontSize: 12, fontWeight: 600, cursor: "pointer",
-};
+const FCHK = { width: 13, height: 13, cursor: "pointer", margin: 0 };
 
 function TopFolders({ files, limit = 15 }) {
   const [dismissed, setDismissed] = useState([]);
-  const [selected, setSelected] = useState(new Set());
-  const [cqValue, setCqValue] = useState(30);
+  const [priority, setPriority] = useState(new Set());
+  const [gentle, setGentle] = useState(new Set());
+  const [reencode, setReencode] = useState({}); // folderPath -> cq
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -584,87 +577,58 @@ function TopFolders({ files, limit = 15 }) {
   const maxSize = sorted[0]?.size_gb || 1;
   const folderLabel = (p) => p.split("\\").pop() || p;
   const mono = { fontFamily: "'JetBrains Mono', monospace" };
+  const hasActions = priority.size > 0 || gentle.size > 0 || Object.keys(reencode).length > 0;
 
-  const toggle = (path) => {
-    const next = new Set(selected);
-    if (next.has(path)) next.delete(path);
-    else next.add(path);
-    setSelected(next);
+  const togglePri = (path) => { const n = new Set(priority); n.has(path) ? n.delete(path) : n.add(path); setPriority(n); };
+  const toggleGen = (path) => { const n = new Set(gentle); n.has(path) ? n.delete(path) : n.add(path); setGentle(n); };
+  const toggleRe = (f) => {
+    const n = { ...reencode };
+    if (n[f.path]) { delete n[f.path]; } else { n[f.path] = 30; }
+    setReencode(n);
   };
+  const setReCQ = (path, val) => setReencode((prev) => ({ ...prev, [path]: val }));
 
-  const toggleAll = () => {
-    if (selected.size === sorted.length) setSelected(new Set());
-    else setSelected(new Set(sorted.map((f) => f.path)));
-  };
-
-  // Resolve selected folders to all constituent filepaths
-  const getSelectedFilePaths = () => {
+  const getFilePaths = (folderPaths) => {
     const paths = [];
-    for (const folderPath of selected) {
-      const folder = folderMap[folderPath];
-      if (folder) paths.push(...folder.filepaths);
-    }
+    for (const fp of folderPaths) { if (folderMap[fp]) paths.push(...folderMap[fp].filepaths); }
     return paths;
   };
 
-  const dismissSelected = async () => {
-    const next = [...dismissed, ...selected];
-    setDismissed(next);
-    setSelected(new Set());
-    try { await api.setDismissed("folders", next); } catch { /* ignore */ }
-  };
-
-  const addToPriority = async () => {
+  const submit = async () => {
     setBusy(true);
+    const toDismiss = new Set();
     try {
-      const filePaths = getSelectedFilePaths();
-      const current = await api.getPriority().catch(() => ({ paths: [] }));
-      const merged = [...new Set([...(current.paths || []), ...filePaths])];
-      await api.setPriority(merged);
-      await dismissSelected();
-    } catch { /* ignore */ }
-    setBusy(false);
-  };
-
-  const addToSkip = async () => {
-    setBusy(true);
-    try {
-      const filePaths = getSelectedFilePaths();
-      const current = await api.getSkip().catch(() => ({ paths: [] }));
-      const merged = [...new Set([...(current.paths || []), ...filePaths])];
-      await api.setSkip(merged);
-      await dismissSelected();
-    } catch { /* ignore */ }
-    setBusy(false);
-  };
-
-  const addToGentle = async () => {
-    setBusy(true);
-    try {
-      const filePaths = getSelectedFilePaths();
-      const current = await api.getGentle().catch(() => ({ paths: {}, patterns: {}, default_offset: 0 }));
-      const updated = { ...current, paths: { ...current.paths } };
-      for (const p of filePaths) {
-        if (!updated.paths[p]) updated.paths[p] = { cq_offset: 2 };
+      if (priority.size > 0) {
+        const filePaths = getFilePaths([...priority]);
+        const current = await api.getPriority().catch(() => ({ paths: [] }));
+        await api.setPriority([...new Set([...(current.paths || []), ...filePaths])]);
+        priority.forEach((p) => toDismiss.add(p));
       }
-      await api.setGentle(updated);
-      await dismissSelected();
-    } catch { /* ignore */ }
-    setBusy(false);
-  };
-
-  const addToReencode = async () => {
-    setBusy(true);
-    try {
-      const filePaths = getSelectedFilePaths();
-      const current = await api.getReencode().catch(() => ({ files: {}, patterns: {} }));
-      const updatedFiles = { ...(current.files || {}) };
-      for (const p of filePaths) {
-        updatedFiles[p] = { cq: cqValue };
+      if (gentle.size > 0) {
+        const filePaths = getFilePaths([...gentle]);
+        const current = await api.getGentle().catch(() => ({ paths: {}, patterns: {}, default_offset: 0 }));
+        const updated = { ...current, paths: { ...current.paths } };
+        for (const p of filePaths) updated.paths[p] = { cq_offset: 2 };
+        await api.setGentle(updated);
+        gentle.forEach((p) => toDismiss.add(p));
       }
-      await api.setReencode(updatedFiles, current.patterns || {});
-      await dismissSelected();
+      if (Object.keys(reencode).length > 0) {
+        const current = await api.getReencode().catch(() => ({ files: {}, patterns: {} }));
+        const updatedFiles = { ...(current.files || {}) };
+        for (const [folderPath, cq] of Object.entries(reencode)) {
+          const filePaths = getFilePaths([folderPath]);
+          for (const fp of filePaths) updatedFiles[fp] = { cq };
+          toDismiss.add(folderPath);
+        }
+        await api.setReencode(updatedFiles, current.patterns || {});
+      }
+      if (toDismiss.size > 0) {
+        const next = [...dismissed, ...toDismiss];
+        setDismissed(next);
+        try { await api.setDismissed("folders", next); } catch {}
+      }
     } catch { /* ignore */ }
+    setPriority(new Set()); setGentle(new Set()); setReencode({});
     setBusy(false);
   };
 
@@ -682,59 +646,55 @@ function TopFolders({ files, limit = 15 }) {
       )}
       <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
         {/* Header */}
-        <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 11, color: PALETTE.textMuted, marginBottom: 2 }}>
-          <input
-            type="checkbox"
-            checked={selected.size === sorted.length && sorted.length > 0}
-            onChange={toggleAll}
-            style={{ width: 14, height: 14, cursor: "pointer", accentColor: PALETTE.accent }}
-          />
+        <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 10, color: PALETTE.textMuted, marginBottom: 2 }}>
           <span style={{ width: 20 }} />
-          <span style={{ flex: "0 1 45%" }}>Folder</span>
-          <span style={{ ...mono, minWidth: 60, textAlign: "right" }}>Size</span>
-          <span style={{ ...mono, minWidth: 56, textAlign: "right" }}>Saving</span>
-          <span style={{ ...mono, minWidth: 44, textAlign: "right" }}>Dur</span>
-          <span style={{ ...mono, minWidth: 50, textAlign: "right" }}>Files</span>
+          <span style={{ flex: "0 1 40%" }}>Folder</span>
+          <span style={{ ...mono, minWidth: 55, textAlign: "right" }}>Size</span>
+          <span style={{ ...mono, minWidth: 50, textAlign: "right" }}>Saving</span>
+          <span style={{ ...mono, minWidth: 40, textAlign: "right" }}>Dur</span>
+          <span style={{ ...mono, minWidth: 44, textAlign: "right" }}>Files</span>
+          <span style={{ minWidth: 16, textAlign: "center", color: PALETTE.green }} title="Priority">⚡</span>
+          <span style={{ minWidth: 16, textAlign: "center", color: "#8b8bef" }} title="Gentle +2 CQ">G</span>
+          <span style={{ minWidth: 16, textAlign: "center", color: PALETTE.accentWarm }} title="Re-encode">R</span>
+          <span style={{ minWidth: 36 }} />
         </div>
         {sorted.map((f, i) => {
           const afterSize = f.size_gb - f.saving_gb;
-          const isSelected = selected.has(f.path);
+          const isPri = priority.has(f.path);
+          const isGen = gentle.has(f.path);
+          const isRe = f.path in reencode;
+          const anyAction = isPri || isGen || isRe;
           return (
             <div key={i} style={{
-              display: "flex", alignItems: "center", gap: 8, fontSize: 12,
-              background: isSelected ? `${PALETTE.accent}11` : "transparent",
+              display: "flex", alignItems: "center", gap: 6, fontSize: 12,
+              background: anyAction ? `${PALETTE.accent}08` : "transparent",
               borderRadius: 4, padding: "1px 0",
             }}>
-              <input
-                type="checkbox"
-                checked={isSelected}
-                onChange={() => toggle(f.path)}
-                style={{ width: 14, height: 14, cursor: "pointer", accentColor: PALETTE.accent }}
-              />
               <span style={{ ...mono, color: PALETTE.textMuted, width: 20, textAlign: "right", fontSize: 11 }}>{i + 1}</span>
-              <div style={{ flex: "0 1 45%", position: "relative", height: 22, background: PALETTE.surfaceLight, borderRadius: 4, overflow: "hidden", cursor: "pointer" }} onClick={() => toggle(f.path)}>
-                <div style={{
-                  position: "absolute", left: 0, top: 0, bottom: 0,
-                  width: `${(f.size_gb / maxSize) * 100}%`,
-                  background: PALETTE.accent, opacity: 0.2, borderRadius: 4,
-                }} />
-                <div style={{
-                  position: "absolute", left: 0, top: 0, bottom: 0,
-                  width: `${(afterSize / maxSize) * 100}%`,
-                  background: PALETTE.green, opacity: 0.35, borderRadius: 4,
-                }} />
+              <div style={{ flex: "0 1 40%", position: "relative", height: 22, background: PALETTE.surfaceLight, borderRadius: 4, overflow: "hidden" }}>
+                <div style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: `${(f.size_gb / maxSize) * 100}%`, background: PALETTE.accent, opacity: 0.2, borderRadius: 4 }} />
+                <div style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: `${(afterSize / maxSize) * 100}%`, background: PALETTE.green, opacity: 0.35, borderRadius: 4 }} />
                 <div style={{ position: "relative", padding: "2px 8px", color: PALETTE.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", lineHeight: "18px" }}>
                   {folderLabel(f.path)}
                 </div>
               </div>
-              <span style={{ ...mono, color: PALETTE.textMuted, minWidth: 60, textAlign: "right", fontSize: 11 }}>{fmt(f.size_gb)}</span>
+              <span style={{ ...mono, color: PALETTE.textMuted, minWidth: 55, textAlign: "right", fontSize: 11 }}>{fmt(f.size_gb)}</span>
               {f.saving_gb > 0.01 ? (
-                <span style={{ ...mono, color: PALETTE.green, fontSize: 11, minWidth: 56, textAlign: "right" }}>-{fmt(f.saving_gb)}</span>
-              ) : (
-                <span style={{ minWidth: 56 }} />
-              )}
-              <span style={{ ...mono, color: PALETTE.accent, fontSize: 11, minWidth: 44, textAlign: "right" }}>{fmtHrs(f.duration_hrs)}</span>
-              <span style={{ ...mono, color: PALETTE.textMuted, fontSize: 11, minWidth: 50, textAlign: "right" }}>{f.count} file{f.count !== 1 ? "s" : ""}</span>
+                <span style={{ ...mono, color: PALETTE.green, fontSize: 11, minWidth: 50, textAlign: "right" }}>-{fmt(f.saving_gb)}</span>
+              ) : ( <span style={{ minWidth: 50 }} /> )}
+              <span style={{ ...mono, color: PALETTE.accent, fontSize: 11, minWidth: 40, textAlign: "right" }}>{fmtHrs(f.duration_hrs)}</span>
+              <span style={{ ...mono, color: PALETTE.textMuted, fontSize: 11, minWidth: 44, textAlign: "right" }}>{f.count}</span>
+              <input type="checkbox" checked={isPri} onChange={() => togglePri(f.path)} title="Priority" style={{ ...FCHK, accentColor: PALETTE.green }} />
+              <input type="checkbox" checked={isGen} onChange={() => toggleGen(f.path)} title="Gentle +2 CQ" style={{ ...FCHK, accentColor: "#8b8bef" }} />
+              <input type="checkbox" checked={isRe} onChange={() => toggleRe(f)} title="Re-encode" style={{ ...FCHK, accentColor: PALETTE.accentWarm }} />
+              {isRe ? (
+                <input type="number" value={reencode[f.path]} min={1} max={63}
+                  onChange={(e) => setReCQ(f.path, parseInt(e.target.value, 10) || 30)}
+                  style={{ ...mono, width: 36, fontSize: 11, padding: "2px 3px", textAlign: "center",
+                    background: PALETTE.surfaceLight, color: PALETTE.text,
+                    border: `1px solid ${PALETTE.border}`, borderRadius: 3 }}
+                  title="CQ value" />
+              ) : ( <span style={{ minWidth: 36 }} /> )}
             </div>
           );
         })}
@@ -744,39 +704,25 @@ function TopFolders({ files, limit = 15 }) {
         <span><span style={{ display: "inline-block", width: 10, height: 10, borderRadius: 2, background: PALETTE.green, opacity: 0.5, marginRight: 4, verticalAlign: "middle" }} />Est. after AV1</span>
       </div>
 
-      {/* Action bar */}
-      {selected.size > 0 && (
+      {hasActions && (
         <div style={{
-          marginTop: 12, padding: "10px 14px",
+          marginTop: 12, padding: "8px 14px",
           background: PALETTE.surfaceLight, border: `1px solid ${PALETTE.border}`,
-          borderRadius: 8, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap",
+          borderRadius: 8, display: "flex", alignItems: "center", gap: 12,
         }}>
-          <span style={{ color: PALETTE.text, fontSize: 12, fontWeight: 600, marginRight: 4 }}>
-            {selected.size} folder{selected.size !== 1 ? "s" : ""} ({[...selected].reduce((s, p) => s + (folderMap[p]?.count || 0), 0)} files)
+          <span style={{ color: PALETTE.textMuted, fontSize: 12, flex: 1 }}>
+            {priority.size > 0 && <span style={{ color: PALETTE.green }}>⚡{priority.size} priority </span>}
+            {gentle.size > 0 && <span style={{ color: "#8b8bef" }}>G {gentle.size} gentle </span>}
+            {Object.keys(reencode).length > 0 && <span style={{ color: PALETTE.accentWarm }}>R {Object.keys(reencode).length} re-encode </span>}
           </span>
-          <button onClick={addToPriority} disabled={busy} style={{ ...FBTN, background: PALETTE.green, color: "#000" }}>Priority</button>
-          <button onClick={addToSkip} disabled={busy} style={{ ...FBTN, background: PALETTE.accentWarm, color: "#fff" }}>Skip</button>
-          <button onClick={addToGentle} disabled={busy} style={{ ...FBTN, background: "#8b8bef", color: "#fff" }}>Gentle +2</button>
-          <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
-            <button onClick={addToReencode} disabled={busy} style={{ ...FBTN, background: PALETTE.accent, color: "#fff" }}>Re-encode</button>
-            <span style={{ color: PALETTE.textMuted, fontSize: 11 }}>CQ</span>
-            <input
-              type="number"
-              value={cqValue}
-              onChange={(e) => setCqValue(parseInt(e.target.value, 10) || 30)}
-              min={1} max={63}
-              style={{
-                width: 44, ...mono, fontSize: 12, padding: "4px 6px",
-                background: PALETTE.surface, color: PALETTE.text,
-                border: `1px solid ${PALETTE.border}`, borderRadius: 4,
-                textAlign: "center",
-              }}
-            />
-          </span>
-          <button
-            onClick={() => setSelected(new Set())}
-            style={{ ...FBTN, background: "transparent", color: PALETTE.textMuted, padding: "6px 8px" }}
-          >Clear</button>
+          <button onClick={submit} disabled={busy} style={{
+            border: "none", borderRadius: 6, padding: "7px 20px", fontSize: 13, fontWeight: 700,
+            cursor: busy ? "default" : "pointer",
+            background: busy ? PALETTE.surfaceLight : PALETTE.accent,
+            color: busy ? PALETTE.textMuted : "#fff",
+          }}>{busy ? "Applying..." : "Apply"}</button>
+          <button onClick={() => { setPriority(new Set()); setGentle(new Set()); setReencode({}); }}
+            style={{ background: "none", border: "none", color: PALETTE.textMuted, fontSize: 11, cursor: "pointer" }}>Clear</button>
         </div>
       )}
     </div>

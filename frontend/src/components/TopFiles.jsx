@@ -27,15 +27,13 @@ function getBaseCQ(f) {
   return CQ_TABLE[type]?.[res] ?? 30;
 }
 
-const BTN = {
-  border: "none", borderRadius: 6, padding: "6px 14px",
-  fontSize: 12, fontWeight: 600, cursor: "pointer",
-};
+const CHK = { width: 13, height: 13, cursor: "pointer", margin: 0 };
 
 export function TopFiles({ files, title, limit = 15 }) {
   const [dismissed, setDismissed] = useState([]);
-  const [selected, setSelected] = useState(new Set());
-  const [cqValue, setCqValue] = useState(30);
+  const [priority, setPriority] = useState(new Set());
+  const [gentle, setGentle] = useState(new Set());
+  const [reencode, setReencode] = useState({}); // filepath -> cq
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -47,137 +45,117 @@ export function TopFiles({ files, title, limit = 15 }) {
   const maxSize = sorted[0]?.file_size_gb || 1;
   const mono = { fontFamily: "'JetBrains Mono', monospace" };
 
-  const toggle = (filepath) => {
-    const next = new Set(selected);
-    if (next.has(filepath)) next.delete(filepath);
-    else next.add(filepath);
-    setSelected(next);
-    // Update CQ default from first selected
-    if (next.size > 0) {
-      const first = sorted.find((f) => next.has(f.filepath));
-      if (first) setCqValue(getBaseCQ(first));
-    }
+  const hasActions = priority.size > 0 || gentle.size > 0 || Object.keys(reencode).length > 0;
+
+  const togglePriority = (fp) => {
+    const next = new Set(priority);
+    next.has(fp) ? next.delete(fp) : next.add(fp);
+    setPriority(next);
   };
 
-  const toggleAll = () => {
-    if (selected.size === sorted.length) {
-      setSelected(new Set());
+  const toggleGentle = (fp) => {
+    const next = new Set(gentle);
+    next.has(fp) ? next.delete(fp) : next.add(fp);
+    setGentle(next);
+  };
+
+  const toggleReencode = (f) => {
+    const next = { ...reencode };
+    if (next[f.filepath]) {
+      delete next[f.filepath];
     } else {
-      setSelected(new Set(sorted.map((f) => f.filepath)));
-      if (sorted.length > 0) setCqValue(getBaseCQ(sorted[0]));
+      next[f.filepath] = getBaseCQ(f);
     }
+    setReencode(next);
   };
 
-  const dismissSelected = async (paths) => {
-    const next = [...dismissed, ...paths];
-    setDismissed(next);
-    setSelected(new Set());
-    try { await api.setDismissed("files", next); } catch { /* ignore */ }
+  const setCQ = (fp, val) => {
+    setReencode((prev) => ({ ...prev, [fp]: val }));
   };
 
-  const selectedPaths = [...selected];
-
-  const addToPriority = async () => {
+  const submit = async () => {
     setBusy(true);
+    const toDismiss = new Set();
     try {
-      const current = await api.getPriority().catch(() => ({ paths: [] }));
-      const merged = [...new Set([...(current.paths || []), ...selectedPaths])];
-      await api.setPriority(merged);
-      await dismissSelected(selectedPaths);
-    } catch { /* ignore */ }
-    setBusy(false);
-  };
-
-  const addToSkip = async () => {
-    setBusy(true);
-    try {
-      const current = await api.getSkip().catch(() => ({ paths: [] }));
-      const merged = [...new Set([...(current.paths || []), ...selectedPaths])];
-      await api.setSkip(merged);
-      await dismissSelected(selectedPaths);
-    } catch { /* ignore */ }
-    setBusy(false);
-  };
-
-  const addToGentle = async () => {
-    setBusy(true);
-    try {
-      const current = await api.getGentle().catch(() => ({ paths: {}, patterns: {}, default_offset: 0 }));
-      const updated = { ...current, paths: { ...current.paths } };
-      for (const p of selectedPaths) {
-        if (!updated.paths[p]) updated.paths[p] = { cq_offset: 2 };
+      if (priority.size > 0) {
+        const paths = [...priority];
+        const current = await api.getPriority().catch(() => ({ paths: [] }));
+        await api.setPriority([...new Set([...(current.paths || []), ...paths])]);
+        paths.forEach((p) => toDismiss.add(p));
       }
-      await api.setGentle(updated);
-      await dismissSelected(selectedPaths);
-    } catch { /* ignore */ }
-    setBusy(false);
-  };
-
-  const addToReencode = async () => {
-    setBusy(true);
-    try {
-      const current = await api.getReencode().catch(() => ({ files: {}, patterns: {} }));
-      const updatedFiles = { ...(current.files || {}) };
-      for (const p of selectedPaths) {
-        updatedFiles[p] = { cq: cqValue };
+      if (gentle.size > 0) {
+        const paths = [...gentle];
+        const current = await api.getGentle().catch(() => ({ paths: {}, patterns: {}, default_offset: 0 }));
+        const updated = { ...current, paths: { ...current.paths } };
+        for (const p of paths) updated.paths[p] = { cq_offset: 2 };
+        await api.setGentle(updated);
+        paths.forEach((p) => toDismiss.add(p));
       }
-      await api.setReencode(updatedFiles, current.patterns || {});
-      await dismissSelected(selectedPaths);
+      if (Object.keys(reencode).length > 0) {
+        const current = await api.getReencode().catch(() => ({ files: {}, patterns: {} }));
+        const updatedFiles = { ...(current.files || {}) };
+        for (const [fp, cq] of Object.entries(reencode)) {
+          updatedFiles[fp] = { cq };
+          toDismiss.add(fp);
+        }
+        await api.setReencode(updatedFiles, current.patterns || {});
+      }
+      if (toDismiss.size > 0) {
+        const next = [...dismissed, ...toDismiss];
+        setDismissed(next);
+        try { await api.setDismissed("files", next); } catch {}
+      }
     } catch { /* ignore */ }
+    setPriority(new Set());
+    setGentle(new Set());
+    setReencode({});
     setBusy(false);
   };
 
   return (
-    <div style={{ background: PALETTE.surface, border: `1px solid ${PALETTE.border}`, borderRadius: 12, padding: 20, position: "relative" }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+    <div style={{ background: PALETTE.surface, border: `1px solid ${PALETTE.border}`, borderRadius: 12, padding: 20 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
         <div style={{ color: PALETTE.text, fontSize: 15, fontWeight: 600 }}>{title}</div>
-        <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
-          {dismissed.length > 0 && (
-            <button
-              onClick={async () => { setDismissed([]); try { await api.setDismissed("files", []); } catch {} }}
-              style={{ background: "none", border: "none", color: PALETTE.textMuted, fontSize: 11, cursor: "pointer", textDecoration: "underline" }}
-            >
-              Reset {dismissed.length} dismissed
-            </button>
-          )}
-        </div>
+        {dismissed.length > 0 && (
+          <button
+            onClick={async () => { setDismissed([]); try { await api.setDismissed("files", []); } catch {} }}
+            style={{ background: "none", border: "none", color: PALETTE.textMuted, fontSize: 11, cursor: "pointer", textDecoration: "underline" }}
+          >
+            Reset {dismissed.length} dismissed
+          </button>
+        )}
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
-        {/* Header row with select-all */}
-        <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 11, color: PALETTE.textMuted, marginBottom: 2 }}>
-          <input
-            type="checkbox"
-            checked={selected.size === sorted.length && sorted.length > 0}
-            onChange={toggleAll}
-            style={{ width: 14, height: 14, cursor: "pointer", accentColor: PALETTE.accent }}
-          />
+        {/* Header */}
+        <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 10, color: PALETTE.textMuted, marginBottom: 2, paddingRight: 2 }}>
           <span style={{ width: 20 }} />
-          <span style={{ flex: "0 1 40%" }}>File</span>
-          <span style={{ ...mono, minWidth: 55, textAlign: "right" }}>Size</span>
-          <span style={{ ...mono, minWidth: 52, textAlign: "right" }}>Saving</span>
-          <span style={{ ...mono, minWidth: 40, textAlign: "right" }}>Dur</span>
-          <span style={{ minWidth: 70, textAlign: "right" }}>Codec</span>
-          <span style={{ minWidth: 40, textAlign: "right" }}>Res</span>
+          <span style={{ flex: "0 1 38%" }}>File</span>
+          <span style={{ ...mono, minWidth: 50, textAlign: "right" }}>Size</span>
+          <span style={{ ...mono, minWidth: 48, textAlign: "right" }}>Saving</span>
+          <span style={{ ...mono, minWidth: 36, textAlign: "right" }}>Dur</span>
+          <span style={{ minWidth: 62, textAlign: "right" }}>Codec</span>
+          <span style={{ minWidth: 36, textAlign: "right" }}>Res</span>
+          <span style={{ minWidth: 16, textAlign: "center", color: PALETTE.green }} title="Priority">⚡</span>
+          <span style={{ minWidth: 16, textAlign: "center", color: "#8b8bef" }} title="Gentle +2 CQ">G</span>
+          <span style={{ minWidth: 16, textAlign: "center", color: PALETTE.accentWarm }} title="Re-encode">R</span>
+          <span style={{ minWidth: 36 }} />
         </div>
         {sorted.map((f, i) => {
           const saving = fileSaving(f);
           const afterSize = f.file_size_gb - saving;
           const hrs = (f.duration_seconds || 0) / 3600;
-          const isSelected = selected.has(f.filepath);
+          const isPri = priority.has(f.filepath);
+          const isGen = gentle.has(f.filepath);
+          const isRe = f.filepath in reencode;
+          const anyAction = isPri || isGen || isRe;
           return (
             <div key={i} style={{
-              display: "flex", alignItems: "center", gap: 8, fontSize: 12,
-              background: isSelected ? `${PALETTE.accent}11` : "transparent",
+              display: "flex", alignItems: "center", gap: 6, fontSize: 12,
+              background: anyAction ? `${PALETTE.accent}08` : "transparent",
               borderRadius: 4, padding: "1px 0",
             }}>
-              <input
-                type="checkbox"
-                checked={isSelected}
-                onChange={() => toggle(f.filepath)}
-                style={{ width: 14, height: 14, cursor: "pointer", accentColor: PALETTE.accent }}
-              />
               <span style={{ ...mono, color: PALETTE.textMuted, width: 20, textAlign: "right", fontSize: 11 }}>{i + 1}</span>
-              <div style={{ flex: "0 1 40%", position: "relative", height: 22, background: PALETTE.surfaceLight, borderRadius: 4, overflow: "hidden", cursor: "pointer" }} onClick={() => toggle(f.filepath)}>
+              <div style={{ flex: "0 1 38%", position: "relative", height: 22, background: PALETTE.surfaceLight, borderRadius: 4, overflow: "hidden" }}>
                 <div style={{
                   position: "absolute", left: 0, top: 0, bottom: 0,
                   width: `${(f.file_size_gb / maxSize) * 100}%`,
@@ -194,15 +172,31 @@ export function TopFiles({ files, title, limit = 15 }) {
                   {f.filename}
                 </div>
               </div>
-              <span style={{ ...mono, color: PALETTE.textMuted, minWidth: 55, textAlign: "right", fontSize: 11 }}>{fmt(f.file_size_gb)}</span>
+              <span style={{ ...mono, color: PALETTE.textMuted, minWidth: 50, textAlign: "right", fontSize: 11 }}>{fmt(f.file_size_gb)}</span>
               {saving > 0.01 ? (
-                <span style={{ ...mono, color: PALETTE.green, fontSize: 11, minWidth: 52, textAlign: "right" }}>-{fmt(saving)}</span>
+                <span style={{ ...mono, color: PALETTE.green, fontSize: 11, minWidth: 48, textAlign: "right" }}>-{fmt(saving)}</span>
               ) : (
-                <span style={{ minWidth: 52 }} />
+                <span style={{ minWidth: 48 }} />
               )}
-              <span style={{ ...mono, color: PALETTE.accent, fontSize: 11, minWidth: 40, textAlign: "right" }}>{fmtHrs(hrs)}</span>
-              <span style={{ color: getCodecColour(f.video?.codec), minWidth: 70, textAlign: "right", fontSize: 11 }}>{f.video?.codec}</span>
-              <span style={{ color: getResColour(f.video?.resolution_class), minWidth: 40, textAlign: "right", fontSize: 11 }}>{f.video?.resolution_class}</span>
+              <span style={{ ...mono, color: PALETTE.accent, fontSize: 11, minWidth: 36, textAlign: "right" }}>{fmtHrs(hrs)}</span>
+              <span style={{ color: getCodecColour(f.video?.codec), minWidth: 62, textAlign: "right", fontSize: 11 }}>{f.video?.codec}</span>
+              <span style={{ color: getResColour(f.video?.resolution_class), minWidth: 36, textAlign: "right", fontSize: 11 }}>{f.video?.resolution_class}</span>
+              {/* Action checkboxes */}
+              <input type="checkbox" checked={isPri} onChange={() => togglePriority(f.filepath)} title="Priority" style={{ ...CHK, accentColor: PALETTE.green }} />
+              <input type="checkbox" checked={isGen} onChange={() => toggleGentle(f.filepath)} title="Gentle +2 CQ" style={{ ...CHK, accentColor: "#8b8bef" }} />
+              <input type="checkbox" checked={isRe} onChange={() => toggleReencode(f)} title="Re-encode" style={{ ...CHK, accentColor: PALETTE.accentWarm }} />
+              {isRe ? (
+                <input
+                  type="number" value={reencode[f.filepath]} min={1} max={63}
+                  onChange={(e) => setCQ(f.filepath, parseInt(e.target.value, 10) || 30)}
+                  style={{ ...mono, width: 36, fontSize: 11, padding: "2px 3px", textAlign: "center",
+                    background: PALETTE.surfaceLight, color: PALETTE.text,
+                    border: `1px solid ${PALETTE.border}`, borderRadius: 3 }}
+                  title="CQ value"
+                />
+              ) : (
+                <span style={{ minWidth: 36 }} />
+              )}
             </div>
           );
         })}
@@ -214,38 +208,30 @@ export function TopFiles({ files, title, limit = 15 }) {
         <span><span style={{ display: "inline-block", width: 10, height: 10, borderRadius: 2, background: PALETTE.green, opacity: 0.5, marginRight: 4, verticalAlign: "middle" }} />Est. after AV1</span>
       </div>
 
-      {/* Action bar */}
-      {selected.size > 0 && (
+      {/* Submit bar */}
+      {hasActions && (
         <div style={{
-          marginTop: 12, padding: "10px 14px",
+          marginTop: 12, padding: "8px 14px",
           background: PALETTE.surfaceLight, border: `1px solid ${PALETTE.border}`,
-          borderRadius: 8, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap",
+          borderRadius: 8, display: "flex", alignItems: "center", gap: 12,
         }}>
-          <span style={{ color: PALETTE.text, fontSize: 12, fontWeight: 600, marginRight: 4 }}>
-            {selected.size} selected
-          </span>
-          <button onClick={addToPriority} disabled={busy} style={{ ...BTN, background: PALETTE.green, color: "#000" }}>Priority</button>
-          <button onClick={addToSkip} disabled={busy} style={{ ...BTN, background: PALETTE.accentWarm, color: "#fff" }}>Skip</button>
-          <button onClick={addToGentle} disabled={busy} style={{ ...BTN, background: "#8b8bef", color: "#fff" }}>Gentle +2</button>
-          <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
-            <button onClick={addToReencode} disabled={busy} style={{ ...BTN, background: PALETTE.accent, color: "#fff" }}>Re-encode</button>
-            <span style={{ color: PALETTE.textMuted, fontSize: 11 }}>CQ</span>
-            <input
-              type="number"
-              value={cqValue}
-              onChange={(e) => setCqValue(parseInt(e.target.value, 10) || 30)}
-              min={1} max={63}
-              style={{
-                width: 44, ...mono, fontSize: 12, padding: "4px 6px",
-                background: PALETTE.surface, color: PALETTE.text,
-                border: `1px solid ${PALETTE.border}`, borderRadius: 4,
-                textAlign: "center",
-              }}
-            />
+          <span style={{ color: PALETTE.textMuted, fontSize: 12, flex: 1 }}>
+            {priority.size > 0 && <span style={{ color: PALETTE.green }}>⚡{priority.size} priority </span>}
+            {gentle.size > 0 && <span style={{ color: "#8b8bef" }}>G {gentle.size} gentle </span>}
+            {Object.keys(reencode).length > 0 && <span style={{ color: PALETTE.accentWarm }}>R {Object.keys(reencode).length} re-encode </span>}
           </span>
           <button
-            onClick={() => setSelected(new Set())}
-            style={{ ...BTN, background: "transparent", color: PALETTE.textMuted, padding: "6px 8px" }}
+            onClick={submit} disabled={busy}
+            style={{
+              border: "none", borderRadius: 6, padding: "7px 20px",
+              fontSize: 13, fontWeight: 700, cursor: busy ? "default" : "pointer",
+              background: busy ? PALETTE.surfaceLight : PALETTE.accent,
+              color: busy ? PALETTE.textMuted : "#fff",
+            }}
+          >{busy ? "Applying..." : "Apply"}</button>
+          <button
+            onClick={() => { setPriority(new Set()); setGentle(new Set()); setReencode({}); }}
+            style={{ background: "none", border: "none", color: PALETTE.textMuted, fontSize: 11, cursor: "pointer" }}
           >Clear</button>
         </div>
       )}
