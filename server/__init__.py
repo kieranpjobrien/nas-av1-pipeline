@@ -9,16 +9,18 @@ Usage:
     uv run uvicorn server:app --host 0.0.0.0 --port 8000
 """
 
+import asyncio
 import json
 import os
 import subprocess
 import sys
 import threading
+import time
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -27,6 +29,7 @@ from paths import STAGING_DIR, MEDIA_REPORT
 # Derived paths
 CONTROL_DIR = STAGING_DIR / "control"
 STATE_FILE = STAGING_DIR / "pipeline_state.json"
+HISTORY_FILE = STAGING_DIR / "encode_history.jsonl"
 FRONTEND_DIST = Path(__file__).parent.parent / "frontend" / "dist"
 
 
@@ -487,6 +490,279 @@ def set_dismissed(section: str, body: dict):
     path = DISMISSED_DIR / f"{section}.json"
     write_json_safe(path, {"paths": body.get("paths", [])})
     return {"ok": True}
+
+
+# -- GPU monitoring --
+
+_gpu_cache: dict = {}
+_gpu_cache_time: float = 0
+
+
+def _query_gpu() -> dict:
+    """Query nvidia-smi for GPU stats. Cached for 3 seconds."""
+    global _gpu_cache, _gpu_cache_time
+    now = time.monotonic()
+    if now - _gpu_cache_time < 3 and _gpu_cache:
+        return _gpu_cache
+    try:
+        result = subprocess.run(
+            ["nvidia-smi",
+             "--query-gpu=utilization.gpu,utilization.encoder,memory.used,memory.total,"
+             "temperature.gpu,power.draw,name",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode != 0:
+            return {"available": False}
+        parts = [p.strip() for p in result.stdout.strip().split(",")]
+        if len(parts) < 7:
+            return {"available": False}
+        _gpu_cache = {
+            "available": True,
+            "gpu_util": int(parts[0]),
+            "encoder_util": int(parts[1]),
+            "mem_used_mb": int(parts[2]),
+            "mem_total_mb": int(parts[3]),
+            "temp_c": int(parts[4]),
+            "power_w": float(parts[5]),
+            "name": parts[6],
+        }
+        _gpu_cache_time = now
+        return _gpu_cache
+    except (FileNotFoundError, subprocess.TimeoutExpired, Exception):
+        return {"available": False}
+
+
+@app.get("/api/gpu")
+def get_gpu():
+    return _query_gpu()
+
+
+# -- Encode history --
+
+def _read_history(days: int = 0, limit: int = 0) -> list[dict]:
+    """Read encode history JSONL, optionally filtering by recency."""
+    if not HISTORY_FILE.exists():
+        return []
+    entries = []
+    cutoff = None
+    if days > 0:
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    try:
+        with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if cutoff and entry.get("timestamp", "") < cutoff:
+                    continue
+                entries.append(entry)
+    except OSError:
+        return []
+    if limit > 0:
+        entries = entries[-limit:]
+    return entries
+
+
+@app.get("/api/history")
+def get_history(days: int = 0, limit: int = 500):
+    return {"entries": _read_history(days=days, limit=limit)}
+
+
+@app.get("/api/history/summary")
+def get_history_summary():
+    """Aggregated history stats: per-day totals, per-tier averages, forecast."""
+    entries = _read_history()
+    if not entries:
+        return {"days": [], "tiers": {}, "totals": {}, "forecast": None}
+
+    # Per-day aggregation
+    by_day: dict[str, dict] = {}
+    by_tier: dict[str, dict] = {}
+    total_input = 0
+    total_output = 0
+    total_saved = 0
+    total_time = 0.0
+
+    for e in entries:
+        day = e.get("timestamp", "")[:10]
+        if day not in by_day:
+            by_day[day] = {"count": 0, "saved_bytes": 0, "input_bytes": 0, "output_bytes": 0,
+                           "encode_time_secs": 0}
+        d = by_day[day]
+        d["count"] += 1
+        d["saved_bytes"] += e.get("saved_bytes", 0)
+        d["input_bytes"] += e.get("input_bytes", 0)
+        d["output_bytes"] += e.get("output_bytes", 0)
+        d["encode_time_secs"] += e.get("encode_time_secs", 0)
+
+        tier = e.get("res_key", "unknown")
+        if tier not in by_tier:
+            by_tier[tier] = {"count": 0, "saved_bytes": 0, "input_bytes": 0, "output_bytes": 0,
+                             "encode_time_secs": 0, "total_compression_ratio": 0}
+        t = by_tier[tier]
+        t["count"] += 1
+        t["saved_bytes"] += e.get("saved_bytes", 0)
+        t["input_bytes"] += e.get("input_bytes", 0)
+        t["output_bytes"] += e.get("output_bytes", 0)
+        t["encode_time_secs"] += e.get("encode_time_secs", 0)
+        t["total_compression_ratio"] += e.get("compression_ratio", 0)
+
+        total_input += e.get("input_bytes", 0)
+        total_output += e.get("output_bytes", 0)
+        total_saved += e.get("saved_bytes", 0)
+        total_time += e.get("encode_time_secs", 0)
+
+    # Compute per-tier averages
+    for tier in by_tier.values():
+        n = tier["count"]
+        if n > 0:
+            tier["avg_compression_ratio"] = round(tier.pop("total_compression_ratio") / n, 3)
+            tier["avg_encode_time_secs"] = round(tier["encode_time_secs"] / n, 1)
+        else:
+            tier.pop("total_compression_ratio", None)
+
+    # Forecast: use recent daily average to estimate completion
+    days_list = sorted(by_day.items())
+    forecast = None
+    if len(days_list) >= 2:
+        recent = days_list[-7:]  # last 7 active days
+        avg_per_day = sum(d["count"] for _, d in recent) / len(recent)
+        avg_saved_per_day = sum(d["saved_bytes"] for _, d in recent) / len(recent)
+
+        # Load pipeline state to get remaining count
+        state_data = read_json_safe(STATE_FILE)
+        if state_data and "files" in state_data:
+            remaining = sum(
+                1 for f in state_data["files"].values()
+                if f.get("status") not in ("verified", "replaced", "skipped", "error")
+            )
+            if avg_per_day > 0 and remaining > 0:
+                days_remaining = remaining / avg_per_day
+                est_date = datetime.now() + timedelta(days=days_remaining)
+                forecast = {
+                    "remaining_files": remaining,
+                    "avg_files_per_day": round(avg_per_day, 1),
+                    "avg_saved_per_day_gb": round(avg_saved_per_day / (1024**3), 2),
+                    "est_completion_date": est_date.strftime("%Y-%m-%d"),
+                    "est_days_remaining": round(days_remaining, 1),
+                }
+
+    return {
+        "days": [{"date": d, **v} for d, v in sorted(by_day.items())],
+        "tiers": by_tier,
+        "totals": {
+            "entries": len(entries),
+            "input_bytes": total_input,
+            "output_bytes": total_output,
+            "saved_bytes": total_saved,
+            "encode_time_secs": round(total_time, 1),
+        },
+        "forecast": forecast,
+    }
+
+
+# -- WebSocket for live updates --
+
+class ConnectionManager:
+    """Manage WebSocket connections for live pipeline updates."""
+
+    def __init__(self):
+        self.connections: list[WebSocket] = []
+
+    async def connect(self, ws: WebSocket):
+        await ws.accept()
+        self.connections.append(ws)
+
+    def disconnect(self, ws: WebSocket):
+        if ws in self.connections:
+            self.connections.remove(ws)
+
+    async def broadcast(self, data: dict):
+        dead = []
+        for ws in self.connections:
+            try:
+                await ws.send_json(data)
+            except Exception:
+                dead.append(ws)
+        for ws in dead:
+            self.disconnect(ws)
+
+
+ws_manager = ConnectionManager()
+_ws_state_mtime: float = 0
+
+
+@app.websocket("/api/ws")
+async def websocket_endpoint(ws: WebSocket):
+    global _ws_state_mtime
+    await ws_manager.connect(ws)
+    try:
+        # Send initial state
+        state_data = read_json_safe(STATE_FILE)
+        if state_data:
+            await ws.send_json({"type": "pipeline", "data": state_data})
+
+        gpu_data = _query_gpu()
+        await ws.send_json({"type": "gpu", "data": gpu_data})
+
+        control_data = {
+            "pause_state": get_pause_state(),
+            "has_skip": file_exists("skip.json"),
+            "has_priority": file_exists("priority.json"),
+            "has_gentle": file_exists("gentle.json"),
+            "has_reencode": file_exists("reencode.json"),
+        }
+        await ws.send_json({"type": "control", "data": control_data})
+
+        # Poll loop — push updates when state changes
+        gpu_tick = 0
+        while True:
+            # Check for client messages (keepalive / close)
+            try:
+                await asyncio.wait_for(ws.receive_text(), timeout=1.0)
+            except asyncio.TimeoutError:
+                pass
+            except WebSocketDisconnect:
+                break
+
+            # Pipeline state — check mtime
+            try:
+                mtime = STATE_FILE.stat().st_mtime if STATE_FILE.exists() else 0
+            except OSError:
+                mtime = 0
+            if mtime != _ws_state_mtime:
+                _ws_state_mtime = mtime
+                data = read_json_safe(STATE_FILE)
+                if data:
+                    await ws.send_json({"type": "pipeline", "data": data})
+
+            # GPU stats every 5 ticks (~5 seconds)
+            gpu_tick += 1
+            if gpu_tick >= 5:
+                gpu_tick = 0
+                await ws.send_json({"type": "gpu", "data": _query_gpu()})
+
+            # Control status every tick
+            new_control = {
+                "pause_state": get_pause_state(),
+                "has_skip": file_exists("skip.json"),
+                "has_priority": file_exists("priority.json"),
+                "has_gentle": file_exists("gentle.json"),
+                "has_reencode": file_exists("reencode.json"),
+            }
+            if new_control != control_data:
+                control_data = new_control
+                await ws.send_json({"type": "control", "data": control_data})
+
+    except WebSocketDisconnect:
+        pass
+    finally:
+        ws_manager.disconnect(ws)
 
 
 # -- Static file serving (built frontend) --

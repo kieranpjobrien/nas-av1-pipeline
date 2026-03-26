@@ -50,4 +50,7 @@ export const api = {
   getProcessLogs: (name, lastN = 50) => fetchJSON(`/process/${name}/logs?last_n=${lastN}`),
   getDismissed: (section) => fetchJSON(`/dismissed/${section}`).then((d) => d.paths || []).catch(() => []),
   setDismissed: (section, paths) => putJSON(`/dismissed/${section}`, { paths }),
+  getGpu: () => fetchJSON("/gpu"),
+  getHistory: (days = 0, limit = 500) => fetchJSON(`/history?days=${days}&limit=${limit}`),
+  getHistorySummary: () => fetchJSON("/history/summary"),
 };

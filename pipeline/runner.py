@@ -4,6 +4,7 @@ import copy
 import json
 import logging
 import os
+import queue as queue_mod
 import signal
 import sys
 import threading
@@ -73,6 +74,11 @@ class Pipeline:
         self.control = PipelineControl(staging_dir)
         self._shutdown = False
         self._report_cache = None  # lazy-loaded media report index
+
+        # Upload worker queue: items waiting for upload → verify → replace
+        self._upload_queue: queue_mod.Queue[tuple[dict, dict]] = queue_mod.Queue()
+        # Registry of item metadata by filepath (for upload worker lookups)
+        self._item_configs: dict[str, dict] = {}
 
         # Set up signal handlers for graceful shutdown
         signal.signal(signal.SIGINT, self._handle_signal)
@@ -188,6 +194,131 @@ class Pipeline:
                     time.sleep(5)
 
         logging.info("Prefetch thread finished")
+
+    def _upload_worker(self):
+        """Background thread: upload encoded files to NAS while GPU encodes the next file.
+
+        Processes upload → verify → replace for each encoded file, allowing the
+        main loop to immediately start the next encode without waiting for network I/O.
+        """
+        logging.info("Upload worker started — uploads will overlap with encoding")
+        while True:
+            try:
+                item, effective_config = self._upload_queue.get(timeout=5)
+            except queue_mod.Empty:
+                if self._shutdown and self._upload_queue.empty():
+                    break
+                continue
+
+            filepath = item["filepath"]
+
+            try:
+                # Upload
+                existing = self.state.get_file(filepath)
+                current_status = existing["status"] if existing else None
+
+                if current_status == FileStatus.ENCODED.value:
+                    success = stage_upload(filepath, item, self.staging_dir, effective_config, self.state)
+                    if not success:
+                        self.state.stats["errors"] += 1
+                        self.state.save()
+                        self._upload_queue.task_done()
+                        continue
+
+                # Verify
+                existing = self.state.get_file(filepath)
+                current_status = existing["status"] if existing else None
+
+                if current_status == FileStatus.UPLOADED.value:
+                    success = stage_verify(filepath, item, effective_config, self.state)
+                    if not success:
+                        self.state.stats["errors"] += 1
+                        self.state.save()
+                        self._upload_queue.task_done()
+                        continue
+
+                # Replace
+                existing = self.state.get_file(filepath)
+                current_status = existing["status"] if existing else None
+
+                if current_status == FileStatus.VERIFIED.value and effective_config.get("replace_original", True):
+                    success = stage_replace(filepath, item, effective_config, self.state)
+                    if success:
+                        self.control.remove_reencode(filepath)
+                    else:
+                        self.state.stats["errors"] += 1
+                        self.state.save()
+
+                elif current_status == FileStatus.REPLACING.value:
+                    success = stage_replace(filepath, item, effective_config, self.state)
+                    if success:
+                        self.control.remove_reencode(filepath)
+                    else:
+                        self.state.stats["errors"] += 1
+                        self.state.save()
+
+            except Exception as e:
+                logging.error(f"Upload worker error for {item['filename']}: {e}")
+                self.state.set_file(filepath, FileStatus.ERROR, error=str(e), stage="upload_worker")
+                self.state.stats["errors"] += 1
+                self.state.save()
+
+            self._upload_queue.task_done()
+
+        logging.info("Upload worker finished")
+
+    def _audio_remux_async(self, item: dict, effective_config: dict):
+        """Run audio-only remux in a background thread (no GPU needed).
+
+        After remux completes, enqueues the item for the upload worker.
+        """
+        filepath = item["filepath"]
+        try:
+            # Fetch if needed
+            existing = self.state.get_file(filepath)
+            current_status = existing["status"] if existing else None
+
+            if current_status in (None, FileStatus.PENDING.value):
+                local_path = stage_fetch(item, self.staging_dir, effective_config, self.state)
+                if local_path is None:
+                    logging.warning(f"Audio remux fetch failed: {item['filename']}")
+                    self.state.set_file(filepath, FileStatus.ERROR,
+                                        error="fetch failed for audio remux", stage="fetch")
+                    self.state.stats["errors"] += 1
+                    self.state.save()
+                    return
+
+            # Wait if still being fetched by prefetch thread
+            existing = self.state.get_file(filepath)
+            current_status = existing["status"] if existing else None
+            if current_status == FileStatus.FETCHING.value:
+                for _ in range(120):
+                    if self._shutdown:
+                        return
+                    time.sleep(5)
+                    existing = self.state.get_file(filepath)
+                    current_status = existing["status"] if existing else None
+                    if current_status != FileStatus.FETCHING.value:
+                        break
+
+            existing = self.state.get_file(filepath)
+            current_status = existing["status"] if existing else None
+
+            if current_status == FileStatus.FETCHED.value:
+                output_path = stage_audio_remux(filepath, item, self.staging_dir, effective_config, self.state)
+                if output_path is None:
+                    self.state.stats["errors"] += 1
+                    self.state.save()
+                    return
+
+            # Hand off to upload worker
+            self._upload_queue.put((item, effective_config))
+
+        except Exception as e:
+            logging.error(f"Audio remux thread error for {item['filename']}: {e}")
+            self.state.set_file(filepath, FileStatus.ERROR, error=str(e), stage="audio_remux")
+            self.state.stats["errors"] += 1
+            self.state.save()
 
     def _resolve_profile(self, filepath: str) -> str:
         """Get the quality profile for a file from profiles.json."""
@@ -345,7 +476,7 @@ class Pipeline:
         return queue
 
     def process_item(self, item: dict) -> bool:
-        """Run one file through: fetch (if needed) → encode → upload → verify → replace."""
+        """Run one file through fetch (if needed) → encode. Upload is handled by upload worker."""
         filepath = item["filepath"]
 
         # Check current state for resume
@@ -413,40 +544,19 @@ class Pipeline:
         if self._shutdown:
             return False
 
+        # Hand off to upload worker for upload → verify → replace
         existing = self.state.get_file(filepath)
         current_status = existing["status"] if existing else None
 
         if current_status == FileStatus.ENCODED.value:
-            success = stage_upload(filepath, item, self.staging_dir, effective_config, self.state)
-            if not success:
-                return False
+            self._upload_queue.put((item, effective_config))
+            return True
 
-        if self._shutdown:
-            return False
-
-        existing = self.state.get_file(filepath)
-        current_status = existing["status"] if existing else None
-
-        if current_status == FileStatus.UPLOADED.value:
-            success = stage_verify(filepath, item, effective_config, self.state)
-            if not success:
-                return False
-
-        if self._shutdown:
-            return False
-
-        existing = self.state.get_file(filepath)
-        current_status = existing["status"] if existing else None
-
-        # Replace original on NAS (unless --no-replace)
-        if current_status == FileStatus.VERIFIED.value and effective_config.get("replace_original", True):
-            success = stage_replace(filepath, item, effective_config, self.state)
-            return success
-
-        # If REPLACING was interrupted, finish it
-        if current_status == FileStatus.REPLACING.value:
-            success = stage_replace(filepath, item, effective_config, self.state)
-            return success
+        # Handle resume cases where file is already past encode
+        if current_status in (FileStatus.UPLOADED.value, FileStatus.VERIFIED.value,
+                              FileStatus.REPLACING.value, FileStatus.UPLOADING.value):
+            self._upload_queue.put((item, effective_config))
+            return True
 
         return current_status in (FileStatus.VERIFIED.value, FileStatus.REPLACED.value)
 
@@ -462,6 +572,7 @@ class Pipeline:
         eta = format_eta_tier_aware(queue, self.state)
 
         replaced = len(self.state.get_files_by_status(FileStatus.REPLACED))
+        uploading = self._upload_queue.qsize()
 
         print(f"\n{'=' * 70}")
         print(f"  Progress: {completed}/{total} files "
@@ -469,6 +580,8 @@ class Pipeline:
         print(f"  Replaced: {replaced} originals")
         print(f"  Saved:    {format_bytes(saved)}")
         print(f"  Errors:   {stats['errors']}")
+        if uploading > 0:
+            print(f"  Upload queue: {uploading} files pending")
         print(f"  Avg encode time: {format_duration(avg_time)}")
         print(f"  ETA:      {eta}")
 
@@ -593,9 +706,20 @@ class Pipeline:
         prefetch_thread.start()
         logging.info("Concurrent prefetch enabled — GPU and network will overlap")
 
+        # Start upload worker thread — uploads encoded files while GPU encodes next
+        upload_thread = threading.Thread(
+            target=self._upload_worker, daemon=True, name="upload"
+        )
+        upload_thread.start()
+        logging.info("Parallel upload enabled — uploads overlap with encoding")
+
+        # Track active audio remux threads
+        audio_threads: list[threading.Thread] = []
+        MAX_AUDIO_THREADS = 2  # limit concurrent CPU remux jobs
+
         processed = 0
         last_progress_at = 0
-        # Main loop: find FETCHED items and process them (encode → upload → verify → replace)
+        # Main loop: find FETCHED items and process them (encode → hand off to upload worker)
         # Keep looping until all queue items are terminal or shutdown
         while not self._shutdown:
             # Check control system for pause
@@ -611,6 +735,9 @@ class Pipeline:
                 last_progress_at = processed
                 self.print_progress(queue, processed)
                 queue = self.control.apply_queue_overrides(queue)
+
+            # Clean up finished audio threads
+            audio_threads = [t for t in audio_threads if t.is_alive()]
 
             # Build priority set for fast lookup
             priority_set = {
@@ -657,13 +784,18 @@ class Pipeline:
                     if is_priority and first_priority_pending is None:
                         first_priority_pending = item
 
-            if all_done:
+            # Also check upload queue — items there aren't done yet
+            if all_done and self._upload_queue.empty():
                 break
+            elif all_done:
+                # All items dispatched but upload worker still busy
+                time.sleep(5)
+                continue
 
             # Pick best item: priority fetched > any fetched > priority pending > any pending
             ready_item = ready_priority or ready_any or first_priority_pending or first_pending
             if ready_item is None:
-                if not prefetch_thread.is_alive():
+                if not prefetch_thread.is_alive() and self._upload_queue.empty():
                     break  # Everything is either done or errored
                 time.sleep(5)
                 continue
@@ -690,6 +822,20 @@ class Pipeline:
                     res_key=get_res_key(ready_item),
                 )
 
+            # Audio-only items: dispatch to background thread (no GPU needed)
+            if ready_item.get("audio_only") and len(audio_threads) < MAX_AUDIO_THREADS:
+                effective_config = self._apply_gentle_overrides(ready_item)
+                t = threading.Thread(
+                    target=self._audio_remux_async,
+                    args=(ready_item, effective_config),
+                    daemon=True,
+                    name=f"audio-remux-{ready_item['filename'][:30]}",
+                )
+                t.start()
+                audio_threads.append(t)
+                logging.info(f"  Dispatched audio remux to background thread")
+                continue
+
             success = self.process_item(ready_item)
             if not success:
                 # If item is still PENDING after process_item failed, the fetch
@@ -697,17 +843,24 @@ class Pipeline:
                 existing = self.state.get_file(filepath)
                 if existing and existing["status"] in (None, FileStatus.PENDING.value):
                     time.sleep(30)
-            if success:
-                # Auto-clean reencode list after completion
-                self.control.remove_reencode(filepath)
-            elif not self._shutdown:
+            if not success and not self._shutdown:
                 self.state.stats["errors"] += 1
                 self.state.save()
 
-        # Signal prefetch thread to stop and wait for it
+        # Signal threads to stop and wait for them
         was_interrupted = self._shutdown
         self._shutdown = True  # Ensures prefetch thread exits
         prefetch_thread.join(timeout=10)
+
+        # Wait for audio remux threads to finish
+        for t in audio_threads:
+            t.join(timeout=30)
+
+        # Wait for upload worker to drain remaining items
+        if not self._upload_queue.empty():
+            logging.info(f"Waiting for upload worker to finish {self._upload_queue.qsize()} remaining items...")
+        self._upload_queue.join()
+        upload_thread.join(timeout=10)
 
         # Final summary
         self.print_progress(queue, processed)

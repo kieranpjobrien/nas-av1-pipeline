@@ -98,8 +98,10 @@ function CQGuide() {
   );
 }
 
-export function ControlPage() {
-  const { data: status, refresh } = usePolling(api.getControlStatus, 3000);
+export function ControlPage({ wsControl }) {
+  // Use WebSocket control data if available, fall back to polling
+  const { data: polledStatus, refresh } = usePolling(api.getControlStatus, 3000, { enabled: !wsControl });
+  const status = wsControl ? { pause_state: wsControl.pause_state } : polledStatus;
   const [skip, setSkip] = useState(null);
   const [priority, setPriority] = useState(null);
   const [gentle, setGentle] = useState(null);

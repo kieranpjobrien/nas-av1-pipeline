@@ -1,10 +1,12 @@
 """Pipeline stages: fetch, upload, verify, replace original."""
 
 import hashlib
+import json
 import logging
 import os
 import shutil
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -215,9 +217,42 @@ def stage_verify(source_filepath: str, item: dict, config: dict, state: Pipeline
 
     state.save()
 
+    # Append to encode history log (JSONL)
+    _append_history(item, source_size, dest_size, saved, encode_time, res_key)
+
     logging.info(f"Verified: {item['filename']} -> saved {format_bytes(saved)}")
 
     return True
+
+
+def _append_history(item: dict, input_bytes: int, output_bytes: int,
+                    saved_bytes: int, encode_time_secs: float, res_key: str) -> None:
+    """Append one line to the encode history JSONL log."""
+    from paths import STAGING_DIR
+
+    entry = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "filepath": item["filepath"],
+        "filename": item["filename"],
+        "tier": item.get("tier_name", ""),
+        "res_key": res_key,
+        "input_bytes": input_bytes,
+        "output_bytes": output_bytes,
+        "saved_bytes": saved_bytes,
+        "encode_time_secs": round(encode_time_secs, 1),
+        "compression_ratio": round(output_bytes / input_bytes, 3) if input_bytes > 0 else 0,
+        "codec_from": item.get("video_codec", ""),
+        "resolution": item.get("resolution", ""),
+        "hdr": item.get("hdr", False),
+        "audio_only": item.get("audio_only", False),
+        "library_type": item.get("library_type", ""),
+    }
+    history_path = STAGING_DIR / "encode_history.jsonl"
+    try:
+        with open(history_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except OSError as e:
+        logging.warning(f"Failed to append encode history: {e}")
 
 
 def stage_replace(source_filepath: str, item: dict, config: dict, state: PipelineState) -> bool:

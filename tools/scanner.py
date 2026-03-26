@@ -198,12 +198,18 @@ def extract_info(filepath: str, probe_data: dict, library_type: str) -> dict:
             "title": title,
         })
 
+    try:
+        file_mtime = os.path.getmtime(filepath)
+    except OSError:
+        file_mtime = 0
+
     return {
         "filepath": str(filepath),
         "filename": os.path.basename(filepath),
         "extension": Path(filepath).suffix.lower(),
         "library_type": library_type,
         "file_size_bytes": file_size_bytes,
+        "file_mtime": file_mtime,
         "file_size_gb": round(file_size_bytes / (1024**3), 3),
         "duration_seconds": duration_secs,
         "duration_display": f"{int(duration_secs // 3600)}h {int((duration_secs % 3600) // 60)}m",
@@ -335,8 +341,8 @@ def main():
     if args.limit > 0:
         all_files = all_files[:args.limit]
 
-    # Incremental scan: reuse results from existing report for unchanged files
-    # A file is "unchanged" if its filepath and size on disk match the report.
+    # Incremental scan: reuse results from existing report for unchanged files.
+    # A file is "unchanged" if its filepath, size, and mtime all match.
     cached = {}
     if not args.full and os.path.exists(args.output):
         try:
@@ -345,7 +351,8 @@ def main():
             for entry in old_report.get("files", []):
                 fp = entry.get("filepath", "")
                 sz = entry.get("file_size_bytes", -1)
-                cached[(fp, sz)] = entry
+                mt = entry.get("file_mtime", 0)
+                cached[(fp, sz, mt)] = entry
             print(f"Loaded {len(cached)} cached entries from previous report")
         except Exception:
             pass
@@ -356,10 +363,13 @@ def main():
 
     for filepath, lib_type in all_files:
         try:
-            sz = os.path.getsize(filepath)
+            stat = os.stat(filepath)
+            sz = stat.st_size
+            mt = stat.st_mtime
         except OSError:
             sz = -1
-        key = (filepath, sz)
+            mt = 0
+        key = (filepath, sz, mt)
         if key in cached:
             results.append(cached[key])
             reused += 1

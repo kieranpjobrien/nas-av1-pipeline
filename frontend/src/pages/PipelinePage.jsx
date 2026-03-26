@@ -170,8 +170,10 @@ function getUpNext(data, priorityPaths, limit = 15) {
   return upcoming.slice(0, limit);
 }
 
-export function PipelinePage() {
-  const { data, error } = usePolling(api.getPipeline, 3000);
+export function PipelinePage({ wsData }) {
+  // Use WebSocket data if available, fall back to polling
+  const { data: polledData, error } = usePolling(api.getPipeline, 3000, { enabled: !wsData });
+  const data = wsData || polledData;
   const [starting, setStarting] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [priorityPaths, setPriorityPaths] = useState([]);
