@@ -53,4 +53,8 @@ export const api = {
   getGpu: () => fetchJSON("/gpu"),
   getHistory: (days = 0, limit = 500) => fetchJSON(`/history?days=${days}&limit=${limit}`),
   getHistorySummary: () => fetchJSON("/history/summary"),
+  getHealth: () => fetchJSON("/health"),
+  getFileDetail: (path) => fetchJSON(`/file-detail?path=${encodeURIComponent(path)}`),
+  getConfig: () => fetchJSON("/config"),
+  setConfig: (overrides) => putJSON("/config", overrides),
 };

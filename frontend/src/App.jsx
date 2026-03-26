@@ -5,6 +5,7 @@ import { LibraryPage } from "./pages/LibraryPage";
 import { ControlPage } from "./pages/ControlPage";
 import { HistoryPage } from "./pages/HistoryPage";
 import { GpuWidget } from "./components/GpuWidget";
+import { FileDrawer } from "./components/FileDrawer";
 import { useWebSocket } from "./lib/useWebSocket";
 import { api } from "./lib/api";
 
@@ -17,6 +18,7 @@ const TABS = [
 
 export default function App() {
   const [tab, setTab] = useState("pipeline");
+  const [drawerPath, setDrawerPath] = useState(null);
   const { pipeline, gpu, control, connected } = useWebSocket(api.getPipeline, 3000);
 
   return (
@@ -83,11 +85,14 @@ export default function App() {
 
       {/* Page content */}
       <div style={{ maxWidth: 1200, margin: "0 auto", padding: "24px 24px 64px" }}>
-        {tab === "pipeline" && <PipelinePage wsData={pipeline} />}
-        {tab === "library" && <LibraryPage />}
+        {tab === "pipeline" && <PipelinePage wsData={pipeline} onFileClick={setDrawerPath} />}
+        {tab === "library" && <LibraryPage onFileClick={setDrawerPath} />}
         {tab === "controls" && <ControlPage wsControl={control} />}
         {tab === "history" && <HistoryPage />}
       </div>
+
+      {/* File detail drawer */}
+      {drawerPath && <FileDrawer path={drawerPath} onClose={() => setDrawerPath(null)} />}
     </div>
   );
 }

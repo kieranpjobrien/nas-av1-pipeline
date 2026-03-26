@@ -91,7 +91,9 @@ def stage_fetch(item: dict, staging_dir: str, config: dict, state: PipelineState
         elapsed = time.time() - start
         speed = file_size / elapsed / (1024**2) if elapsed > 0 else 0
         logging.info(f"Fetched in {format_duration(elapsed)} ({speed:.0f} MB/s)")
-        state.set_file(source, FileStatus.FETCHED, local_path=local_path)
+        state.set_file(source, FileStatus.FETCHED, local_path=local_path,
+                       fetch_start=start, fetch_end=time.time(),
+                       fetch_time_secs=round(elapsed, 1))
         return local_path
     except Exception as e:
         logging.error(f"Fetch failed: {e}")
@@ -133,7 +135,9 @@ def stage_upload(source_filepath: str, item: dict, staging_dir: str,
             os.remove(output_path)
         return True
 
-    state.set_file(source_filepath, FileStatus.UPLOADING, dest_path=dest_path)
+    upload_start = time.time()
+    state.set_file(source_filepath, FileStatus.UPLOADING, dest_path=dest_path,
+                   upload_start=upload_start)
     logging.info(f"Uploading: {dest_filename} -> {source_dir}")
 
     try:
@@ -144,7 +148,8 @@ def stage_upload(source_filepath: str, item: dict, staging_dir: str,
         speed = output_size / elapsed / (1024**2) if elapsed > 0 else 0
         logging.info(f"Uploaded in {format_duration(elapsed)} ({speed:.0f} MB/s)")
 
-        state.set_file(source_filepath, FileStatus.UPLOADED, dest_path=dest_path)
+        state.set_file(source_filepath, FileStatus.UPLOADED, dest_path=dest_path,
+                       upload_end=time.time(), upload_time_secs=round(elapsed, 1))
 
         # Clean up local encoded file
         os.remove(output_path)
@@ -190,7 +195,8 @@ def stage_verify(source_filepath: str, item: dict, config: dict, state: Pipeline
     state.set_file(source_filepath, FileStatus.VERIFIED,
                    dest_path=dest_path,
                    dest_size_bytes=dest_size,
-                   bytes_saved=saved)
+                   bytes_saved=saved,
+                   verify_end=time.time())
 
     state.stats["completed"] += 1
     state.stats["bytes_saved"] += saved
@@ -217,8 +223,9 @@ def stage_verify(source_filepath: str, item: dict, config: dict, state: Pipeline
 
     state.save()
 
-    # Append to encode history log (JSONL)
-    _append_history(item, source_size, dest_size, saved, encode_time, res_key)
+    # Append to encode history log (JSONL) — include per-stage timing
+    _append_history(item, source_size, dest_size, saved, encode_time, res_key,
+                    file_info_updated)
 
     logging.info(f"Verified: {item['filename']} -> saved {format_bytes(saved)}")
 
@@ -226,9 +233,15 @@ def stage_verify(source_filepath: str, item: dict, config: dict, state: Pipeline
 
 
 def _append_history(item: dict, input_bytes: int, output_bytes: int,
-                    saved_bytes: int, encode_time_secs: float, res_key: str) -> None:
+                    saved_bytes: int, encode_time_secs: float, res_key: str,
+                    file_info: dict | None = None) -> None:
     """Append one line to the encode history JSONL log."""
     from paths import STAGING_DIR
+
+    # Extract per-stage timing from file state
+    fi = file_info or {}
+    fetch_time = fi.get("fetch_time_secs", 0)
+    upload_time = fi.get("upload_time_secs", 0)
 
     entry = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -240,6 +253,8 @@ def _append_history(item: dict, input_bytes: int, output_bytes: int,
         "output_bytes": output_bytes,
         "saved_bytes": saved_bytes,
         "encode_time_secs": round(encode_time_secs, 1),
+        "fetch_time_secs": round(fetch_time, 1),
+        "upload_time_secs": round(upload_time, 1),
         "compression_ratio": round(output_bytes / input_bytes, 3) if input_bytes > 0 else 0,
         "codec_from": item.get("video_codec", ""),
         "resolution": item.get("resolution", ""),
@@ -302,7 +317,8 @@ def stage_replace(source_filepath: str, item: dict, config: dict, state: Pipelin
                 os.remove(backup_path)
                 logging.info(f"  Deleted original backup")
 
-            state.set_file(source_filepath, FileStatus.REPLACED, final_path=final_path)
+            state.set_file(source_filepath, FileStatus.REPLACED, final_path=final_path,
+                           replace_end=time.time())
             logging.info(f"Replaced: {item['filename']} -> {final_name}")
             return True
 

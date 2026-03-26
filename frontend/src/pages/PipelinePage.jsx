@@ -4,6 +4,7 @@ import { usePolling } from "../lib/usePolling";
 import { api } from "../lib/api";
 import { StatCard } from "../components/StatCard";
 import { SectionTitle } from "../components/SectionTitle";
+import { Timeline } from "../components/Timeline";
 
 function fmt(bytes) {
   if (bytes >= 1024 ** 4) return `${(bytes / 1024 ** 4).toFixed(2)} TB`;
@@ -144,7 +145,7 @@ function getUpNext(data, priorityPaths, limit = 15) {
     if (doneStatuses.includes(s) || activeStatuses.includes(s)) continue;
     const filename = path.split(/[\\/]/).pop();
     const status = info?.status || "priority";
-    upcoming.push({ path, filename, status, priority: true });
+    upcoming.push({ path, filename, status, priority: true, res_key: info?.res_key, tier: info?.tier });
     seen.add(path);
   }
 
@@ -154,7 +155,8 @@ function getUpNext(data, priorityPaths, limit = 15) {
     const s = (info.status || "").toLowerCase();
     if (["fetched", "pending", "encoded", "uploaded"].includes(s)) {
       const filename = path.split(/[\\/]/).pop();
-      upcoming.push({ path, filename, status: info.status, priority: false, added: info.added || info.last_updated });
+      upcoming.push({ path, filename, status: info.status, priority: false,
+        added: info.added || info.last_updated, res_key: info?.res_key, tier: info?.tier });
     }
   }
 
@@ -170,7 +172,29 @@ function getUpNext(data, priorityPaths, limit = 15) {
   return upcoming.slice(0, limit);
 }
 
-export function PipelinePage({ wsData }) {
+function estimateFileETA(item, tierStats, overallAvg) {
+  if (!tierStats || overallAvg <= 0) return null;
+  const rk = item.res_key;
+  if (rk && tierStats[rk]) {
+    const t = tierStats[rk];
+    if (t.completed >= 2 && t.total_encode_time_secs > 0) {
+      return t.total_encode_time_secs / t.completed;
+    }
+  }
+  return overallAvg;
+}
+
+function fmtETA(secs) {
+  if (!secs || secs <= 0) return "";
+  if (secs < 60) return `~${Math.round(secs)}s`;
+  const m = Math.floor(secs / 60);
+  if (m < 60) return `~${m}m`;
+  const h = Math.floor(m / 60);
+  const rm = m % 60;
+  return rm > 0 ? `~${h}h ${rm}m` : `~${h}h`;
+}
+
+export function PipelinePage({ wsData, onFileClick }) {
   // Use WebSocket data if available, fall back to polling
   const { data: polledData, error } = usePolling(api.getPipeline, 3000, { enabled: !wsData });
   const data = wsData || polledData;
@@ -330,27 +354,50 @@ export function PipelinePage({ wsData }) {
         </>
       )}
 
+      {/* Timeline — stage breakdown for recent encodes */}
+      {data?.files && (
+        (() => {
+          const hasTimeline = Object.values(data.files).some((f) => f.encode_time_secs > 0 && (f.status === "replaced" || f.status === "verified"));
+          return hasTimeline ? (
+            <>
+              <SectionTitle>Recent Encodes — Stage Breakdown</SectionTitle>
+              <div style={{ background: PALETTE.surface, border: `1px solid ${PALETTE.border}`, borderRadius: 12, padding: 16, marginBottom: 24 }}>
+                <Timeline files={data.files} />
+              </div>
+            </>
+          ) : null;
+        })()
+      )}
+
       {/* Up Next */}
       {upNext.length > 0 && (
         <>
           <SectionTitle>Up Next</SectionTitle>
           <div style={{ display: "flex", flexDirection: "column", gap: 4, marginBottom: 24 }}>
-            {upNext.map(({ path, filename, status, priority: isPrio }, i) => {
+            {upNext.map((item, i) => {
+              const { path, filename, status, priority: isPrio, res_key } = item;
               const sl = (status || "").toLowerCase();
               const badgeColor = isPrio ? PALETTE.accentWarm : sl === "fetched" ? PALETTE.green : PALETTE.textMuted;
               const badgeBg = isPrio ? PALETTE.accentWarm + "22" : sl === "fetched" ? PALETTE.green + "22" : PALETTE.surfaceLight;
+              const tierStats = data?.stats?.tier_stats || {};
+              const overallCompleted = data?.stats?.completed || 0;
+              const overallTime = data?.stats?.total_encode_time_secs || 0;
+              const overallAvg = overallCompleted > 0 ? overallTime / overallCompleted : 0;
+              const eta = estimateFileETA(item, tierStats, overallAvg);
               return (
                 <div key={i} style={{
                   background: PALETTE.surface,
                   border: `1px solid ${isPrio ? PALETTE.accentWarm + "44" : PALETTE.border}`,
                   borderRadius: 8, padding: "8px 14px",
                   display: "flex", alignItems: "center", gap: 10,
-                }}>
+                  cursor: onFileClick ? "pointer" : "default",
+                }} onClick={() => onFileClick?.(path)}>
                   <span style={{ color: PALETTE.textMuted, fontSize: 11, fontFamily: "'JetBrains Mono', monospace", width: 20, textAlign: "right", flexShrink: 0 }}>{i + 1}</span>
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ color: PALETTE.text, fontSize: 12, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{filename}</div>
                     <div style={{ color: PALETTE.textMuted, fontSize: 10, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{path}</div>
                   </div>
+                  {eta > 0 && <span style={{ fontSize: 10, color: PALETTE.textMuted, fontFamily: "'JetBrains Mono', monospace", flexShrink: 0 }}>{fmtETA(eta)}</span>}
                   {isPrio && <span style={{ fontSize: 9, fontWeight: 700, color: PALETTE.accentWarm, letterSpacing: 0.5 }}>PRIORITY</span>}
                   <span style={{
                     fontSize: 10, fontWeight: 600, padding: "2px 8px", borderRadius: 4, flexShrink: 0,

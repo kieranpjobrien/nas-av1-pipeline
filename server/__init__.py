@@ -538,6 +538,129 @@ def get_gpu():
     return _query_gpu()
 
 
+# -- Health dashboard --
+
+_health_cache: dict = {}
+_health_cache_time: float = 0
+
+
+@app.get("/api/health")
+def get_health():
+    global _health_cache, _health_cache_time
+    import shutil as _shutil
+
+    now = time.monotonic()
+    if now - _health_cache_time < 10 and _health_cache:
+        return _health_cache
+
+    from paths import NAS_MOVIES, NAS_SERIES
+
+    # NAS reachability
+    try:
+        nas_movies_ok = os.path.exists(str(NAS_MOVIES)) and os.access(str(NAS_MOVIES), os.R_OK)
+    except OSError:
+        nas_movies_ok = False
+    try:
+        nas_series_ok = os.path.exists(str(NAS_SERIES)) and os.access(str(NAS_SERIES), os.R_OK)
+    except OSError:
+        nas_series_ok = False
+
+    # Staging disk
+    try:
+        disk = _shutil.disk_usage(str(STAGING_DIR))
+        staging_free_gb = round(disk.free / (1024**3), 1)
+        staging_total_gb = round(disk.total / (1024**3), 1)
+    except OSError:
+        staging_free_gb = 0
+        staging_total_gb = 0
+
+    # FFmpeg version
+    ffmpeg_version = "unknown"
+    try:
+        result = subprocess.run(["ffmpeg", "-version"], capture_output=True, text=True, timeout=5)
+        if result.returncode == 0:
+            first_line = result.stdout.split("\n")[0]
+            raw = first_line.split("version ")[-1].split(" ")[0] if "version " in first_line else first_line
+            # Trim to just the version number (e.g. "8.0.1" from "8.0.1-full_build-www.gyan.dev")
+            ffmpeg_version = raw.split("-")[0] if "-" in raw else raw
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+
+    # GPU info (reuse cached)
+    gpu = _query_gpu()
+
+    # Pipeline process status
+    pipeline_status = pm.status("pipeline")
+
+    _health_cache = {
+        "nas_movies_reachable": nas_movies_ok,
+        "nas_series_reachable": nas_series_ok,
+        "staging_free_gb": staging_free_gb,
+        "staging_total_gb": staging_total_gb,
+        "ffmpeg_version": ffmpeg_version,
+        "gpu_name": gpu.get("name", "N/A"),
+        "gpu_temp_c": gpu.get("temp_c"),
+        "gpu_available": gpu.get("available", False),
+        "pipeline_status": pipeline_status.get("status", "idle"),
+        "pipeline_pid": pipeline_status.get("pid"),
+        "python_version": sys.version.split()[0],
+    }
+    _health_cache_time = now
+    return _health_cache
+
+
+# -- File detail --
+
+@app.get("/api/file-detail")
+def get_file_detail(path: str):
+    """Cross-reference media report + pipeline state for a single file."""
+    result = {"path": path, "media": None, "pipeline": None}
+
+    # Look up in media report
+    report_data = read_json_safe(MEDIA_REPORT)
+    if report_data:
+        norm = os.path.normpath(path).lower()
+        for entry in report_data.get("files", []):
+            if os.path.normpath(entry.get("filepath", "")).lower() == norm:
+                result["media"] = entry
+                break
+
+    # Look up in pipeline state
+    state_data = read_json_safe(STATE_FILE)
+    if state_data and "files" in state_data:
+        result["pipeline"] = state_data["files"].get(path)
+
+    return result
+
+
+# -- Config management --
+
+CONFIG_OVERRIDES_FILE = CONTROL_DIR / "config_overrides.json"
+
+
+@app.get("/api/config")
+def get_config():
+    """Return current config (defaults + overrides)."""
+    from pipeline.config import DEFAULT_CONFIG, build_config
+
+    overrides = read_json_safe(CONFIG_OVERRIDES_FILE) or {}
+    merged = build_config(overrides)
+
+    return {
+        "defaults": DEFAULT_CONFIG,
+        "overrides": overrides,
+        "effective": merged,
+    }
+
+
+@app.put("/api/config")
+def set_config(body: dict):
+    """Write config overrides. Pipeline reads these on next file."""
+    CONTROL_DIR.mkdir(parents=True, exist_ok=True)
+    write_json_safe(CONFIG_OVERRIDES_FILE, body)
+    return {"ok": True}
+
+
 # -- Encode history --
 
 def _read_history(days: int = 0, limit: int = 0) -> list[dict]:

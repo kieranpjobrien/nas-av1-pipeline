@@ -119,6 +119,29 @@ DEFAULT_CONFIG = {
 REMUX_EXTENSIONS = {".m2ts", ".avi", ".wmv", ".ts", ".m2v", ".vob", ".mpg", ".mpeg", ".mp4"}
 
 
+def build_config(overrides: dict | None = None) -> dict:
+    """Build a config dict by merging DEFAULT_CONFIG with optional overrides.
+
+    Overrides can contain top-level keys (e.g. "max_staging_bytes") or nested
+    dicts (e.g. "cq": {"movie": {"1080p": 26}}) which are deep-merged.
+    """
+    import copy
+    config = copy.deepcopy(DEFAULT_CONFIG)
+    if not overrides:
+        return config
+    for key, value in overrides.items():
+        if key in config and isinstance(config[key], dict) and isinstance(value, dict):
+            # Deep merge one level (e.g. cq.movie.1080p)
+            for subkey, subval in value.items():
+                if subkey in config[key] and isinstance(config[key][subkey], dict) and isinstance(subval, dict):
+                    config[key][subkey].update(subval)
+                else:
+                    config[key][subkey] = subval
+        else:
+            config[key] = value
+    return config
+
+
 def get_res_key(item: dict) -> str:
     """Derive a resolution key (e.g. '4K_HDR', '1080p') from a queue item."""
     resolution = item.get("resolution", "1080p")

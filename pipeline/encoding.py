@@ -258,8 +258,10 @@ def stage_encode(source_filepath: str, item: dict, staging_dir: str,
     safe_name = hashlib.md5(source_filepath.encode()).hexdigest()[:12] + "_" + out_name
     output_path = os.path.join(encode_dir, safe_name)
 
+    encode_start = time.time()
     state.set_file(source_filepath, FileStatus.ENCODING,
-                   local_path=local_input, output_path=output_path)
+                   local_path=local_input, output_path=output_path,
+                   encode_start=encode_start)
 
     logging.info(f"Encoding: {item['filename']}")
     enc_params = resolve_encode_params(config, item)
@@ -343,7 +345,8 @@ def stage_encode(source_filepath: str, item: dict, staging_dir: str,
                        input_size_bytes=input_size,
                        bytes_saved=saved,
                        compression_ratio=round(ratio, 1),
-                       encode_time_secs=round(elapsed, 1))
+                       encode_time_secs=round(elapsed, 1),
+                       encode_end=time.time())
 
         # Clean up remuxed intermediate file
         if remuxed_path and os.path.exists(remuxed_path):
@@ -427,8 +430,10 @@ def stage_audio_remux(source_filepath: str, item: dict, staging_dir: str,
     safe_name = hashlib.md5(source_filepath.encode()).hexdigest()[:12] + "_" + out_name
     output_path = os.path.join(encode_dir, safe_name)
 
+    encode_start = time.time()
     state.set_file(source_filepath, FileStatus.ENCODING,
-                   local_path=local_input, output_path=output_path)
+                   local_path=local_input, output_path=output_path,
+                   encode_start=encode_start)
 
     logging.info(f"Audio remux: {item['filename']}")
     audio_streams = item.get("audio_streams", [])
@@ -496,6 +501,7 @@ def stage_audio_remux(source_filepath: str, item: dict, staging_dir: str,
                        bytes_saved=saved,
                        compression_ratio=round(ratio, 1),
                        encode_time_secs=round(elapsed, 1),
+                       encode_end=time.time(),
                        audio_only=True)
 
         # Clean up local fetch copy

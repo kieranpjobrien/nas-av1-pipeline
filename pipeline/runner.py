@@ -118,19 +118,27 @@ class Pipeline:
     def _prefetch_worker(self, queue: list[dict]):
         """Background thread: pre-fetch files from NAS while encoder is busy.
 
-        Keeps a large lookahead buffer of pre-fetched files so the GPU never
-        idles waiting on network. Priority items are fetched first, then the
-        queue order is followed.
+        Uses a byte-based buffer limit (from config) with a file count cap to
+        keep the GPU fed without over-fetching. Large 4K files get fewer
+        prefetches; small 720p files get more.
         """
-        MAX_PREFETCH_AHEAD = 20  # max un-encoded files in fetch buffer
+        MAX_PREFETCH_FILES = 20  # hard cap on file count
+        max_prefetch_bytes = self.config.get("max_fetch_buffer_bytes", 100 * 1024**3)
 
-        logging.info("Prefetch thread started (buffer: %d files)", MAX_PREFETCH_AHEAD)
+        logging.info("Prefetch thread started (buffer: %s, max %d files)",
+                     format_bytes(max_prefetch_bytes), MAX_PREFETCH_FILES)
         while not self._shutdown:
             fetched_any = False
 
-            # Count how many files are fetched but not yet encoded
-            pending_fetched = len(self.state.get_files_by_status(FileStatus.FETCHED))
-            if pending_fetched >= MAX_PREFETCH_AHEAD:
+            # Count pending fetched files and estimate their total size
+            fetched_paths = self.state.get_files_by_status(FileStatus.FETCHED)
+            pending_fetched = len(fetched_paths)
+            pending_bytes = 0
+            for fp in fetched_paths:
+                fi = self.state.get_file(fp)
+                if fi:
+                    pending_bytes += fi.get("input_size_bytes", 0) or 0
+            if pending_fetched >= MAX_PREFETCH_FILES or pending_bytes >= max_prefetch_bytes:
                 # Enough files queued for encoding, wait before fetching more
                 for _ in range(6):
                     if self._shutdown:
@@ -170,8 +178,9 @@ class Pipeline:
                     continue
 
                 # Re-check lookahead limit before each fetch
-                pending_fetched = len(self.state.get_files_by_status(FileStatus.FETCHED))
-                if pending_fetched >= MAX_PREFETCH_AHEAD:
+                fetched_paths = self.state.get_files_by_status(FileStatus.FETCHED)
+                pending_fetched = len(fetched_paths)
+                if pending_fetched >= MAX_PREFETCH_FILES:
                     break
 
                 # Respect fetch pause

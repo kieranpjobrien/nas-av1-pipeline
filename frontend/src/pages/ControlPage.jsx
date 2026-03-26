@@ -3,6 +3,7 @@ import { PALETTE } from "../theme";
 import { usePolling } from "../lib/usePolling";
 import { api } from "../lib/api";
 import { SectionTitle } from "../components/SectionTitle";
+import { StatCard } from "../components/StatCard";
 import { ProcessRow } from "../components/ProcessRow";
 import { PauseButton, BTN_BASE } from "../components/PauseButton";
 import { PathEditor } from "../components/PathEditor";
@@ -448,6 +449,58 @@ export function ControlPage({ wsControl }) {
           </form>
         </div>
       )}
+
+      {/* System Health */}
+      <HealthSection />
     </div>
+  );
+}
+
+
+function HealthSection() {
+  const { data: health } = usePolling(api.getHealth, 15000);
+  if (!health) return null;
+
+  const nasOk = health.nas_movies_reachable && health.nas_series_reachable;
+  const stagingColour = health.staging_free_gb < 10 ? PALETTE.red : health.staging_free_gb < 50 ? PALETTE.accentWarm : PALETTE.green;
+
+  return (
+    <>
+      <SectionTitle>System Health</SectionTitle>
+      <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 24 }}>
+        <StatCard
+          label="NAS"
+          value={nasOk ? "Connected" : "Unreachable"}
+          colour={nasOk ? PALETTE.green : PALETTE.red}
+          sub={!health.nas_movies_reachable ? "Movies ✗" : !health.nas_series_reachable ? "Series ✗" : "Movies ✓ Series ✓"}
+        />
+        <StatCard
+          label="Staging Free"
+          value={`${health.staging_free_gb} GB`}
+          colour={stagingColour}
+          sub={`of ${health.staging_total_gb} GB total`}
+        />
+        <StatCard
+          label="FFmpeg"
+          value={health.ffmpeg_version}
+        />
+        <StatCard
+          label="GPU"
+          value={health.gpu_available ? health.gpu_name : "N/A"}
+          colour={health.gpu_available ? undefined : PALETTE.red}
+          sub={health.gpu_temp_c != null ? `${health.gpu_temp_c}°C` : ""}
+        />
+        <StatCard
+          label="Pipeline"
+          value={health.pipeline_status}
+          colour={health.pipeline_status === "running" ? PALETTE.green : PALETTE.textMuted}
+          sub={health.pipeline_pid ? `PID ${health.pipeline_pid}` : ""}
+        />
+        <StatCard
+          label="Python"
+          value={health.python_version}
+        />
+      </div>
+    </>
   );
 }
