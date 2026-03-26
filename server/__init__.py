@@ -151,6 +151,10 @@ PROCESS_CONFIGS = {
                 "from tools.strip_tags import _trigger_plex_scan; _trigger_plex_scan()"],
         "cwd": str(Path(__file__).parent.parent),
     },
+    "plex_metadata": {
+        "cmd": [sys.executable, "-m", "tools.plex_metadata", "audit"],
+        "cwd": str(Path(__file__).parent.parent),
+    },
 }
 
 STOP_TIMEOUT = 15  # seconds to wait for graceful stop before terminate

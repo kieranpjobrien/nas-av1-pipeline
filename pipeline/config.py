@@ -35,6 +35,15 @@ QUALITY_PROFILES = {
         "lookahead_override": 16,
         "temporal_aq": False,
     },
+    "tonemap": {
+        "description": "HDR→SDR tone-mapping — converts BT.2020 to BT.709",
+        "cq_offset": 0,
+        "preset_override": None,
+        "multipass_override": None,
+        "lookahead_override": None,
+        "temporal_aq": None,
+        "tonemap": True,
+    },
 }
 
 

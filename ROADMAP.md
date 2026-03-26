@@ -90,11 +90,8 @@ Strip unnecessary streams during encode: cover art, data streams, unused fonts (
 ### 23. Encode Quality Spot-Check (VMAF)
 For completed encodes, run VMAF on a 30-second sample to validate CQ choices. Quality report card per profile/tier. Expensive — sample 5% of encodes or on-demand.
 
-### 24. Profile A/B Testing
-Encode same file with two different profiles side by side. Compare output size, encode time, and optionally VMAF. Evidence-based quality tuning.
-
-### 25. Tagging / Collections
-Custom labels on files (e.g., "kids", "documentary", "reference quality"). Bulk-apply profiles by tag. More flexible than path-based pattern matching.
+### 24. Plex Metadata Management
+Surface and fix metadata issues from the dashboard: missing genres, incorrect content ratings, collection rules. Integrate `tools/plex_metadata.py` audit/apply-rules into the UI. Run audits from Controls page, view results in Library.
 
 ### 26. Bitrate Efficiency Score
 Compare each file's bitrate to expected for its resolution/codec. Flag outliers — "This 1080p is 45 Mbps, likely a bloated scene encode." Helps surface high-value encode targets.

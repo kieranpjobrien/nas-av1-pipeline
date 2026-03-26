@@ -356,6 +356,113 @@ function FilenameHealth({ files, onReload }) {
   );
 }
 
+const EN_TOKENS = new Set(["eng", "en", "english"]);
+
+function hasEnglishSubs(file) {
+  for (const s of file.subtitle_streams || []) {
+    const lang = (s.language || "und").toLowerCase();
+    if (EN_TOKENS.has(lang)) return true;
+    const title = (s.title || "").toLowerCase();
+    if ([...EN_TOKENS].some((t) => title.includes(t))) return true;
+  }
+  return false;
+}
+
+function SubtitleHealth({ files, onFileClick }) {
+  const noSubs = files.filter((f) => (f.subtitle_count || 0) === 0);
+  const noEnglish = files.filter((f) => f.subtitle_count > 0 && !hasEnglishSubs(f));
+  const total = noSubs.length + noEnglish.length;
+  if (total === 0) return null;
+
+  return (
+    <>
+      <SectionTitle>Subtitle Health</SectionTitle>
+      <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 16 }}>
+        <StatCard label="No Subtitles" value={noSubs.length} colour={PALETTE.red} sub={`${(100 * noSubs.length / files.length).toFixed(1)}% of library`} />
+        <StatCard label="No English Subs" value={noEnglish.length} colour={PALETTE.accentWarm} sub="Has subs but not English" />
+        <StatCard label="OK" value={files.length - total} colour={PALETTE.green} />
+      </div>
+      {total > 0 && (
+        <div style={{ background: PALETTE.surface, border: `1px solid ${PALETTE.border}`, borderRadius: 12, padding: 16, marginBottom: 24, maxHeight: 300, overflow: "auto" }}>
+          {noSubs.slice(0, 30).map((f) => (
+            <div key={f.filepath} onClick={() => onFileClick?.(f.filepath)} style={{ padding: "4px 0", fontSize: 12, color: PALETTE.textMuted, cursor: onFileClick ? "pointer" : "default" }}>
+              <span style={{ color: PALETTE.red, marginRight: 8 }}>NO SUBS</span>
+              {f.filename}
+            </div>
+          ))}
+          {noEnglish.slice(0, 20).map((f) => (
+            <div key={f.filepath} onClick={() => onFileClick?.(f.filepath)} style={{ padding: "4px 0", fontSize: 12, color: PALETTE.textMuted, cursor: onFileClick ? "pointer" : "default" }}>
+              <span style={{ color: PALETTE.accentWarm, marginRight: 8 }}>NO ENG</span>
+              {f.filename}
+              <span style={{ marginLeft: 8, color: PALETTE.border }}>
+                ({(f.subtitle_streams || []).map((s) => s.language).filter(Boolean).join(", ")})
+              </span>
+            </div>
+          ))}
+          {total > 50 && <div style={{ color: PALETTE.textMuted, fontSize: 11, marginTop: 8 }}>...and {total - 50} more</div>}
+        </div>
+      )}
+    </>
+  );
+}
+
+// Expected bitrate ranges per resolution/codec (Mbps)
+const EXPECTED_BITRATE = {
+  "H.264": { "4K": [15, 50], "1080p": [3, 20], "720p": [1.5, 10], "480p": [0.5, 5], "SD": [0.3, 3] },
+  "HEVC (H.265)": { "4K": [8, 35], "1080p": [2, 15], "720p": [1, 8], "480p": [0.3, 4], "SD": [0.2, 2] },
+  "AV1": { "4K": [5, 25], "1080p": [1.5, 10], "720p": [0.5, 5], "480p": [0.2, 3], "SD": [0.1, 2] },
+};
+
+function BitrateEfficiency({ files, onFileClick }) {
+  const bloated = [];
+  for (const f of files) {
+    const codec = f.video?.codec;
+    const res = f.video?.resolution_class;
+    const bitrate = f.overall_bitrate_kbps;
+    if (!codec || !res || !bitrate) continue;
+    const expected = EXPECTED_BITRATE[codec]?.[res];
+    if (!expected) continue;
+    const mbps = bitrate / 1000;
+    if (mbps > expected[1]) {
+      bloated.push({ ...f, mbps: mbps.toFixed(1), expected_max: expected[1] });
+    }
+  }
+
+  if (bloated.length === 0) return null;
+
+  bloated.sort((a, b) => b.mbps - a.mbps);
+
+  return (
+    <>
+      <SectionTitle>Bloated Files ({bloated.length})</SectionTitle>
+      <div style={{ color: PALETTE.textMuted, fontSize: 12, marginBottom: 12 }}>
+        Files with bitrate above expected range for their codec and resolution — high-value encode targets.
+      </div>
+      <div style={{ background: PALETTE.surface, border: `1px solid ${PALETTE.border}`, borderRadius: 12, padding: 16, marginBottom: 24, maxHeight: 400, overflow: "auto" }}>
+        {bloated.slice(0, 40).map((f) => (
+          <div key={f.filepath} onClick={() => onFileClick?.(f.filepath)} style={{
+            display: "flex", justifyContent: "space-between", alignItems: "center",
+            padding: "6px 0", fontSize: 12, borderBottom: `1px solid ${PALETTE.border}22`,
+            cursor: onFileClick ? "pointer" : "default",
+          }}>
+            <span style={{ color: PALETTE.text, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", marginRight: 12 }}>
+              {f.filename}
+            </span>
+            <span style={{ color: PALETTE.textMuted, whiteSpace: "nowrap", fontFamily: "'JetBrains Mono', monospace" }}>
+              <span style={{ color: PALETTE.red }}>{f.mbps} Mbps</span>
+              <span style={{ margin: "0 6px", color: PALETTE.border }}>|</span>
+              {f.video?.codec} {f.video?.resolution_class}
+              <span style={{ margin: "0 6px", color: PALETTE.border }}>|</span>
+              {fmt(f.file_size_gb)}
+            </span>
+          </div>
+        ))}
+        {bloated.length > 40 && <div style={{ color: PALETTE.textMuted, fontSize: 11, marginTop: 8 }}>...and {bloated.length - 40} more</div>}
+      </div>
+    </>
+  );
+}
+
 function SavingsEstimate({ files }) {
   const nonAV1 = files.filter((f) => f.video?.codec_raw !== "av1");
   const h264Files = files.filter((f) => f.video?.codec === "H.264");
@@ -729,7 +836,7 @@ function TopFolders({ files, limit = 15 }) {
   );
 }
 
-export function LibraryPage() {
+export function LibraryPage({ onFileClick }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
   const [tab, setTab] = useState("all");
@@ -885,6 +992,12 @@ export function LibraryPage() {
 
       {/* Filename Health */}
       <FilenameHealth files={files} onReload={loadReport} />
+
+      {/* Subtitle health */}
+      <SubtitleHealth files={files} onFileClick={onFileClick} />
+
+      {/* Bloated files */}
+      <BitrateEfficiency files={files} onFileClick={onFileClick} />
 
       {/* Savings */}
       <SavingsEstimate files={files} />

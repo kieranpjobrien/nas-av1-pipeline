@@ -135,8 +135,19 @@ def build_ffmpeg_cmd(input_path: str, output_path: str, item: dict, config: dict
     if params["bufsize"]:
         cmd.extend(["-bufsize", params["bufsize"]])
 
-    # HDR: preserve colour metadata
-    if is_hdr:
+    # HDR handling: tonemap to SDR or preserve metadata
+    do_tonemap = is_hdr and params.get("profile") == "tonemap"
+    if do_tonemap:
+        # HDR→SDR tone-mapping: BT.2020 PQ → BT.709 with Hable curve
+        cmd.extend([
+            "-vf", "zscale=t=linear:npl=100,format=gbrpf32le,"
+                   "zscale=p=bt709,tonemap=hable:desat=0,"
+                   "zscale=t=bt709:m=bt709:r=tv,format=yuv420p10le",
+            "-color_primaries", "bt709",
+            "-color_trc", "bt709",
+            "-colorspace", "bt709",
+        ])
+    elif is_hdr:
         cmd.extend([
             "-color_primaries", "bt2020",
             "-color_trc", "smpte2084",
@@ -169,6 +180,9 @@ def build_ffmpeg_cmd(input_path: str, output_path: str, item: dict, config: dict
     # Subtitles: copy all (when mapped)
     if include_subs:
         cmd.extend(["-c:s", "copy"])
+
+    # Strip encoder metadata bloat (scene group tags, encoder info)
+    cmd.extend(["-map_metadata", "-1"])
 
     # Output (mkv container — no -movflags needed)
     cmd.append(output_path)
