@@ -143,7 +143,7 @@ PROCESS_CONFIGS = {
         "cwd": str(Path(__file__).parent.parent),
     },
     "integrity": {
-        "cmd": [sys.executable, "-m", "tools.integrity", "--from-state"],
+        "cmd": [sys.executable, "-m", "tools.integrity", "--from-state", "--workers", "1"],
         "cwd": str(Path(__file__).parent.parent),
     },
     "plex_scan": {
@@ -158,6 +158,10 @@ PROCESS_CONFIGS = {
     },
     "plex_apply_rules": {
         "cmd": [sys.executable, "-m", "tools.plex_metadata", "apply-rules", "--execute"],
+        "cwd": str(Path(__file__).parent.parent),
+    },
+    "strip_subs": {
+        "cmd": [sys.executable, "-m", "tools.strip_subs", "--execute"],
         "cwd": str(Path(__file__).parent.parent),
     },
 }

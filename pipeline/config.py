@@ -106,6 +106,9 @@ DEFAULT_CONFIG = {
         "ac-3": 400,      # alternate name
     },
 
+    # Subtitle handling
+    "strip_non_english_subs": True,  # drop non-English/und subtitle streams during encode
+
     # Behaviour
     "overwrite_existing": False,
     "replace_original": True,   # Replace original on NAS after verify

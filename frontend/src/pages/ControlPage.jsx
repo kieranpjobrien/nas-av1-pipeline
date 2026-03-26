@@ -219,6 +219,7 @@ export function ControlPage({ wsControl }) {
       <ProcessRow name="scanner" label="Media Scanner" startLabel="Rescan Library" onFlash={showFlash} />
       <ProcessRow name="pipeline" label="AV1 Pipeline" startLabel="Start Pipeline" onFlash={showFlash} />
       <ProcessRow name="subtitles" label="Subtitle Check" startLabel="Run Check" onFlash={showFlash} />
+      <ProcessRow name="strip_subs" label="Strip Non-English Subs" startLabel="Strip Subs" onFlash={showFlash} />
       <ProcessRow name="integrity" label="Integrity Check" startLabel="Run Check" onFlash={showFlash} />
       <ProcessRow name="plex_scan" label="Plex Library Scan" startLabel="Trigger Scan" onFlash={showFlash} />
       <ProcessRow name="plex_metadata" label="Plex Metadata Audit" startLabel="Run Audit" onFlash={showFlash} />

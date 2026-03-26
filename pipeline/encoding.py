@@ -11,6 +11,38 @@ from typing import Optional
 from pipeline.config import REMUX_EXTENSIONS, resolve_encode_params
 from pipeline.state import FileStatus, PipelineState
 
+# Subtitle languages to keep (everything else is stripped during encode)
+_KEEP_SUB_LANGS = {"eng", "en", "english", "und", ""}
+
+
+def _map_subtitle_streams(cmd: list[str], item: dict, config: dict) -> None:
+    """Add per-stream subtitle mappings, keeping only English/undefined tracks.
+
+    If strip_non_english_subs is disabled, maps all subs with -map 0:s?.
+    """
+    if not config.get("strip_non_english_subs", True):
+        cmd.extend(["-map", "0:s?"])
+        return
+
+    subs = item.get("subtitle_streams", [])
+    if not subs:
+        cmd.extend(["-map", "0:s?"])  # no metadata — let ffmpeg figure it out
+        return
+
+    mapped = 0
+    for i, sub in enumerate(subs):
+        lang = (sub.get("language") or "").lower().strip()
+        if lang in _KEEP_SUB_LANGS:
+            cmd.extend(["-map", f"0:s:{i}"])
+            mapped += 1
+
+    if mapped == 0:
+        # No English subs found — map all to be safe (might have unlabelled ones)
+        cmd.extend(["-map", "0:s?"])
+    elif mapped < len(subs):
+        stripped = len(subs) - mapped
+        logging.info(f"  Stripped {stripped} non-English subtitle stream(s)")
+
 
 def get_duration(filepath: str) -> Optional[float]:
     """Get file duration via ffprobe."""
@@ -101,7 +133,7 @@ def build_ffmpeg_cmd(input_path: str, output_path: str, item: dict, config: dict
         "-map", "0:a?",
     ]
     if include_subs:
-        cmd.extend(["-map", "0:s?"])
+        _map_subtitle_streams(cmd, item, config)
 
     # Video: NVENC AV1
     cmd.extend([
@@ -398,7 +430,7 @@ def build_audio_remux_cmd(input_path: str, output_path: str, item: dict,
         "-map", "0:a?",
     ]
     if include_subs:
-        cmd.extend(["-map", "0:s?"])
+        _map_subtitle_streams(cmd, item, config)
 
     # Video: copy (already AV1)
     cmd.extend(["-c:v", "copy"])

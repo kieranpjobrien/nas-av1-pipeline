@@ -36,6 +36,7 @@ def check_file(filepath: str) -> tuple[str, str | None]:
     try:
         cmd = [
             "ffmpeg", "-v", "error",
+            "-hwaccel", "none",  # force software decode — prevents GPU driver crashes
             "-i", filepath,
             "-f", "null", "-",
         ]
@@ -104,8 +105,8 @@ def main():
                         help="Check all video files in this directory")
     parser.add_argument("--output", type=str, default="integrity_check.csv",
                         help="Output CSV file")
-    parser.add_argument("--workers", type=int, default=2,
-                        help="Parallel workers (default: 2, decode is heavy)")
+    parser.add_argument("--workers", type=int, default=1,
+                        help="Parallel workers (default: 1, safe alongside pipeline)")
     parser.add_argument("--state-file", type=str, default=str(STATE_FILE),
                         help="Path to pipeline_state.json (for --from-state)")
     args = parser.parse_args()
