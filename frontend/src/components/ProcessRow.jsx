@@ -12,22 +12,27 @@ const STATUS_COLOURS = {
 // All processes except "pipeline" are CPU-only (ffprobe/ffmpeg decode, no NVENC)
 const GPU_PROCESSES = new Set(["pipeline"]);
 
-// Parse progress from log lines: "Progress: 50/500", "Scanned 100/1000...", "Checked 10/200"
+// Parse progress from log lines: "Progress: 50/500 (28%) ETA: ~2.1h"
 const PROGRESS_RE = /(?:Progress|Scanned|Checked)[:\s]+(\d+)\s*[\/of]+\s*(\d+)/i;
+const ETA_RE = /ETA:\s*(~?[\d.]+[hms])/i;
 
 function parseProgress(lines) {
   // Walk backwards to find the most recent progress line
   for (let i = lines.length - 1; i >= 0; i--) {
     const m = lines[i].match(PROGRESS_RE);
     if (m) {
-      return { current: parseInt(m[1], 10), total: parseInt(m[2], 10) };
+      const result = { current: parseInt(m[1], 10), total: parseInt(m[2], 10) };
+      // Also try to extract ETA from the same line
+      const etaMatch = lines[i].match(ETA_RE);
+      if (etaMatch) result.eta = etaMatch[1];
+      return result;
     }
   }
   return null;
 }
 
 function lastMeaningfulLine(lines) {
-  // Find the last non-empty, non-progress line (or the last line if all are progress)
+  // Find the last non-empty line
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i].trim();
     if (!line) continue;
@@ -165,6 +170,7 @@ export function ProcessRow({ name, label, startLabel, onFlash }) {
             {isRunning && pct !== null && (
               <span style={{ color: PALETTE.accent, fontFamily: "'JetBrains Mono', monospace", fontWeight: 500 }}>
                 {progress.current.toLocaleString()} / {progress.total.toLocaleString()} ({pct}%)
+                {progress.eta && <span style={{ color: PALETTE.textMuted, marginLeft: 6 }}>ETA: {progress.eta}</span>}
               </span>
             )}
           </div>

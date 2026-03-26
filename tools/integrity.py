@@ -17,6 +17,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -82,13 +83,25 @@ def scan_directory(directory: str) -> list[str]:
     return files
 
 
+def _format_eta(elapsed: float, completed: int, total: int) -> str:
+    if completed <= 0 or elapsed <= 0:
+        return "calculating..."
+    avg = elapsed / completed
+    remaining = (total - completed) * avg
+    if remaining >= 3600:
+        return f"~{remaining / 3600:.1f}h"
+    if remaining >= 60:
+        return f"~{remaining / 60:.0f}m"
+    return f"~{remaining:.0f}s"
+
+
 def main():
     parser = argparse.ArgumentParser(description="Check video files for corruption via ffmpeg decode")
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--from-state", action="store_true",
-                       help="Check all 'replaced' files from pipeline_state.json")
+                        help="Check all 'replaced' files from pipeline_state.json")
     group.add_argument("--directory", type=str, metavar="PATH",
-                       help="Check all video files in this directory")
+                        help="Check all video files in this directory")
     parser.add_argument("--output", type=str, default="integrity_check.csv",
                         help="Output CSV file")
     parser.add_argument("--workers", type=int, default=2,
@@ -112,11 +125,12 @@ def main():
         return
 
     print(f"Checking {len(files)} files with {args.workers} workers...")
-    print("(This may take a while -- full decode check per file)\n")
+    print("(Full decode check per file — this is CPU-only, safe to run with pipeline)\n")
 
     results = []
     completed = 0
     errors_found = 0
+    start_time = time.monotonic()
 
     with ThreadPoolExecutor(max_workers=args.workers) as executor:
         futures = {executor.submit(check_file, f): f for f in files}
@@ -141,9 +155,13 @@ def main():
                 "errors": error_output or "",
             })
 
-            if completed % 10 == 0 or completed == len(files):
-                print(f"  Progress: {completed}/{len(files)} "
-                      f"({errors_found} errors found)")
+            elapsed = time.monotonic() - start_time
+            eta = _format_eta(elapsed, completed, len(files))
+            pct = 100 * completed / len(files) if files else 0
+            fname = os.path.basename(filepath)
+            err_str = f", {errors_found} errors" if errors_found else ""
+            print(f"  Progress: {completed}/{len(files)} ({pct:.0f}%) "
+                  f"ETA: {eta}{err_str} — {status}: {fname}", flush=True)
 
     fieldnames = ["filepath", "filename", "file_size_gb", "status", "errors"]
     with open(args.output, "w", newline="", encoding="utf-8") as fh:
@@ -151,7 +169,9 @@ def main():
         w.writeheader()
         w.writerows(results)
 
-    print(f"\nDone: {len(results)} files checked, {errors_found} with errors")
+    elapsed = time.monotonic() - start_time
+    elapsed_str = f"{elapsed / 60:.1f}m" if elapsed >= 60 else f"{elapsed:.0f}s"
+    print(f"\nDone: {len(results)} files checked in {elapsed_str}, {errors_found} with errors")
     print(f"Results: {args.output}")
 
 

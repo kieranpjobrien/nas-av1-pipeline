@@ -168,7 +168,10 @@ def scan_directory(root: Path, library_type: str, report_data: dict | None = Non
             "has_english_any": has_eng_embedded or has_eng_external,
         }
 
+    import time as _time
     completed = 0
+    start = _time.monotonic()
+    total = len(video_files)
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {pool.submit(_check_file, vf): vf for vf in video_files}
         for future in as_completed(futures):
@@ -177,8 +180,15 @@ def scan_directory(root: Path, library_type: str, report_data: dict | None = Non
             except Exception as e:
                 print(f"  ERROR: {futures[future]}: {e}", file=sys.stderr)
             completed += 1
-            if completed % 100 == 0:
-                print(f"  Scanned {completed}/{len(video_files)}...")
+            if completed % 50 == 0 or completed == total:
+                elapsed = _time.monotonic() - start
+                if completed > 0 and elapsed > 0:
+                    remaining = (total - completed) * (elapsed / completed)
+                    eta = f"~{remaining / 60:.0f}m" if remaining >= 60 else f"~{remaining:.0f}s"
+                else:
+                    eta = "..."
+                print(f"  Progress: {completed}/{total} ({100 * completed / total:.0f}%) "
+                      f"ETA: {eta}", flush=True)
 
     return results
 
