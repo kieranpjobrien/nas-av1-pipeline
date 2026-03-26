@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import shutil
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -320,6 +321,10 @@ def stage_replace(source_filepath: str, item: dict, config: dict, state: Pipelin
             state.set_file(source_filepath, FileStatus.REPLACED, final_path=final_path,
                            replace_end=time.time())
             logging.info(f"Replaced: {item['filename']} -> {final_name}")
+
+            # Trigger Plex scan for the specific section (non-blocking)
+            _trigger_plex_scan_async(source_filepath)
+
             return True
 
         except PermissionError as e:
@@ -340,3 +345,52 @@ def stage_replace(source_filepath: str, item: dict, config: dict, state: Pipelin
             logging.error(f"  Backup: {backup_path}, AV1: {dest_path}, Target: {final_path}")
             state.set_file(source_filepath, FileStatus.ERROR, error=str(e), stage="replace")
             return False
+
+
+# Plex scan trigger — batched and debounced
+_plex_scan_pending = False
+_plex_scan_lock = threading.Lock()
+
+
+def _trigger_plex_scan_async(filepath: str) -> None:
+    """Request a Plex library scan. Debounced — batches rapid replaces into one scan."""
+    global _plex_scan_pending
+    from paths import PLEX_URL, PLEX_TOKEN
+
+    if not PLEX_URL or not PLEX_TOKEN:
+        return
+
+    with _plex_scan_lock:
+        if _plex_scan_pending:
+            return  # scan already queued
+        _plex_scan_pending = True
+
+    def _do_scan():
+        global _plex_scan_pending
+        # Wait a bit to batch multiple rapid replaces
+        time.sleep(30)
+        try:
+            from urllib.request import Request, urlopen
+            import re as _re
+
+            req = Request(f"{PLEX_URL}/library/sections",
+                          headers={"X-Plex-Token": PLEX_TOKEN})
+            with urlopen(req, timeout=10) as resp:
+                body = resp.read().decode()
+
+            sections = _re.findall(r'key="(\d+)"', body)
+            for section_id in sections:
+                req = Request(f"{PLEX_URL}/library/sections/{section_id}/refresh",
+                              headers={"X-Plex-Token": PLEX_TOKEN})
+                with urlopen(req, timeout=10) as resp:
+                    pass
+
+            logging.info(f"Triggered Plex library scan ({len(sections)} sections)")
+        except Exception as e:
+            logging.warning(f"Plex scan failed: {e}")
+        finally:
+            with _plex_scan_lock:
+                _plex_scan_pending = False
+
+    import threading as _threading
+    _threading.Thread(target=_do_scan, daemon=True, name="plex-scan").start()

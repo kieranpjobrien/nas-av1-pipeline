@@ -151,11 +151,14 @@ def build_ffmpeg_cmd(input_path: str, output_path: str, item: dict, config: dict
         if not audio_streams:
             cmd.extend(["-c:a", "copy"])
         else:
+            loudnorm = config.get("audio_loudnorm", False)
             for i, audio in enumerate(audio_streams):
                 if _should_transcode_audio(audio, config):
                     channels = audio.get("channels", 2)
                     bitrate = (config["audio_eac3_surround_bitrate"] if channels > 2
                                else config["audio_eac3_stereo_bitrate"])
+                    if loudnorm:
+                        cmd.extend([f"-filter:a:{i}", "loudnorm=I=-24:LRA=7:TP=-2"])
                     cmd.extend([
                         f"-c:a:{i}", "eac3",
                         f"-b:a:{i}", bitrate,
@@ -391,11 +394,14 @@ def build_audio_remux_cmd(input_path: str, output_path: str, item: dict,
     if not audio_streams:
         cmd.extend(["-c:a", "copy"])
     else:
+        loudnorm = config.get("audio_loudnorm", False)
         for i, audio in enumerate(audio_streams):
             if _should_transcode_audio(audio, config):
                 channels = audio.get("channels", 2)
                 bitrate = (config["audio_eac3_surround_bitrate"] if channels > 2
                            else config["audio_eac3_stereo_bitrate"])
+                if loudnorm:
+                    cmd.extend([f"-filter:a:{i}", "loudnorm=I=-24:LRA=7:TP=-2"])
                 cmd.extend([
                     f"-c:a:{i}", "eac3",
                     f"-b:a:{i}", bitrate,

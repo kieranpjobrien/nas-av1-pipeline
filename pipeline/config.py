@@ -78,6 +78,7 @@ DEFAULT_CONFIG = {
     "audio_mode": "smart",  # "copy" = passthrough, "smart" = bulky→EAC3/efficient→copy
     "audio_eac3_surround_bitrate": "640k",   # EAC3 for surround (>2 channels)
     "audio_eac3_stereo_bitrate": "256k",     # EAC3 for stereo/mono
+    "audio_loudnorm": False,  # EBU R128 loudness normalisation on transcoded audio
 
     # Audio codecs to transcode to EAC3 (lossless + wasteful lossy like DTS)
     "lossless_audio_codecs": {"truehd", "dts-hd ma", "dts-hd.ma", "dts", "flac",

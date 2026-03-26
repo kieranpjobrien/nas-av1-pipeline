@@ -9,6 +9,7 @@ import { PauseButton, BTN_BASE } from "../components/PauseButton";
 import { PathEditor } from "../components/PathEditor";
 import { GentleEditor } from "../components/GentleEditor";
 import { MediaSearch } from "../components/MediaSearch";
+import { SettingsEditor } from "../components/SettingsEditor";
 
 // CQ values: lower = better quality, higher = more compression
 // Base CQ table from config.py
@@ -217,6 +218,9 @@ export function ControlPage({ wsControl }) {
       <SectionTitle>Process Management</SectionTitle>
       <ProcessRow name="scanner" label="Media Scanner" startLabel="Rescan Library" onFlash={showFlash} />
       <ProcessRow name="pipeline" label="AV1 Pipeline" startLabel="Start Pipeline" onFlash={showFlash} />
+      <ProcessRow name="subtitles" label="Subtitle Check" startLabel="Run Check" onFlash={showFlash} />
+      <ProcessRow name="integrity" label="Integrity Check" startLabel="Run Check" onFlash={showFlash} />
+      <ProcessRow name="plex_scan" label="Plex Library Scan" startLabel="Trigger Scan" onFlash={showFlash} />
       <div style={{ marginBottom: 32 }} />
 
       {/* Pipeline Control */}
@@ -449,6 +453,9 @@ export function ControlPage({ wsControl }) {
           </form>
         </div>
       )}
+
+      {/* Settings */}
+      <SettingsEditor />
 
       {/* System Health */}
       <HealthSection />

@@ -138,6 +138,19 @@ PROCESS_CONFIGS = {
         "cmd": [sys.executable, "-m", "tools.duplicates", "--delete", "--execute"],
         "cwd": str(Path(__file__).parent.parent),
     },
+    "subtitles": {
+        "cmd": [sys.executable, "-m", "tools.subtitles"],
+        "cwd": str(Path(__file__).parent.parent),
+    },
+    "integrity": {
+        "cmd": [sys.executable, "-m", "tools.integrity", "--from-state"],
+        "cwd": str(Path(__file__).parent.parent),
+    },
+    "plex_scan": {
+        "cmd": [sys.executable, "-c",
+                "from tools.strip_tags import _trigger_plex_scan; _trigger_plex_scan()"],
+        "cwd": str(Path(__file__).parent.parent),
+    },
 }
 
 STOP_TIMEOUT = 15  # seconds to wait for graceful stop before terminate
