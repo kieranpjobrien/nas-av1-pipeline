@@ -211,6 +211,7 @@ export function SettingsEditor() {
         <div style={{ color: PALETTE.text, fontSize: 13, fontWeight: 600, marginBottom: 12 }}>Behaviour</div>
         <InputRow label="Replace originals" value={merged.replace_original ? "yes" : "no"} onChange={(v) => updateScalar("replace_original", v === "yes")} options={["yes", "no"]} />
         <InputRow label="Strip non-English subs" value={merged.strip_non_english_subs !== false ? "yes" : "no"} onChange={(v) => updateScalar("strip_non_english_subs", v === "yes")} options={["yes", "no"]} />
+        <InputRow label="Strip non-English audio" value={merged.strip_non_english_audio !== false ? "yes" : "no"} onChange={(v) => updateScalar("strip_non_english_audio", v === "yes")} options={["yes", "no"]} />
         <InputRow label="Duration tolerance" value={merged.verify_duration_tolerance_secs} onChange={(v) => updateScalar("verify_duration_tolerance_secs", v)} suffix="secs" />
       </div>
 

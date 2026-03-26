@@ -106,8 +106,9 @@ DEFAULT_CONFIG = {
         "ac-3": 400,      # alternate name
     },
 
-    # Subtitle handling
-    "strip_non_english_subs": True,  # drop non-English/und subtitle streams during encode
+    # Stream stripping — drop non-English tracks during encode
+    "strip_non_english_subs": True,   # subtitle streams (keeps English, und, forced)
+    "strip_non_english_audio": True,  # audio streams (keeps stream 0 as original language + English/und)
 
     # Behaviour
     "overwrite_existing": False,
