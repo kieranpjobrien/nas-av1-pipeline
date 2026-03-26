@@ -247,12 +247,14 @@ def load_rules() -> dict:
 # Commands
 # ---------------------------------------------------------------------------
 
-def cmd_audit() -> None:
+def cmd_audit(json_path: str | None = None) -> None:
     """Audit all metadata across movie libraries."""
     sections = _get_movie_sections()
     if not sections:
         print("No movie libraries found.")
         return
+
+    all_audit_data = []
 
     for section in sections:
         print(f"\n{'=' * 60}")
@@ -321,6 +323,28 @@ def cmd_audit() -> None:
         print(f"\n  Studios ({len(studio_counts)} unique):")
         for studio, count in sorted(studio_counts.items(), key=lambda x: -x[1])[:15]:
             print(f"    {studio:.<30} {count}")
+
+        # Collect for JSON output
+        all_audit_data.append({
+            "library": section["title"],
+            "total_movies": len(movies),
+            "content_ratings": rating_counts,
+            "unrated_count": len(unrated),
+            "unrated_titles": [m["title"] for m in unrated[:50]],
+            "genres": genre_counts,
+            "no_genre_count": no_genre,
+            "collections": collection_counts,
+            "no_collection_count": no_collection,
+            "labels": label_counts,
+            "studios": studio_counts,
+        })
+
+    # Write JSON if requested
+    if json_path and all_audit_data:
+        import json
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump({"sections": all_audit_data}, f, indent=2, ensure_ascii=False)
+        print(f"\nJSON audit written to {json_path}")
 
 
 def cmd_report(rules: dict) -> None:
@@ -602,7 +626,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Plex metadata manager — collections, genres, ratings, labels")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    subparsers.add_parser("audit", help="Show full metadata statistics")
+    audit_parser = subparsers.add_parser("audit", help="Show full metadata statistics")
+    audit_parser.add_argument("--json", type=str, default=None, metavar="PATH",
+                              help="Write structured JSON audit output to file")
     subparsers.add_parser("report", help="Metadata health report (gaps and issues)")
     subparsers.add_parser("missing-genres", help="Find items missing expected genres/collections")
 
@@ -615,7 +641,7 @@ def main() -> None:
 
     try:
         if args.command == "audit":
-            cmd_audit()
+            cmd_audit(json_path=args.json)
         elif args.command == "report":
             cmd_report(rules)
         elif args.command == "missing-genres":

@@ -37,9 +37,17 @@ function Section({ title, children }) {
   );
 }
 
+function vmafColour(score) {
+  if (score >= 93) return PALETTE.green;
+  if (score >= 85) return PALETTE.accentWarm;
+  return PALETTE.red;
+}
+
 export function FileDrawer({ path, onClose }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [vmaf, setVmaf] = useState(null);
+  const [vmafLoading, setVmafLoading] = useState(false);
 
   useEffect(() => {
     if (!path) return;
@@ -150,6 +158,40 @@ export function FileDrawer({ path, onClose }) {
                 {pipeline.tier && <Row label="Tier" value={pipeline.tier} />}
                 {pipeline.error && <Row label="Error" value={pipeline.error} colour={PALETTE.red} />}
                 {pipeline.last_updated && <Row label="Last updated" value={new Date(pipeline.last_updated).toLocaleString()} />}
+              </Section>
+            )}
+
+            {/* VMAF Quality Check */}
+            {pipeline && ["verified", "replaced"].includes(pipeline.status) && (
+              <Section title="Quality Check (VMAF)">
+                {vmaf ? (
+                  <>
+                    <Row label="VMAF Mean" value={vmaf.vmaf_mean} colour={vmafColour(vmaf.vmaf_mean)} />
+                    <Row label="VMAF Min" value={vmaf.vmaf_min} colour={vmafColour(vmaf.vmaf_min)} />
+                    <Row label="VMAF Max" value={vmaf.vmaf_max} />
+                    <Row label="Segment" value={`${vmaf.duration_tested}s at ${vmaf.offset_secs}s`} />
+                  </>
+                ) : (
+                  <button
+                    onClick={async () => {
+                      setVmafLoading(true);
+                      try {
+                        const result = await api.vmafCheck(path);
+                        setVmaf(result);
+                      } catch { setVmaf({ error: "VMAF check failed" }); }
+                      setVmafLoading(false);
+                    }}
+                    disabled={vmafLoading}
+                    style={{
+                      background: PALETTE.purple, color: "#fff", border: "none", borderRadius: 8,
+                      padding: "8px 16px", fontSize: 12, fontWeight: 600, cursor: "pointer",
+                      opacity: vmafLoading ? 0.6 : 1, width: "100%",
+                    }}
+                  >
+                    {vmafLoading ? "Running VMAF..." : "Check Quality (30s sample)"}
+                  </button>
+                )}
+                {vmaf?.error && <div style={{ color: PALETTE.red, fontSize: 12, marginTop: 4 }}>{vmaf.error}</div>}
               </Section>
             )}
 

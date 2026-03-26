@@ -97,3 +97,27 @@ class PipelineState:
     @property
     def stats(self):
         return self.data["stats"]
+
+    def compact(self) -> int:
+        """Remove REPLACED and SKIPPED entries from state to reduce file size.
+
+        Stats are already tracked separately in stats dict and encode_history.jsonl,
+        so these entries are no longer needed.
+        """
+        with self._lock:
+            terminal = {FileStatus.REPLACED.value, FileStatus.SKIPPED.value}
+            to_remove = [fp for fp, info in self.data["files"].items()
+                         if info.get("status") in terminal]
+            for fp in to_remove:
+                del self.data["files"][fp]
+
+            if to_remove:
+                self.data["stats"]["archived_count"] = (
+                    self.data["stats"].get("archived_count", 0) + len(to_remove)
+                )
+                logging.info(f"Compacted state: removed {len(to_remove)} terminal entries "
+                             f"({len(self.data['files'])} remaining)")
+
+        if to_remove:
+            self.save()
+        return len(to_remove)

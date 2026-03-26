@@ -406,6 +406,72 @@ function SubtitleHealth({ files, onFileClick }) {
   );
 }
 
+function PlexMetadata() {
+  const [audit, setAudit] = useState(null);
+  useEffect(() => {
+    api.getPlexAudit().then(setAudit).catch(() => {});
+  }, []);
+
+  if (!audit || !audit.sections?.length) return null;
+
+  return (
+    <>
+      <SectionTitle>Plex Metadata</SectionTitle>
+      {audit.sections.map((s, idx) => {
+        const topGenres = Object.entries(s.genres || {}).sort((a, b) => b[1] - a[1]).slice(0, 12);
+        const topCollections = Object.entries(s.collections || {}).sort((a, b) => b[1] - a[1]).slice(0, 12);
+        const topRatings = Object.entries(s.content_ratings || {}).sort((a, b) => b[1] - a[1]);
+
+        return (
+          <div key={idx} style={{ marginBottom: 24 }}>
+            <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 16 }}>
+              <StatCard label="Total Movies" value={fmtNum(s.total_movies)} />
+              <StatCard label="Unrated" value={fmtNum(s.unrated_count)} colour={s.unrated_count > 0 ? PALETTE.accentWarm : PALETTE.green} />
+              <StatCard label="No Genre" value={fmtNum(s.no_genre_count)} colour={s.no_genre_count > 0 ? PALETTE.accentWarm : PALETTE.green} />
+              <StatCard label="No Collection" value={fmtNum(s.no_collection_count)} />
+            </div>
+
+            <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+              {/* Content Ratings */}
+              <div style={{ flex: "1 1 280px", background: PALETTE.surface, border: `1px solid ${PALETTE.border}`, borderRadius: 12, padding: 16 }}>
+                <div style={{ color: PALETTE.text, fontSize: 13, fontWeight: 600, marginBottom: 8 }}>Content Ratings</div>
+                {topRatings.map(([r, c]) => (
+                  <div key={r} style={{ display: "flex", justifyContent: "space-between", fontSize: 12, padding: "2px 0", color: r === "(unrated)" ? PALETTE.accentWarm : PALETTE.textMuted }}>
+                    <span>{r}</span>
+                    <span style={{ fontFamily: "'JetBrains Mono', monospace" }}>{c}</span>
+                  </div>
+                ))}
+              </div>
+
+              {/* Top Genres */}
+              <div style={{ flex: "1 1 280px", background: PALETTE.surface, border: `1px solid ${PALETTE.border}`, borderRadius: 12, padding: 16 }}>
+                <div style={{ color: PALETTE.text, fontSize: 13, fontWeight: 600, marginBottom: 8 }}>Top Genres</div>
+                {topGenres.map(([g, c]) => (
+                  <div key={g} style={{ display: "flex", justifyContent: "space-between", fontSize: 12, padding: "2px 0", color: PALETTE.textMuted }}>
+                    <span>{g}</span>
+                    <span style={{ fontFamily: "'JetBrains Mono', monospace" }}>{c}</span>
+                  </div>
+                ))}
+              </div>
+
+              {/* Top Collections */}
+              <div style={{ flex: "1 1 280px", background: PALETTE.surface, border: `1px solid ${PALETTE.border}`, borderRadius: 12, padding: 16 }}>
+                <div style={{ color: PALETTE.text, fontSize: 13, fontWeight: 600, marginBottom: 8 }}>Top Collections</div>
+                {topCollections.map(([c, n]) => (
+                  <div key={c} style={{ display: "flex", justifyContent: "space-between", fontSize: 12, padding: "2px 0", color: PALETTE.textMuted }}>
+                    <span>{c}</span>
+                    <span style={{ fontFamily: "'JetBrains Mono', monospace" }}>{n}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        );
+      })}
+    </>
+  );
+}
+
 // Expected bitrate ranges per resolution/codec (Mbps)
 const EXPECTED_BITRATE = {
   "H.264": { "4K": [15, 50], "1080p": [3, 20], "720p": [1.5, 10], "480p": [0.5, 5], "SD": [0.3, 3] },
@@ -998,6 +1064,9 @@ export function LibraryPage({ onFileClick }) {
 
       {/* Bloated files */}
       <BitrateEfficiency files={files} onFileClick={onFileClick} />
+
+      {/* Plex metadata */}
+      <PlexMetadata />
 
       {/* Savings */}
       <SavingsEstimate files={files} />

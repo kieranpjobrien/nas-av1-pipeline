@@ -639,6 +639,9 @@ class Pipeline:
         os.makedirs(os.path.join(self.staging_dir, "fetch"), exist_ok=True)
         os.makedirs(os.path.join(self.staging_dir, "encoded"), exist_ok=True)
 
+        # Compact state — remove terminal entries to keep state file manageable
+        self.state.compact()
+
         # Recover zombie states from any previous crashed run before processing.
         # This runs once at startup so stale FETCHING/ENCODING/UPLOADING entries
         # don't block the main loop or fill staging forever.

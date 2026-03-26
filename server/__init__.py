@@ -152,7 +152,12 @@ PROCESS_CONFIGS = {
         "cwd": str(Path(__file__).parent.parent),
     },
     "plex_metadata": {
-        "cmd": [sys.executable, "-m", "tools.plex_metadata", "audit"],
+        "cmd": [sys.executable, "-m", "tools.plex_metadata", "audit",
+                "--json", str(STAGING_DIR / "plex_audit.json")],
+        "cwd": str(Path(__file__).parent.parent),
+    },
+    "plex_apply_rules": {
+        "cmd": [sys.executable, "-m", "tools.plex_metadata", "apply-rules", "--execute"],
         "cwd": str(Path(__file__).parent.parent),
     },
 }
@@ -440,6 +445,28 @@ def reset_errors():
     return {"ok": True, "reset": reset_count}
 
 
+@app.post("/api/pipeline/compact")
+def compact_state():
+    """Remove REPLACED and SKIPPED entries from pipeline state."""
+    data = read_json_safe(STATE_FILE)
+    if data is None:
+        raise HTTPException(404, "Pipeline state not found")
+    terminal = {"replaced", "skipped"}
+    removed = 0
+    files = data.get("files", {})
+    to_remove = [fp for fp, info in files.items()
+                 if (info.get("status") or "").lower() in terminal]
+    for fp in to_remove:
+        del files[fp]
+        removed += 1
+    if removed > 0:
+        stats = data.get("stats", {})
+        stats["archived_count"] = stats.get("archived_count", 0) + removed
+        data["last_updated"] = datetime.now().isoformat()
+        STATE_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    return {"ok": True, "removed": removed, "remaining": len(files)}
+
+
 # -- Process management endpoints --
 
 VALID_PROCESS_NAMES = set(PROCESS_CONFIGS.keys())
@@ -668,6 +695,65 @@ def get_config():
         "overrides": overrides,
         "effective": merged,
     }
+
+
+class VmafRequest(BaseModel):
+    path: str
+    duration: int = 30
+
+
+@app.post("/api/vmaf/check")
+def vmaf_check(req: VmafRequest):
+    """Run VMAF quality check on a completed encode."""
+    # Look up the file in pipeline state to find source/encoded paths
+    state_data = read_json_safe(STATE_FILE)
+    if not state_data or "files" not in state_data:
+        raise HTTPException(404, "Pipeline state not found")
+
+    file_info = state_data["files"].get(req.path)
+    if not file_info:
+        raise HTTPException(404, f"File not in pipeline state: {req.path}")
+
+    status = file_info.get("status", "")
+    if status not in ("verified", "replaced"):
+        raise HTTPException(400, f"File not in terminal state: {status}")
+
+    # Source = original NAS path, encoded = dest_path or final_path
+    source = req.path
+    encoded = file_info.get("final_path") or file_info.get("dest_path")
+    if not encoded:
+        raise HTTPException(400, "No encoded path found in state")
+
+    # Check for cached result
+    vmaf_dir = STAGING_DIR / "vmaf_results"
+    safe_name = Path(encoded).stem.replace(" ", "_")[:80]
+    cached = vmaf_dir / f"{safe_name}.json"
+    if cached.exists():
+        data = read_json_safe(cached)
+        if data:
+            return data
+
+    # Run VMAF (synchronous — can take a couple minutes)
+    try:
+        from tools.vmaf import run_vmaf
+        result = run_vmaf(source, encoded, duration=req.duration)
+        if "error" in result:
+            raise HTTPException(500, result["error"])
+        return result
+    except ImportError:
+        raise HTTPException(500, "VMAF tool not available")
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@app.get("/api/plex-audit")
+def get_plex_audit():
+    """Read the last Plex metadata audit results."""
+    audit_path = STAGING_DIR / "plex_audit.json"
+    data = read_json_safe(audit_path)
+    if data is None:
+        return {"sections": [], "message": "No audit data. Run Plex Metadata Audit from Controls."}
+    return data
 
 
 @app.put("/api/config")
