@@ -51,7 +51,7 @@ function BitrateDistribution({ files, title }) {
   );
 }
 
-function AudioAnalysis({ files }) {
+function AudioAnalysis({ files, onAudioClick, activeAudio }) {
   const losslessFiles = files.filter((f) => f.audio_streams?.some((a) => a.lossless));
   const multiAudio = files.filter((f) => f.audio_stream_count > 1);
   const totalAudioEstGB = files.reduce((s, f) => s + (f.audio_estimated_size_gb || 0), 0);
@@ -78,7 +78,9 @@ function AudioAnalysis({ files }) {
         <StatCard label="Total Streams" value={fmtNum(totalStreams)} sub={`${losslessStreams} lossless`} />
       </div>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 16 }}>
-        <PieSection data={codecData} colourFn={getAudioColour} title="Primary Audio Codec (by size)" />
+        <PieSection data={codecData} colourFn={getAudioColour} title="Primary Audio Codec (by size)"
+          onSegmentClick={onAudioClick} activeSegment={activeAudio}
+        />
       </div>
     </div>
   );
@@ -902,11 +904,92 @@ function TopFolders({ files, limit = 15 }) {
   );
 }
 
+function StatusBadge({ status }) {
+  if (!status) return <span style={{ color: PALETTE.border, fontSize: 10 }}>—</span>;
+  const s = status.toLowerCase();
+  const map = {
+    replaced: { label: "done", color: PALETTE.green },
+    verified: { label: "done", color: PALETTE.green },
+    encoded: { label: "encoded", color: PALETTE.accent },
+    uploaded: { label: "uploaded", color: PALETTE.accent },
+    encoding: { label: "encoding", color: PALETTE.accent },
+    fetching: { label: "fetching", color: PALETTE.cyan },
+    fetched: { label: "fetched", color: PALETTE.cyan },
+    uploading: { label: "uploading", color: PALETTE.accent },
+    error: { label: "error", color: PALETTE.red },
+    failed: { label: "error", color: PALETTE.red },
+    pending: { label: "queued", color: PALETTE.textMuted },
+    skipped: { label: "skipped", color: PALETTE.textMuted },
+  };
+  const { label, color } = map[s] || { label: s, color: PALETTE.textMuted };
+  return (
+    <span style={{
+      fontSize: 10, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.05em",
+      padding: "2px 6px", borderRadius: 4, background: color + "22", color,
+    }}>{label}</span>
+  );
+}
+
+function FilteredFileList({ files, title, onFileClick, onClose, statusMap }) {
+  if (!files || files.length === 0) return null;
+  const sorted = [...files].sort((a, b) => b.file_size_bytes - a.file_size_bytes);
+  const shown = sorted.slice(0, 100);
+  return (
+    <div style={{
+      background: PALETTE.surface, border: `1px solid ${PALETTE.accent}44`,
+      borderRadius: 12, padding: 16, marginTop: 12, marginBottom: 24,
+    }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+        <div style={{ color: PALETTE.text, fontSize: 14, fontWeight: 600 }}>
+          {title} — {fmtNum(files.length)} files
+        </div>
+        <button onClick={onClose} style={{
+          background: "transparent", border: `1px solid ${PALETTE.border}`, borderRadius: 6,
+          color: PALETTE.textMuted, padding: "4px 10px", fontSize: 11, cursor: "pointer",
+        }}>✕ Close</button>
+      </div>
+      <div style={{ maxHeight: 400, overflow: "auto" }}>
+        {shown.map((f) => (
+          <div
+            key={f.filepath}
+            onClick={() => onFileClick?.(f.filepath)}
+            style={{
+              display: "flex", justifyContent: "space-between", alignItems: "center",
+              padding: "6px 4px", borderBottom: `1px solid ${PALETTE.border}22`,
+              cursor: "pointer", fontSize: 12, transition: "background 0.1s",
+            }}
+            onMouseEnter={(e) => e.currentTarget.style.background = PALETTE.surfaceLight}
+            onMouseLeave={(e) => e.currentTarget.style.background = "transparent"}
+          >
+            <span style={{ color: PALETTE.text, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", marginRight: 12 }}>
+              {f.filename}
+            </span>
+            <span style={{ display: "flex", alignItems: "center", gap: 8, whiteSpace: "nowrap", fontFamily: "'JetBrains Mono', monospace", fontSize: 11 }}>
+              <span style={{ color: getCodecColour(f.video?.codec) }}>{f.video?.codec || "?"}</span>
+              <span style={{ color: PALETTE.textMuted }}>{f.video?.resolution_class || "?"}</span>
+              <span style={{ color: PALETTE.textMuted }}>{fmt(f.file_size_gb)}</span>
+              <StatusBadge status={statusMap?.[f.filepath]} />
+            </span>
+          </div>
+        ))}
+      </div>
+      {files.length > 100 && (
+        <div style={{ color: PALETTE.textMuted, fontSize: 11, marginTop: 8, textAlign: "center" }}>
+          Showing 100 of {fmtNum(files.length)} — sorted by size
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function LibraryPage({ onFileClick }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
   const [tab, setTab] = useState("all");
   const [scanning, setScanning] = useState(false);
+  const [search, setSearch] = useState("");
+  const [activeFilter, setActiveFilter] = useState(null); // { type, value, label }
+  const [statusMap, setStatusMap] = useState({});
 
   const loadReport = useCallback(() => {
     api.getMediaReport()
@@ -915,6 +998,19 @@ export function LibraryPage({ onFileClick }) {
   }, []);
 
   useEffect(() => { loadReport(); }, [loadReport]);
+
+  // Fetch pipeline status for file status badges
+  useEffect(() => {
+    api.getPipeline().then((d) => {
+      if (d?.files) {
+        const map = {};
+        for (const [path, info] of Object.entries(d.files)) {
+          map[path] = info.status;
+        }
+        setStatusMap(map);
+      }
+    }).catch(() => {});
+  }, []);
 
   const [scanLogs, setScanLogs] = useState([]);
 
@@ -1024,6 +1120,37 @@ export function LibraryPage({ onFileClick }) {
         <TabButton active={tab === "series"} onClick={() => setTab("series")}>Series ({fmtNum(summary.series?.count || 0)})</TabButton>
       </div>
 
+      {/* Search */}
+      <div style={{ marginBottom: 20 }}>
+        <input
+          type="text"
+          placeholder={`Search ${fmtNum(files.length)} files...`}
+          value={search}
+          onChange={(e) => { setSearch(e.target.value); setActiveFilter(null); }}
+          style={{
+            width: "100%", background: PALETTE.surface, color: PALETTE.text,
+            border: `1px solid ${PALETTE.border}`, borderRadius: 8,
+            padding: "10px 14px", fontSize: 13,
+            fontFamily: "'JetBrains Mono', monospace",
+          }}
+        />
+        {search.length >= 2 && (() => {
+          const q = search.toLowerCase();
+          const matches = files.filter((f) =>
+            f.filename.toLowerCase().includes(q) || f.filepath.toLowerCase().includes(q)
+          );
+          return (
+            <FilteredFileList
+              files={matches}
+              title={`Search: "${search}"`}
+              onFileClick={onFileClick}
+              onClose={() => setSearch("")}
+              statusMap={statusMap}
+            />
+          );
+        })()}
+      </div>
+
       {/* Summary Cards */}
       <div style={{ display: "flex", flexWrap: "wrap", gap: 12, marginBottom: 24 }}>
         <StatCard label="Total Files" value={fmtNum(files.length)} />
@@ -1042,9 +1169,46 @@ export function LibraryPage({ onFileClick }) {
       {/* Codec & Resolution pies */}
       <SectionTitle>Video Codecs &amp; Resolution</SectionTitle>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 16, marginBottom: 8 }}>
-        <PieSection data={codecData} colourFn={getCodecColour} title="Video Codec (by storage)" />
-        <PieSection data={resData} colourFn={getResColour} title="Resolution (by storage)" />
+        <PieSection
+          data={codecData} colourFn={getCodecColour} title="Video Codec (by storage)"
+          onSegmentClick={(name) => setActiveFilter(
+            activeFilter?.type === "codec" && activeFilter?.value === name
+              ? null : { type: "codec", value: name, label: name }
+          )}
+          activeSegment={activeFilter?.type === "codec" ? activeFilter.value : null}
+        />
+        <PieSection
+          data={resData} colourFn={getResColour} title="Resolution (by storage)"
+          onSegmentClick={(name) => setActiveFilter(
+            activeFilter?.type === "resolution" && activeFilter?.value === name
+              ? null : { type: "resolution", value: name, label: name }
+          )}
+          activeSegment={activeFilter?.type === "resolution" ? activeFilter.value : null}
+        />
       </div>
+
+      {/* Filtered file list from pie clicks */}
+      {activeFilter && (() => {
+        let filtered;
+        if (activeFilter.type === "codec") {
+          filtered = files.filter((f) => f.video?.codec === activeFilter.value);
+        } else if (activeFilter.type === "resolution") {
+          filtered = files.filter((f) => f.video?.resolution_class === activeFilter.value);
+        } else if (activeFilter.type === "audio") {
+          filtered = files.filter((f) => f.audio_streams?.[0]?.codec === activeFilter.value);
+        } else {
+          filtered = [];
+        }
+        return (
+          <FilteredFileList
+            files={filtered}
+            title={activeFilter.label}
+            onFileClick={onFileClick}
+            onClose={() => setActiveFilter(null)}
+            statusMap={statusMap}
+          />
+        );
+      })()}
 
       {/* Bitrate */}
       <SectionTitle>Bitrate Distribution</SectionTitle>
@@ -1053,7 +1217,13 @@ export function LibraryPage({ onFileClick }) {
       </div>
 
       {/* Audio */}
-      <AudioAnalysis files={files} />
+      <AudioAnalysis files={files}
+        onAudioClick={(name) => setActiveFilter(
+          activeFilter?.type === "audio" && activeFilter?.value === name
+            ? null : { type: "audio", value: name, label: `Audio: ${name}` }
+        )}
+        activeAudio={activeFilter?.type === "audio" ? activeFilter.value : null}
+      />
       <AudioSavingsEstimate files={files} />
 
       {/* Filename Health */}

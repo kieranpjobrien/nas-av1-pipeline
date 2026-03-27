@@ -2,9 +2,10 @@ import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer } from "recharts";
 import { PALETTE } from "../theme";
 import { fmt, fmtNum, fmtHrs } from "../lib/format";
 
-export function PieSection({ data, colourFn, title, valueKey = "size_gb", labelFn, showHours = true }) {
+export function PieSection({ data, colourFn, title, valueKey = "size_gb", labelFn, showHours = true, onSegmentClick, activeSegment }) {
   const total = data.reduce((s, d) => s + d[valueKey], 0);
   const mono = { fontFamily: "'JetBrains Mono', monospace", fontSize: 11 };
+  const clickable = !!onSegmentClick;
   return (
     <div style={{ background: PALETTE.surface, border: `1px solid ${PALETTE.border}`, borderRadius: 12, padding: 20, flex: "1 1 400px", minWidth: 340 }}>
       <div style={{ color: PALETTE.text, fontSize: 15, fontWeight: 600, marginBottom: 16 }}>{title}</div>
@@ -12,8 +13,19 @@ export function PieSection({ data, colourFn, title, valueKey = "size_gb", labelF
         <div style={{ width: 200, minWidth: 180, flexShrink: 0 }}>
           <ResponsiveContainer width="100%" height={220}>
             <PieChart>
-              <Pie data={data} dataKey={valueKey} cx="50%" cy="50%" outerRadius={90} innerRadius={50} strokeWidth={1} stroke={PALETTE.bg}>
-                {data.map((d, i) => <Cell key={i} fill={colourFn(d.name)} />)}
+              <Pie
+                data={data} dataKey={valueKey} cx="50%" cy="50%"
+                outerRadius={90} innerRadius={50} strokeWidth={1} stroke={PALETTE.bg}
+                style={clickable ? { cursor: "pointer" } : undefined}
+                onClick={clickable ? (_, idx) => onSegmentClick(data[idx]?.name) : undefined}
+              >
+                {data.map((d, i) => (
+                  <Cell
+                    key={i}
+                    fill={colourFn(d.name)}
+                    opacity={activeSegment && activeSegment !== d.name ? 0.3 : 1}
+                  />
+                ))}
               </Pie>
               <Tooltip
                 contentStyle={{ background: PALETTE.surfaceLight, border: `1px solid ${PALETTE.border}`, borderRadius: 8, color: PALETTE.text, fontSize: 13 }}
@@ -25,7 +37,15 @@ export function PieSection({ data, colourFn, title, valueKey = "size_gb", labelF
         <table style={{ flex: 1, borderCollapse: "collapse", fontSize: 12 }}>
           <tbody>
             {data.map((d, i) => (
-              <tr key={i}>
+              <tr
+                key={i}
+                onClick={clickable ? () => onSegmentClick(d.name) : undefined}
+                style={{
+                  cursor: clickable ? "pointer" : "default",
+                  opacity: activeSegment && activeSegment !== d.name ? 0.4 : 1,
+                  transition: "opacity 0.15s",
+                }}
+              >
                 <td style={{ padding: "3px 0", width: 14 }}>
                   <div style={{ width: 10, height: 10, borderRadius: 3, background: colourFn(d.name) }} />
                 </td>
