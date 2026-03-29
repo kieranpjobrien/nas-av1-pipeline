@@ -28,7 +28,7 @@ _STRIP_RE = re.compile(
     r"""
     \b(
         \d{4}                          # year like 2023
-        |[12]\d{3}p                    # resolution like 1080p
+        |[12]\d{3}[pi]                 # resolution like 1080p or 1080i
         |4K|UHD|SD|720p|480p
         |x264|x265|h\.?264|h\.?265|hevc|avc|av1|vp9
         |bluray|bdrip|brrip|web[.-]?dl|webrip|hdtv|dvdrip
@@ -37,6 +37,8 @@ _STRIP_RE = re.compile(
         |ntb|nf|amzn|dsnp|hulu|max|hbo
         |mkv|mp4|avi
         |multi|proper|repack|internal
+        |xpost|edge\d*|sombra|ubweb|oldt|framesto?r|ika|btn|book
+        |dd\d+
     )\b
     |[\[\](){}\-_.]+
     """,
