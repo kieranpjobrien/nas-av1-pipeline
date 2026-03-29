@@ -161,14 +161,18 @@ class Pipeline:
             def _fetch_tier(item):
                 norm = os.path.normpath(item["filepath"]).lower()
                 if norm in force_set:
-                    return 0
-                if norm in priority_set or any(
+                    tier = 0
+                elif norm in priority_set or any(
                     fnmatch.fnmatch(norm, pat.lower()) for pat in priority_patterns
                 ):
-                    return 1
-                return 2
+                    tier = 1
+                else:
+                    tier = 2
+                # Within each tier: audio-only first, then smallest file first
+                audio_first = 0 if item.get("audio_only") else 1
+                return (tier, audio_first, item.get("file_size_bytes", 0))
 
-            # Sort queue: force first, then priority, then rest
+            # Sort queue: force first, then priority, then rest; smallest first within each tier
             fetch_order = sorted(queue, key=_fetch_tier)
 
             for item in fetch_order:
@@ -754,6 +758,10 @@ class Pipeline:
 
         processed = 0
         last_progress_at = 0
+        # Items that have been handed off to upload worker or audio thread this run.
+        # Prevents the main loop from re-selecting them before state updates propagate.
+        dispatched: set[str] = set()
+
         # Main loop: find FETCHED items and process them (encode → hand off to upload worker)
         # Keep looping until all queue items are terminal or shutdown
         while not self._shutdown:
@@ -813,11 +821,21 @@ class Pipeline:
                 # Skip terminal states
                 if status in (FileStatus.VERIFIED.value, FileStatus.REPLACED.value,
                                FileStatus.SKIPPED.value, FileStatus.ERROR.value):
+                    dispatched.discard(filepath)  # clean up so future retries work
+                    continue
+
+                # Skip items already handed off this run (state update may lag)
+                if filepath in dispatched:
+                    all_done = False
                     continue
 
                 all_done = False
 
                 if status in READY_STATUSES:
+                    # Skip audio-only items already in ENCODING — they're running
+                    # in a background thread; re-selecting them causes duplicate dispatch.
+                    if status == FileStatus.ENCODING.value and item.get("audio_only"):
+                        continue
                     if is_force and ready_force is None:
                         ready_force = item
                     elif is_priority and ready_priority is None:
@@ -875,6 +893,13 @@ class Pipeline:
 
             # Audio-only items: dispatch to background thread (no GPU needed)
             if ready_item.get("audio_only") and len(audio_threads) < MAX_AUDIO_THREADS:
+                # Mark as ENCODING immediately so the main loop doesn't re-select
+                # this item on the next iteration before the thread updates state.
+                existing_info = self.state.get_file(filepath) or {}
+                if existing_info.get("status") == FileStatus.FETCHED.value:
+                    self.state.set_file(filepath, FileStatus.ENCODING,
+                                        local_path=existing_info.get("local_path"),
+                                        audio_only=True)
                 effective_config = self._apply_gentle_overrides(ready_item)
                 t = threading.Thread(
                     target=self._audio_remux_async,
@@ -884,9 +909,11 @@ class Pipeline:
                 )
                 t.start()
                 audio_threads.append(t)
+                dispatched.add(filepath)
                 logging.info(f"  Dispatched audio remux to background thread")
                 continue
 
+            dispatched.add(filepath)
             success = self.process_item(ready_item)
             if not success:
                 # If item is still PENDING after process_item failed, the fetch
