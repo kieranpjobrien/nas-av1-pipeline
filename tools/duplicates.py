@@ -47,10 +47,28 @@ _STRIP_RE = re.compile(
 
 
 def normalize_title(filename: str) -> str:
-    """Strip year, codec tags, resolution, punctuation from a filename."""
+    """Strip year, codec tags, resolution, punctuation from a filename.
+
+    Also tries the strip_tags cleaner as a fallback — it's more thorough
+    at extracting the actual title from messy scene-style filenames.
+    """
     stem = Path(filename).stem
     cleaned = _STRIP_RE.sub(" ", stem)
-    return " ".join(cleaned.lower().split())
+    result = " ".join(cleaned.lower().split())
+
+    # Also try strip_tags cleaner — if it produces a shorter, cleaner title, use that
+    try:
+        from tools.strip_tags import clean_series_name, clean_movie_name
+        stripped = clean_series_name(stem) or clean_movie_name(stem)
+        if stripped:
+            alt = " ".join(stripped.lower().split())
+            # Use the strip_tags result if it's shorter (more aggressive cleaning)
+            if len(alt) < len(result):
+                result = alt
+    except ImportError:
+        pass
+
+    return result
 
 
 def find_title_duration_dupes(
