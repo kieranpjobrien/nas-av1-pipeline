@@ -333,6 +333,93 @@ def get_media_report():
     return data
 
 
+@app.get("/api/duplicates")
+def get_duplicates():
+    """Find duplicate files using title+duration matching with quality scoring."""
+    from collections import defaultdict
+    from tools.duplicates import find_title_duration_dupes, score_file, pick_best
+
+    data = read_json_safe(MEDIA_REPORT)
+    if data is None:
+        raise HTTPException(404, "media_report.json not found")
+    files = data.get("files", [])
+    file_lookup = {f["filepath"]: f for f in files}
+
+    raw_dupes = find_title_duration_dupes(files, same_dir=True)
+    if not raw_dupes:
+        return {"groups": [], "total_groups": 0, "total_dupes": 0, "wasted_gb": 0}
+
+    # Group by group_id
+    by_group = defaultdict(list)
+    for r in raw_dupes:
+        by_group[r["group_id"]].append(r)
+
+    groups = []
+    total_wasted = 0
+    for gid, rows in sorted(by_group.items()):
+        full_records = [file_lookup[r["filepath"]] for r in rows if r["filepath"] in file_lookup]
+        if len(full_records) < 2:
+            continue
+        keeper, deletions = pick_best(full_records)
+        keeper_path = keeper["filepath"]
+        wasted = sum(d.get("file_size_gb", 0) for d in deletions)
+        total_wasted += wasted
+
+        members = []
+        for rec in full_records:
+            members.append({
+                "filepath": rec["filepath"],
+                "filename": rec.get("filename", os.path.basename(rec["filepath"])),
+                "file_size_gb": rec.get("file_size_gb", 0),
+                "duration_seconds": rec.get("duration_seconds", 0),
+                "codec": rec.get("video", {}).get("codec", ""),
+                "resolution": rec.get("video", {}).get("resolution_class", ""),
+                "score": score_file(rec),
+                "keep": rec["filepath"] == keeper_path,
+            })
+        members.sort(key=lambda m: -m["score"])
+        groups.append({
+            "group_id": gid,
+            "title": rows[0].get("normalized_title", ""),
+            "members": members,
+            "wasted_gb": round(wasted, 3),
+        })
+
+    groups.sort(key=lambda g: -g["wasted_gb"])
+    return {
+        "groups": groups,
+        "total_groups": len(groups),
+        "total_dupes": sum(len(g["members"]) - 1 for g in groups),
+        "wasted_gb": round(total_wasted, 2),
+    }
+
+
+class DeleteFileRequest(BaseModel):
+    path: str
+
+
+@app.post("/api/file/delete")
+def delete_file(req: DeleteFileRequest):
+    """Delete a single file. Only allows paths within NAS media directories."""
+    from paths import NAS_MOVIES, NAS_SERIES
+
+    norm = os.path.normpath(req.path)
+    nas_movies = os.path.normpath(str(NAS_MOVIES))
+    nas_series = os.path.normpath(str(NAS_SERIES))
+
+    if not (norm.startswith(nas_movies) or norm.startswith(nas_series)):
+        raise HTTPException(403, "Path is outside NAS media directories")
+
+    if not os.path.exists(norm):
+        raise HTTPException(404, "File not found")
+
+    try:
+        os.remove(norm)
+        return {"ok": True, "deleted": req.path}
+    except OSError as e:
+        raise HTTPException(500, f"Delete failed: {e}")
+
+
 @app.get("/api/control/status")
 def get_control_status():
     return {

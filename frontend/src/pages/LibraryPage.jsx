@@ -148,6 +148,190 @@ function countKeywordMatches(files, keyword) {
   }
 }
 
+function DuplicateGroups({ onReload, onFileClick }) {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [expanded, setExpanded] = useState(null);
+  const [deleting, setDeleting] = useState(null); // filepath being deleted
+  const [confirmDelete, setConfirmDelete] = useState(null); // filepath awaiting confirmation
+
+  const load = () => {
+    setLoading(true);
+    api.getDuplicates().then(setData).catch(() => setData(null)).finally(() => setLoading(false));
+  };
+
+  useEffect(() => { load(); }, []);
+
+  if (loading && !data) return (
+    <div>
+      <SectionTitle>Duplicates</SectionTitle>
+      <div style={{ color: PALETTE.textMuted, padding: 20 }}>Scanning for duplicates...</div>
+    </div>
+  );
+  if (!data || data.total_groups === 0) return null;
+
+  const handleDelete = async (filepath) => {
+    setDeleting(filepath);
+    try {
+      await api.deleteFile(filepath);
+      setConfirmDelete(null);
+      load(); // refresh
+      onReload?.(); // refresh media report too
+    } catch (e) {
+      alert(`Delete failed: ${e.message}`);
+    }
+    setDeleting(null);
+  };
+
+  const handleDeleteGroup = async (group) => {
+    const toDelete = group.members.filter((m) => !m.keep);
+    for (const m of toDelete) {
+      setDeleting(m.filepath);
+      try { await api.deleteFile(m.filepath); } catch { /* continue */ }
+    }
+    setDeleting(null);
+    setConfirmDelete(null);
+    load();
+    onReload?.();
+  };
+
+  const mono = { fontFamily: "'JetBrains Mono', monospace" };
+
+  return (
+    <div>
+      <SectionTitle>Duplicates</SectionTitle>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 12, marginBottom: 20 }}>
+        <StatCard label="Duplicate Groups" value={fmtNum(data.total_groups)} colour={PALETTE.accentWarm} />
+        <StatCard label="Extra Files" value={fmtNum(data.total_dupes)} sub="could be deleted" />
+        <StatCard label="Wasted Space" value={fmt(data.wasted_gb)} colour={PALETTE.red} />
+      </div>
+
+      <div style={{ background: PALETTE.surface, border: `1px solid ${PALETTE.border}`, borderRadius: 12, padding: 16 }}>
+        <div style={{ color: PALETTE.text, fontSize: 14, fontWeight: 600, marginBottom: 12 }}>
+          {data.total_groups} groups ({data.total_dupes} extra files, {fmt(data.wasted_gb)} reclaimable)
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+          {data.groups.map((g) => {
+            const isOpen = expanded === g.group_id;
+            return (
+              <div key={g.group_id}>
+                <div
+                  onClick={() => setExpanded(isOpen ? null : g.group_id)}
+                  style={{
+                    display: "flex", justifyContent: "space-between", alignItems: "center",
+                    padding: "8px 10px", cursor: "pointer", borderRadius: 6,
+                    background: isOpen ? PALETTE.surfaceLight : "transparent",
+                  }}
+                >
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{ color: PALETTE.textMuted, fontSize: 11 }}>{isOpen ? "v" : ">"}</span>
+                    <span style={{ color: PALETTE.text, fontSize: 13 }}>{g.title}</span>
+                    <span style={{ color: PALETTE.textMuted, fontSize: 11 }}>({g.members.length} copies)</span>
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                    <span style={{ ...mono, color: PALETTE.red, fontSize: 11 }}>{fmt(g.wasted_gb)} wasted</span>
+                  </div>
+                </div>
+                {isOpen && (
+                  <div style={{ padding: "8px 10px 12px 28px" }}>
+                    {g.members.map((m) => (
+                      <div key={m.filepath} style={{
+                        display: "flex", alignItems: "center", gap: 8, fontSize: 12,
+                        padding: "6px 8px", borderRadius: 4, marginBottom: 2,
+                        background: m.keep ? `${PALETTE.green}11` : "transparent",
+                      }}>
+                        <span
+                          onClick={() => onFileClick?.(m.filepath)}
+                          style={{ color: PALETTE.text, flex: 1, cursor: "pointer", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                          title={m.filepath}
+                        >
+                          {m.filename}
+                        </span>
+                        <span style={{ ...mono, color: PALETTE.textMuted, fontSize: 11, width: 50, textAlign: "right" }}>{fmt(m.file_size_gb)}</span>
+                        <span style={{ ...mono, color: PALETTE.textMuted, fontSize: 11, width: 70, textAlign: "right" }}>{m.codec}</span>
+                        <span style={{ ...mono, color: PALETTE.textMuted, fontSize: 11, width: 40, textAlign: "right" }}>{m.resolution}</span>
+                        <span style={{ ...mono, color: PALETTE.accent, fontSize: 11, width: 30, textAlign: "right" }}>{m.score}</span>
+                        {m.keep ? (
+                          <span style={{
+                            background: PALETTE.green, color: "#000", fontSize: 10, fontWeight: 700,
+                            padding: "2px 6px", borderRadius: 4, width: 36, textAlign: "center",
+                          }}>KEEP</span>
+                        ) : (
+                          confirmDelete === m.filepath ? (
+                            <span style={{ display: "flex", gap: 4 }}>
+                              <button
+                                onClick={() => handleDelete(m.filepath)}
+                                disabled={deleting === m.filepath}
+                                style={{
+                                  background: PALETTE.red, color: "#fff", border: "none", borderRadius: 4,
+                                  padding: "2px 6px", fontSize: 10, fontWeight: 600, cursor: "pointer",
+                                }}
+                              >{deleting === m.filepath ? "..." : "Yes"}</button>
+                              <button
+                                onClick={() => setConfirmDelete(null)}
+                                style={{
+                                  background: PALETTE.surfaceLight, color: PALETTE.textMuted, border: "none",
+                                  borderRadius: 4, padding: "2px 6px", fontSize: 10, cursor: "pointer",
+                                }}
+                              >No</button>
+                            </span>
+                          ) : (
+                            <button
+                              onClick={() => setConfirmDelete(m.filepath)}
+                              style={{
+                                background: "transparent", color: PALETTE.red, border: `1px solid ${PALETTE.red}44`,
+                                borderRadius: 4, padding: "2px 6px", fontSize: 10, fontWeight: 600,
+                                cursor: "pointer", width: 36, textAlign: "center",
+                              }}
+                            >DEL</button>
+                          )
+                        )}
+                      </div>
+                    ))}
+                    {/* Delete all non-keepers button */}
+                    {g.members.filter((m) => !m.keep).length > 1 && (
+                      <div style={{ marginTop: 8 }}>
+                        {confirmDelete === `group-${g.group_id}` ? (
+                          <span style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                            <span style={{ color: PALETTE.textMuted, fontSize: 11 }}>Delete {g.members.filter((m) => !m.keep).length} files?</span>
+                            <button
+                              onClick={() => handleDeleteGroup(g)}
+                              disabled={!!deleting}
+                              style={{
+                                background: PALETTE.red, color: "#fff", border: "none", borderRadius: 4,
+                                padding: "4px 10px", fontSize: 11, fontWeight: 600, cursor: "pointer",
+                              }}
+                            >{deleting ? "Deleting..." : "Confirm"}</button>
+                            <button
+                              onClick={() => setConfirmDelete(null)}
+                              style={{
+                                background: PALETTE.surfaceLight, color: PALETTE.textMuted, border: "none",
+                                borderRadius: 4, padding: "4px 10px", fontSize: 11, cursor: "pointer",
+                              }}
+                            >Cancel</button>
+                          </span>
+                        ) : (
+                          <button
+                            onClick={() => setConfirmDelete(`group-${g.group_id}`)}
+                            style={{
+                              background: "transparent", color: PALETTE.red, border: `1px solid ${PALETTE.red}44`,
+                              borderRadius: 6, padding: "4px 12px", fontSize: 11, fontWeight: 600, cursor: "pointer",
+                            }}
+                          >Delete All Lower ({g.members.filter((m) => !m.keep).length} files, {fmt(g.wasted_gb)})</button>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function FilenameHealth({ files, onReload }) {
   const [expanded, setExpanded] = useState(null);
   const [stripRunning, setStripRunning] = useState(false);
@@ -1278,6 +1462,9 @@ export function LibraryPage({ onFileClick }) {
 
       {/* Filename Health */}
       <FilenameHealth files={files} onReload={loadReport} />
+
+      {/* Duplicates */}
+      <DuplicateGroups onReload={loadReport} onFileClick={onFileClick} />
 
       {/* Subtitle health */}
       <SubtitleHealth files={files} onFileClick={onFileClick} />
