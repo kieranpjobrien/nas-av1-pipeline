@@ -10,7 +10,7 @@ import { PieSection } from "../components/PieSection";
 import { TabButton } from "../components/TabButton";
 import { TopFiles } from "../components/TopFiles";
 
-function BitrateDistribution({ files, title }) {
+function BitrateDistribution({ files, title, onBarClick, activeBar }) {
   const buckets = [
     { label: "<2", min: 0, max: 2000 },
     { label: "2-5", min: 2000, max: 5000 },
@@ -22,6 +22,8 @@ function BitrateDistribution({ files, title }) {
   ];
   const data = buckets.map((b) => ({
     name: b.label,
+    min: b.min,
+    max: b.max,
     count: files.filter((f) => {
       const br = f.overall_bitrate_kbps;
       return br != null && br >= b.min && br < b.max;
@@ -32,19 +34,37 @@ function BitrateDistribution({ files, title }) {
     }).reduce((s, f) => s + f.file_size_gb, 0),
   }));
 
+  const handleClick = (state) => {
+    if (onBarClick && state?.activePayload?.[0]?.payload) {
+      const d = state.activePayload[0].payload;
+      onBarClick({ label: d.name, min: d.min, max: d.max });
+    }
+  };
+
   return (
     <div style={{ background: PALETTE.surface, border: `1px solid ${PALETTE.border}`, borderRadius: 12, padding: 20, flex: "1 1 400px", minWidth: 340 }}>
       <div style={{ color: PALETTE.text, fontSize: 15, fontWeight: 600, marginBottom: 16 }}>{title}</div>
       <ResponsiveContainer width="100%" height={220}>
-        <BarChart data={data} margin={{ top: 5, right: 10, left: 0, bottom: 5 }}>
+        <BarChart data={data} margin={{ top: 5, right: 10, left: 0, bottom: 5 }}
+          onClick={onBarClick ? handleClick : undefined}
+          style={onBarClick ? { cursor: "pointer" } : undefined}
+        >
           <XAxis dataKey="name" tick={{ fill: PALETTE.textMuted, fontSize: 11 }} axisLine={{ stroke: PALETTE.border }} tickLine={false} label={{ value: "Mbps", position: "insideBottomRight", offset: -5, fill: PALETTE.textMuted, fontSize: 11 }} />
           <YAxis tick={{ fill: PALETTE.textMuted, fontSize: 11 }} axisLine={false} tickLine={false} />
           <Tooltip
             contentStyle={{ background: PALETTE.surfaceLight, border: `1px solid ${PALETTE.border}`, borderRadius: 8, color: PALETTE.text, fontSize: 13 }}
             formatter={(v, name) => [name === "size_gb" ? fmt(v) : fmtNum(v), name === "size_gb" ? "Size" : "Files"]}
           />
-          <Bar dataKey="count" fill={PALETTE.accent} radius={[4, 4, 0, 0]} name="Files" />
-          <Bar dataKey="size_gb" fill={PALETTE.purple} radius={[4, 4, 0, 0]} name="Size (GB)" />
+          <Bar dataKey="count" radius={[4, 4, 0, 0]} name="Files">
+            {data.map((d, i) => (
+              <Cell key={i} fill={PALETTE.accent} opacity={activeBar && activeBar !== d.name ? 0.3 : 1} />
+            ))}
+          </Bar>
+          <Bar dataKey="size_gb" radius={[4, 4, 0, 0]} name="Size (GB)">
+            {data.map((d, i) => (
+              <Cell key={i} fill={PALETTE.purple} opacity={activeBar && activeBar !== d.name ? 0.3 : 1} />
+            ))}
+          </Bar>
         </BarChart>
       </ResponsiveContainer>
     </div>
@@ -1187,18 +1207,11 @@ export function LibraryPage({ onFileClick }) {
         />
       </div>
 
-      {/* Filtered file list from pie clicks */}
-      {activeFilter && (() => {
-        let filtered;
-        if (activeFilter.type === "codec") {
-          filtered = files.filter((f) => f.video?.codec === activeFilter.value);
-        } else if (activeFilter.type === "resolution") {
-          filtered = files.filter((f) => f.video?.resolution_class === activeFilter.value);
-        } else if (activeFilter.type === "audio") {
-          filtered = files.filter((f) => f.audio_streams?.[0]?.codec === activeFilter.value);
-        } else {
-          filtered = [];
-        }
+      {/* Filtered file list from codec/resolution pie clicks */}
+      {activeFilter && ["codec", "resolution"].includes(activeFilter.type) && (() => {
+        const filtered = activeFilter.type === "codec"
+          ? files.filter((f) => f.video?.codec === activeFilter.value)
+          : files.filter((f) => f.video?.resolution_class === activeFilter.value);
         return (
           <FilteredFileList
             files={filtered}
@@ -1213,8 +1226,31 @@ export function LibraryPage({ onFileClick }) {
       {/* Bitrate */}
       <SectionTitle>Bitrate Distribution</SectionTitle>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 16 }}>
-        <BitrateDistribution files={files} title="Overall Bitrate (Mbps)" />
+        <BitrateDistribution files={files} title="Overall Bitrate (Mbps)"
+          onBarClick={(bucket) => setActiveFilter(
+            activeFilter?.type === "bitrate" && activeFilter?.value === bucket.label
+              ? null : { type: "bitrate", value: bucket.label, min: bucket.min, max: bucket.max, label: `Bitrate: ${bucket.label} Mbps` }
+          )}
+          activeBar={activeFilter?.type === "bitrate" ? activeFilter.value : null}
+        />
       </div>
+
+      {/* Filtered file list from bitrate bar clicks */}
+      {activeFilter?.type === "bitrate" && (() => {
+        const filtered = files.filter((f) => {
+          const br = f.overall_bitrate_kbps;
+          return br != null && br >= activeFilter.min && br < activeFilter.max;
+        });
+        return (
+          <FilteredFileList
+            files={filtered}
+            title={activeFilter.label}
+            onFileClick={onFileClick}
+            onClose={() => setActiveFilter(null)}
+            statusMap={statusMap}
+          />
+        );
+      })()}
 
       {/* Audio */}
       <AudioAnalysis files={files}
@@ -1224,6 +1260,20 @@ export function LibraryPage({ onFileClick }) {
         )}
         activeAudio={activeFilter?.type === "audio" ? activeFilter.value : null}
       />
+
+      {/* Filtered file list from audio pie clicks */}
+      {activeFilter?.type === "audio" && (() => {
+        const filtered = files.filter((f) => f.audio_streams?.[0]?.codec === activeFilter.value);
+        return (
+          <FilteredFileList
+            files={filtered}
+            title={activeFilter.label}
+            onFileClick={onFileClick}
+            onClose={() => setActiveFilter(null)}
+            statusMap={statusMap}
+          />
+        );
+      })()}
       <AudioSavingsEstimate files={files} />
 
       {/* Filename Health */}
