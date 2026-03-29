@@ -198,11 +198,15 @@ def stage_verify(source_filepath: str, item: dict, config: dict, state: Pipeline
     tolerance = config["verify_duration_tolerance_secs"]
 
     if source_duration > 0 and abs(source_duration - dest_duration) > tolerance:
-        logging.error(f"Verification failed: duration mismatch "
-                      f"(source={source_duration:.1f}s, dest={dest_duration:.1f}s)")
-        state.set_file(source_filepath, FileStatus.ERROR,
-                       error="duration mismatch", stage="verify")
-        return False
+        if file_info.get("skip_duration_check"):
+            logging.warning(f"Duration mismatch overridden by user "
+                            f"(source={source_duration:.1f}s, dest={dest_duration:.1f}s)")
+        else:
+            logging.error(f"Verification failed: duration mismatch "
+                          f"(source={source_duration:.1f}s, dest={dest_duration:.1f}s)")
+            state.set_file(source_filepath, FileStatus.ERROR,
+                           error="duration mismatch", stage="verify")
+            return False
 
     dest_size = os.path.getsize(dest_path)
     source_size = item["file_size_bytes"]

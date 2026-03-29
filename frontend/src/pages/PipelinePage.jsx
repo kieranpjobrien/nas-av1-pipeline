@@ -528,8 +528,30 @@ export function PipelinePage({ wsData, onFileClick }) {
           <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
             {errors.map(({ path, error: err }, i) => (
               <div key={i} style={{ background: PALETTE.surface, border: `1px solid ${PALETTE.red}33`, borderRadius: 8, padding: "10px 14px", fontSize: 12 }}>
-                <div style={{ color: PALETTE.text, wordBreak: "break-all" }}>{path}</div>
-                <div style={{ color: PALETTE.red, marginTop: 4 }}>{err}</div>
+                <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12 }}>
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ color: PALETTE.text, wordBreak: "break-all" }}>{path}</div>
+                    <div style={{ color: PALETTE.red, marginTop: 4 }}>{err}</div>
+                  </div>
+                  {err === "duration mismatch" && (
+                    <button
+                      onClick={async () => {
+                        await api.forceAccept(path);
+                      }}
+                      style={{
+                        flexShrink: 0,
+                        background: PALETTE.surfaceLight,
+                        color: PALETTE.textMuted,
+                        border: `1px solid ${PALETTE.border}`,
+                        borderRadius: 5, padding: "4px 10px",
+                        fontSize: 11, fontWeight: 600, cursor: "pointer", whiteSpace: "nowrap",
+                      }}
+                      title="Override duration check and send to replace"
+                    >
+                      Force Accept
+                    </button>
+                  )}
+                </div>
               </div>
             ))}
           </div>

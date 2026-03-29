@@ -45,6 +45,7 @@ export const api = {
   getCustomTags: () => fetchJSON("/control/custom-tags"),
   setCustomTags: (keywords) => putJSON("/control/custom-tags", { keywords }),
   resetErrors: () => postJSON("/pipeline/reset-errors", {}),
+  forceAccept: (path) => postJSON("/pipeline/force-accept", { path }),
   getProcessStatus: (name) => fetchJSON(`/process/${name}/status`),
   startProcess: (name) => postJSON(`/process/${name}/start`, {}),
   stopProcess: (name) => postJSON(`/process/${name}/stop`, {}),

@@ -574,6 +574,36 @@ def reset_errors():
     return {"ok": True, "reset": reset_count}
 
 
+@app.post("/api/pipeline/force-accept")
+def force_accept(req: dict):
+    """Override duration mismatch for a specific file and requeue for replace.
+
+    Body: {"path": "\\\\KieranNAS\\..."}
+    Sets skip_duration_check=True and resets status to uploaded so the pipeline
+    re-verifies (and this time ignores the duration delta).
+    """
+    path = req.get("path")
+    if not path:
+        raise HTTPException(400, "path required")
+    data = read_json_safe(STATE_FILE)
+    if data is None:
+        raise HTTPException(404, "Pipeline state not found")
+    files = data.get("files", {})
+    entry = files.get(path)
+    if not entry:
+        raise HTTPException(404, f"No state entry for {path}")
+    if entry.get("status") != "error":
+        raise HTTPException(400, f"File is not in error state (status={entry.get('status')})")
+    entry["skip_duration_check"] = True
+    entry["status"] = "uploaded"
+    entry.pop("error", None)
+    entry.pop("stage", None)
+    entry["last_updated"] = datetime.now().isoformat()
+    data["last_updated"] = datetime.now().isoformat()
+    STATE_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    return {"ok": True, "path": path}
+
+
 @app.post("/api/pipeline/compact")
 def compact_state():
     """Remove REPLACED and SKIPPED entries from pipeline state."""
