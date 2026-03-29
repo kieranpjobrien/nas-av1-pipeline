@@ -41,6 +41,11 @@ class PauseRequest(BaseModel):
 class PathListRequest(BaseModel):
     paths: list[str]
 
+class PriorityRequest(BaseModel):
+    force: list[str] = []
+    paths: list[str] = []
+    patterns: list[str] = []
+
 class GentleRequest(BaseModel):
     paths: dict = {}
     patterns: dict = {}
@@ -348,7 +353,7 @@ def get_skip():
 @app.get("/api/control/priority")
 def get_priority():
     data = read_json_safe(CONTROL_DIR / "priority.json")
-    return data or {"paths": []}
+    return data or {"force": [], "paths": [], "patterns": []}
 
 
 @app.get("/api/control/gentle")
@@ -412,9 +417,42 @@ def set_skip(req: PathListRequest):
 
 
 @app.put("/api/control/priority")
-def set_priority(req: PathListRequest):
-    drop_file("priority.json", {"paths": req.paths})
-    return {"ok": True, "count": len(req.paths)}
+def set_priority(req: PriorityRequest):
+    # Preserve keys not explicitly provided by merging with current data
+    current = read_json_safe(CONTROL_DIR / "priority.json") or {}
+    merged = {
+        "force": req.force if req.force else current.get("force", []),
+        "paths": req.paths,
+        "patterns": req.patterns if req.patterns else current.get("patterns", []),
+    }
+    drop_file("priority.json", merged)
+    return {"ok": True, "force": len(merged["force"]), "paths": len(merged["paths"]),
+            "patterns": len(merged["patterns"])}
+
+
+class ForceRequest(BaseModel):
+    path: str
+    action: str = "add"  # "add" | "remove"
+
+
+@app.post("/api/control/priority/force")
+def toggle_force(req: ForceRequest):
+    """Add or remove a single file from the force-priority tier."""
+    current = read_json_safe(CONTROL_DIR / "priority.json") or {}
+    force = current.get("force", [])
+    norm = os.path.normpath(req.path).lower()
+
+    if req.action == "add":
+        if not any(os.path.normpath(p).lower() == norm for p in force):
+            force.insert(0, req.path)
+    elif req.action == "remove":
+        force = [p for p in force if os.path.normpath(p).lower() != norm]
+
+    current["force"] = force
+    current.setdefault("paths", [])
+    current.setdefault("patterns", [])
+    drop_file("priority.json", current)
+    return {"ok": True, "forced": req.action == "add", "force_count": len(force)}
 
 
 @app.put("/api/control/gentle")

@@ -48,11 +48,17 @@ export function FileDrawer({ path, onClose }) {
   const [loading, setLoading] = useState(true);
   const [vmaf, setVmaf] = useState(null);
   const [vmafLoading, setVmafLoading] = useState(false);
+  const [forced, setForced] = useState(null); // null = loading, true/false = known
 
   useEffect(() => {
     if (!path) return;
     setLoading(true);
+    setForced(null);
     api.getFileDetail(path).then(setData).catch(() => setData(null)).finally(() => setLoading(false));
+    api.getPriority().then((p) => {
+      const norm = path.replace(/\//g, "\\").toLowerCase();
+      setForced((p?.force || []).some((f) => f.replace(/\//g, "\\").toLowerCase() === norm));
+    }).catch(() => setForced(false));
   }, [path]);
 
   if (!path) return null;
@@ -193,6 +199,28 @@ export function FileDrawer({ path, onClose }) {
                 )}
                 {vmaf?.error && <div style={{ color: PALETTE.red, fontSize: 12, marginTop: 4 }}>{vmaf.error}</div>}
               </Section>
+            )}
+
+            {/* Force Next */}
+            {forced !== null && (!pipeline || !["verified", "replaced"].includes(pipeline.status)) && (
+              <div style={{ marginBottom: 16 }}>
+                <button
+                  onClick={async () => {
+                    const fn = forced ? api.removeForce : api.addForce;
+                    await fn(path);
+                    setForced(!forced);
+                  }}
+                  style={{
+                    background: forced ? PALETTE.surface : PALETTE.orange,
+                    color: forced ? PALETTE.orange : "#fff",
+                    border: forced ? `1px solid ${PALETTE.orange}` : "none",
+                    borderRadius: 8, padding: "8px 16px", fontSize: 12,
+                    fontWeight: 600, cursor: "pointer", width: "100%",
+                  }}
+                >
+                  {forced ? "Remove Force" : "Force Next"}
+                </button>
+              </div>
             )}
 
             {/* Path */}

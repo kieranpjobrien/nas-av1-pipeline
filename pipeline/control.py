@@ -38,7 +38,9 @@ class PipelineControl:
             "paths": [],
         },
         "priority.json": {
+            "force": [],
             "paths": [],
+            "patterns": [],
         },
         "reencode.json": {
             "files": {},
@@ -308,31 +310,81 @@ class PipelineControl:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=4, ensure_ascii=False)
 
+    def get_force_items(self) -> list[str]:
+        """Get list of filepaths in the force tier (absolute top priority)."""
+        priority = self._read_control_file("priority.json")
+        if not priority:
+            return []
+        return priority.get("force", [])
+
     def get_priority_bumps(self) -> list[str]:
-        """Get list of filepaths that should be bumped to front of queue."""
+        """Get list of filepaths that should be bumped to front of queue.
+
+        Includes explicit paths plus any queue files matching patterns.
+        """
         priority = self._read_control_file("priority.json")
         if not priority:
             return []
         return priority.get("paths", [])
 
+    def get_priority_patterns(self) -> list[str]:
+        """Get fnmatch patterns that mark matching files as priority."""
+        priority = self._read_control_file("priority.json")
+        if not priority:
+            return []
+        return priority.get("patterns", [])
+
+    def is_priority(self, filepath: str) -> bool:
+        """Check if a file matches the priority tier (paths or patterns)."""
+        norm = os.path.normpath(filepath).lower()
+        bumps = self.get_priority_bumps()
+        bump_set = {os.path.normpath(p).lower() for p in bumps}
+        if norm in bump_set:
+            return True
+        for pattern in self.get_priority_patterns():
+            if fnmatch.fnmatch(norm, pattern.lower()):
+                return True
+        return False
+
+    def is_force(self, filepath: str) -> bool:
+        """Check if a file is in the force tier."""
+        norm = os.path.normpath(filepath).lower()
+        force = self.get_force_items()
+        return any(os.path.normpath(p).lower() == norm for p in force)
+
     def apply_queue_overrides(self, queue: list[dict]) -> list[dict]:
-        """Apply skip and priority overrides to the queue."""
+        """Apply skip and priority overrides to the queue.
+
+        Three tiers: force > priority (paths + patterns) > rest.
+        """
         # Remove skipped files
         filtered = [item for item in queue if not self.should_skip(item["filepath"])]
 
-        # Bump priority files to front
-        bumps = self.get_priority_bumps()
-        if bumps:
-            bump_set = {os.path.normpath(p).lower() for p in bumps}
-            priority_items = []
-            rest = []
-            for item in filtered:
-                if os.path.normpath(item["filepath"]).lower() in bump_set:
-                    priority_items.append(item)
-                else:
-                    rest.append(item)
-            if priority_items:
-                logging.info(f"Priority bumped {len(priority_items)} files to front of queue")
-            filtered = priority_items + rest
+        # Build force set
+        force_list = self.get_force_items()
+        force_set = {os.path.normpath(p).lower() for p in force_list}
 
-        return filtered
+        # Build priority set (paths + patterns)
+        bump_set = {os.path.normpath(p).lower() for p in self.get_priority_bumps()}
+        patterns = self.get_priority_patterns()
+
+        force_items = []
+        priority_items = []
+        rest = []
+        for item in filtered:
+            norm = os.path.normpath(item["filepath"]).lower()
+            if norm in force_set:
+                force_items.append(item)
+            elif norm in bump_set or any(
+                fnmatch.fnmatch(norm, pat.lower()) for pat in patterns
+            ):
+                priority_items.append(item)
+            else:
+                rest.append(item)
+
+        if force_items:
+            logging.info(f"Force-priority: {len(force_items)} files at front of queue")
+        if priority_items:
+            logging.info(f"Priority bumped {len(priority_items)} files ahead of queue")
+
+        return force_items + priority_items + rest

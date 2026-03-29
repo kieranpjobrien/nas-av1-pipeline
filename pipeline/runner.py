@@ -1,6 +1,7 @@
 """Main pipeline orchestration — Pipeline class, prefetch thread, signal handling."""
 
 import copy
+import fnmatch
 import json
 import logging
 import os
@@ -146,19 +147,29 @@ class Pipeline:
                     time.sleep(5)
                 continue
 
-            # Build priority set — fetch these first
+            # Build force and priority sets — fetch these first
+            force_set = {
+                os.path.normpath(p).lower()
+                for p in self.control.get_force_items()
+            }
             priority_set = {
                 os.path.normpath(p).lower()
                 for p in self.control.get_priority_bumps()
             }
+            priority_patterns = self.control.get_priority_patterns()
 
-            # Sort queue: priority items first, then original order
-            fetch_order = sorted(
-                queue,
-                key=lambda item: (
-                    0 if os.path.normpath(item["filepath"]).lower() in priority_set else 1,
-                ),
-            )
+            def _fetch_tier(item):
+                norm = os.path.normpath(item["filepath"]).lower()
+                if norm in force_set:
+                    return 0
+                if norm in priority_set or any(
+                    fnmatch.fnmatch(norm, pat.lower()) for pat in priority_patterns
+                ):
+                    return 1
+                return 2
+
+            # Sort queue: force first, then priority, then rest
+            fetch_order = sorted(queue, key=_fetch_tier)
 
             for item in fetch_order:
                 if self._shutdown:
@@ -443,16 +454,23 @@ class Pipeline:
         }
 
     def _inject_new_priority_items(self, queue: list[dict]) -> list[dict]:
-        """Check priority.json for paths not in queue and inject them at the front."""
-        bumps = self.control.get_priority_bumps()
-        if not bumps:
+        """Check priority.json for paths not in queue and inject them at the front.
+
+        Force items are injected before regular priority items.
+        """
+        force_paths = self.control.get_force_items()
+        bump_paths = self.control.get_priority_bumps()
+        all_paths = force_paths + bump_paths
+        if not all_paths:
             return queue
 
         queue_paths = {os.path.normpath(item["filepath"]).lower() for item in queue}
         report_index = self._get_report_index()
-        new_items = []
+        force_set = {os.path.normpath(p).lower() for p in force_paths}
+        new_force = []
+        new_priority = []
 
-        for path in bumps:
+        for path in all_paths:
             norm = os.path.normpath(path).lower()
             if norm in queue_paths:
                 continue
@@ -476,10 +494,15 @@ class Pipeline:
                     continue
 
             item = self._build_queue_item(entry)
-            new_items.append(item)
+            if norm in force_set:
+                new_force.append(item)
+            else:
+                new_priority.append(item)
 
+        new_items = new_force + new_priority
         if new_items:
-            logging.info(f"Injected {len(new_items)} new priority items into queue")
+            logging.info(f"Injected {len(new_items)} new priority items into queue "
+                         f"({len(new_force)} force, {len(new_priority)} priority)")
             queue = new_items + queue
 
         return queue
@@ -751,31 +774,41 @@ class Pipeline:
             # Clean up finished audio threads
             audio_threads = [t for t in audio_threads if t.is_alive()]
 
-            # Build priority set for fast lookup
+            # Build force and priority sets for fast lookup
+            force_set = {
+                os.path.normpath(p).lower()
+                for p in self.control.get_force_items()
+            }
             priority_set = {
                 os.path.normpath(p).lower()
                 for p in self.control.get_priority_bumps()
             }
+            priority_patterns = self.control.get_priority_patterns()
 
             # Find next item to process.
-            # Priority: 1) fetched priority items, 2) any fetched item (don't
-            # let the GPU idle), 3) inline-fetch a priority item if nothing
-            # else is ready.
+            # Tiers: force > priority (paths+patterns) > rest
+            # Within each tier: fetched beats pending (don't let GPU idle).
             READY_STATUSES = (FileStatus.FETCHING.value, FileStatus.FETCHED.value,
                               FileStatus.ENCODING.value, FileStatus.ENCODED.value,
                               FileStatus.UPLOADING.value, FileStatus.UPLOADED.value,
                               FileStatus.REPLACING.value)
 
+            ready_force = None
             ready_priority = None
             ready_any = None
             first_pending = None
             first_priority_pending = None
+            first_force_pending = None
             all_done = True
             for item in queue:
                 filepath = item["filepath"]
                 existing = self.state.get_file(filepath)
                 status = existing["status"] if existing else None
-                is_priority = os.path.normpath(filepath).lower() in priority_set
+                norm = os.path.normpath(filepath).lower()
+                is_force = norm in force_set
+                is_priority = is_force or norm in priority_set or any(
+                    fnmatch.fnmatch(norm, pat.lower()) for pat in priority_patterns
+                )
 
                 # Skip terminal states
                 if status in (FileStatus.VERIFIED.value, FileStatus.REPLACED.value,
@@ -785,7 +818,9 @@ class Pipeline:
                 all_done = False
 
                 if status in READY_STATUSES:
-                    if is_priority and ready_priority is None:
+                    if is_force and ready_force is None:
+                        ready_force = item
+                    elif is_priority and ready_priority is None:
                         ready_priority = item
                     elif ready_any is None:
                         ready_any = item
@@ -793,7 +828,9 @@ class Pipeline:
                 if status in (None, FileStatus.PENDING.value):
                     if first_pending is None:
                         first_pending = item
-                    if is_priority and first_priority_pending is None:
+                    if is_force and first_force_pending is None:
+                        first_force_pending = item
+                    elif is_priority and first_priority_pending is None:
                         first_priority_pending = item
 
             # Also check upload queue — items there aren't done yet
@@ -804,8 +841,10 @@ class Pipeline:
                 time.sleep(5)
                 continue
 
-            # Pick best item: priority fetched > any fetched > priority pending > any pending
-            ready_item = ready_priority or ready_any or first_priority_pending or first_pending
+            # Pick best: force fetched > priority fetched > any fetched >
+            #            force pending > priority pending > any pending
+            ready_item = (ready_force or ready_priority or ready_any
+                          or first_force_pending or first_priority_pending or first_pending)
             if ready_item is None:
                 if not prefetch_thread.is_alive() and self._upload_queue.empty():
                     break  # Everything is either done or errored

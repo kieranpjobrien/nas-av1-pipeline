@@ -37,6 +37,8 @@ export const api = {
   resume: () => postJSON("/control/resume", {}),
   setSkip: (paths) => putJSON("/control/skip", { paths }),
   setPriority: (paths) => putJSON("/control/priority", { paths }),
+  addForce: (path) => postJSON("/control/priority/force", { path, action: "add" }),
+  removeForce: (path) => postJSON("/control/priority/force", { path, action: "remove" }),
   setGentle: (gentle) => putJSON("/control/gentle", gentle),
   getReencode: () => fetchJSON("/control/reencode"),
   setReencode: (files, patterns = {}) => putJSON("/control/reencode", { files, patterns }),
