@@ -141,27 +141,42 @@ def stage_upload(source_filepath: str, item: dict, staging_dir: str,
                    upload_start=upload_start)
     logging.info(f"Uploading: {dest_filename} -> {source_dir}")
 
-    try:
-        start = time.time()
-        shutil.copy2(output_path, dest_path)
-        elapsed = time.time() - start
-        output_size = os.path.getsize(output_path)
-        speed = output_size / elapsed / (1024**2) if elapsed > 0 else 0
-        logging.info(f"Uploaded in {format_duration(elapsed)} ({speed:.0f} MB/s)")
+    max_retries = 5
+    for attempt in range(max_retries):
+        try:
+            start = time.time()
+            shutil.copy2(output_path, dest_path)
+            elapsed = time.time() - start
+            output_size = os.path.getsize(output_path)
+            speed = output_size / elapsed / (1024**2) if elapsed > 0 else 0
+            logging.info(f"Uploaded in {format_duration(elapsed)} ({speed:.0f} MB/s)")
 
-        state.set_file(source_filepath, FileStatus.UPLOADED, dest_path=dest_path,
-                       upload_end=time.time(), upload_time_secs=round(elapsed, 1))
+            state.set_file(source_filepath, FileStatus.UPLOADED, dest_path=dest_path,
+                           upload_end=time.time(), upload_time_secs=round(elapsed, 1))
 
-        # Clean up local encoded file
-        os.remove(output_path)
-        logging.info(f"Cleaned up local encoded file")
+            # Clean up local encoded file (non-fatal if locked; will be swept up later)
+            try:
+                os.remove(output_path)
+                logging.info("Cleaned up local encoded file")
+            except OSError as rm_err:
+                logging.warning(f"Could not delete staging file (will retry): {rm_err}")
 
-        return True
+            return True
 
-    except Exception as e:
-        logging.error(f"Upload failed: {e}")
-        state.set_file(source_filepath, FileStatus.ERROR, error=str(e), stage="upload")
-        return False
+        except PermissionError as e:
+            if attempt < max_retries - 1:
+                wait = 15 * (attempt + 1)
+                logging.warning(f"Upload blocked (file in use), retry {attempt + 1}/{max_retries} in {wait}s: {e}")
+                time.sleep(wait)
+                continue
+            logging.error(f"Upload failed after {max_retries} retries: {e}")
+            state.set_file(source_filepath, FileStatus.ERROR, error=str(e), stage="upload")
+            return False
+
+        except Exception as e:
+            logging.error(f"Upload failed: {e}")
+            state.set_file(source_filepath, FileStatus.ERROR, error=str(e), stage="upload")
+            return False
 
 
 def stage_verify(source_filepath: str, item: dict, config: dict, state: PipelineState) -> bool:

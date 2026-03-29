@@ -132,6 +132,32 @@ def _get_movie_sections() -> list[dict]:
     return [s for s in _get_library_sections() if s["type"] == "movie"]
 
 
+def _get_show_sections() -> list[dict]:
+    """Get TV show library sections only."""
+    return [s for s in _get_library_sections() if s["type"] == "show"]
+
+
+def _get_all_shows(section_key: str) -> list[dict]:
+    """Get all TV shows in a library section with metadata."""
+    root = _plex_get(f"/library/sections/{section_key}/all")
+    shows = []
+    for directory in root.findall(".//Directory"):
+        genres = [g.get("tag", "") for g in directory.findall("Genre")]
+        collections = [c.get("tag", "") for c in directory.findall("Collection")]
+        labels = [lb.get("tag", "") for lb in directory.findall("Label")]
+        shows.append({
+            "rating_key": directory.get("ratingKey"),
+            "title": directory.get("title", ""),
+            "year": directory.get("year", ""),
+            "studio": directory.get("studio", ""),
+            "genres": genres,
+            "collections": collections,
+            "labels": labels,
+            "content_rating": directory.get("contentRating", ""),
+        })
+    return shows
+
+
 def _get_all_movies(section_key: str) -> list[dict]:
     """Get all movies in a library section with metadata."""
     root = _plex_get(f"/library/sections/{section_key}/all")
@@ -247,97 +273,100 @@ def load_rules() -> dict:
 # Commands
 # ---------------------------------------------------------------------------
 
+def _audit_items(items: list[dict], section: dict, section_type: str) -> dict:
+    """Build audit dict for a list of movies or shows."""
+    label = "movies" if section_type == "movie" else "shows"
+
+    rating_counts: dict[str, int] = {}
+    rating_titles: dict[str, list[str]] = {}
+    unrated = []
+    for m in items:
+        r = m["content_rating"] or "(unrated)"
+        rating_counts[r] = rating_counts.get(r, 0) + 1
+        rating_titles.setdefault(r, []).append(m["title"])
+        if not m["content_rating"]:
+            unrated.append(m)
+
+    genre_counts: dict[str, int] = {}
+    genre_titles: dict[str, list[str]] = {}
+    for m in items:
+        for g in m["genres"]:
+            genre_counts[g] = genre_counts.get(g, 0) + 1
+            genre_titles.setdefault(g, []).append(m["title"])
+    no_genre = sum(1 for m in items if not m["genres"])
+    no_genre_titles = sorted(m["title"] for m in items if not m["genres"])
+
+    collection_counts: dict[str, int] = {}
+    collection_titles: dict[str, list[str]] = {}
+    for m in items:
+        for c in m["collections"]:
+            collection_counts[c] = collection_counts.get(c, 0) + 1
+            collection_titles.setdefault(c, []).append(m["title"])
+    no_collection = sum(1 for m in items if not m["collections"])
+
+    label_counts: dict[str, int] = {}
+    for m in items:
+        for lb in m["labels"]:
+            label_counts[lb] = label_counts.get(lb, 0) + 1
+
+    studio_counts: dict[str, int] = {}
+    for m in items:
+        if m["studio"]:
+            studio_counts[m["studio"]] = studio_counts.get(m["studio"], 0) + 1
+
+    print(f"\n  {label.title()}: {len(items)}")
+    print(f"  Content ratings: {len(rating_counts)} unique, {len(unrated)} unrated")
+    print(f"  Genres: {len(genre_counts)} unique, {no_genre} untagged")
+    print(f"  Collections: {len(collection_counts)}, {no_collection} not in any")
+
+    # Sort title lists alphabetically, cap at 200 each
+    for d in (rating_titles, genre_titles, collection_titles):
+        for k in d:
+            d[k] = sorted(d[k])[:200]
+
+    return {
+        "library": section["title"],
+        "section_type": section_type,
+        f"total_{label}": len(items),
+        "content_ratings": rating_counts,
+        "rating_titles": rating_titles,
+        "unrated_count": len(unrated),
+        "unrated_titles": sorted(m["title"] for m in unrated)[:100],
+        "genres": genre_counts,
+        "genre_titles": genre_titles,
+        "no_genre_count": no_genre,
+        "no_genre_titles": no_genre_titles[:100],
+        "collections": collection_counts,
+        "collection_titles": collection_titles,
+        "no_collection_count": no_collection,
+        "labels": label_counts,
+        "studios": studio_counts,
+    }
+
+
 def cmd_audit(json_path: str | None = None) -> None:
-    """Audit all metadata across movie libraries."""
-    sections = _get_movie_sections()
-    if not sections:
-        print("No movie libraries found.")
+    """Audit all metadata across movie and show libraries."""
+    movie_sections = _get_movie_sections()
+    show_sections = _get_show_sections()
+    if not movie_sections and not show_sections:
+        print("No libraries found.")
         return
 
     all_audit_data = []
 
-    for section in sections:
+    for section in movie_sections:
         print(f"\n{'=' * 60}")
-        print(f"  Library: {section['title']}")
+        print(f"  Library: {section['title']} (Movies)")
         print(f"{'=' * 60}")
-
         movies = _get_all_movies(section["key"])
-        print(f"  Total movies: {len(movies)}")
+        all_audit_data.append(_audit_items(movies, section, "movie"))
 
-        # Content rating stats
-        rating_counts: dict[str, int] = {}
-        unrated = []
-        for m in movies:
-            r = m["content_rating"] or "(unrated)"
-            rating_counts[r] = rating_counts.get(r, 0) + 1
-            if not m["content_rating"]:
-                unrated.append(m)
-
-        print(f"\n  Content Ratings ({len(rating_counts)} unique, {len(unrated)} unrated):")
-        for rating, count in sorted(rating_counts.items(), key=lambda x: -x[1]):
-            marker = " <--" if rating == "(unrated)" else ""
-            print(f"    {rating:.<30} {count}{marker}")
-
-        # Genre stats
-        genre_counts: dict[str, int] = {}
-        for m in movies:
-            for g in m["genres"]:
-                genre_counts[g] = genre_counts.get(g, 0) + 1
-        no_genre = sum(1 for m in movies if not m["genres"])
-
-        print(f"\n  Genres ({len(genre_counts)} unique, {no_genre} untagged):")
-        for genre, count in sorted(genre_counts.items(), key=lambda x: -x[1])[:20]:
-            print(f"    {genre:.<30} {count}")
-
-        # Collection stats
-        collection_counts: dict[str, int] = {}
-        for m in movies:
-            for c in m["collections"]:
-                collection_counts[c] = collection_counts.get(c, 0) + 1
-        no_collection = sum(1 for m in movies if not m["collections"])
-
-        print(f"\n  Collections ({len(collection_counts)} unique, {no_collection} not in any):")
-        for coll, count in sorted(collection_counts.items(), key=lambda x: -x[1])[:20]:
-            print(f"    {coll:.<30} {count}")
-
-        # Label stats
-        label_counts: dict[str, int] = {}
-        for m in movies:
-            for l in m["labels"]:
-                label_counts[l] = label_counts.get(l, 0) + 1
-        no_label = sum(1 for m in movies if not m["labels"])
-
-        print(f"\n  Labels ({len(label_counts)} unique, {no_label} unlabelled):")
-        if label_counts:
-            for label, count in sorted(label_counts.items(), key=lambda x: -x[1]):
-                print(f"    {label:.<30} {count}")
-        else:
-            print("    (none)")
-
-        # Studio stats
-        studio_counts: dict[str, int] = {}
-        for m in movies:
-            if m["studio"]:
-                studio_counts[m["studio"]] = studio_counts.get(m["studio"], 0) + 1
-
-        print(f"\n  Studios ({len(studio_counts)} unique):")
-        for studio, count in sorted(studio_counts.items(), key=lambda x: -x[1])[:15]:
-            print(f"    {studio:.<30} {count}")
-
-        # Collect for JSON output
-        all_audit_data.append({
-            "library": section["title"],
-            "total_movies": len(movies),
-            "content_ratings": rating_counts,
-            "unrated_count": len(unrated),
-            "unrated_titles": [m["title"] for m in unrated[:50]],
-            "genres": genre_counts,
-            "no_genre_count": no_genre,
-            "collections": collection_counts,
-            "no_collection_count": no_collection,
-            "labels": label_counts,
-            "studios": studio_counts,
-        })
+    for section in show_sections:
+        print(f"\n{'=' * 60}")
+        print(f"  Library: {section['title']} (Shows)")
+        print(f"{'=' * 60}")
+        shows = _get_all_shows(section["key"])
+        all_audit_data.append(_audit_items(shows, section, "show"))
 
     # Write JSON if requested
     if json_path and all_audit_data:

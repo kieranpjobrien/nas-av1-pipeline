@@ -117,18 +117,32 @@ function getErrors(files) {
 function getActiveFiles(data) {
   const files = data.files || {};
   const active = [];
+  const recentlyDone = [];
+  const nowSecs = Date.now() / 1000;
+
   for (const [path, info] of Object.entries(files)) {
     const s = (info.status || "").toLowerCase();
+    const lastUpdatedSecs = info.last_updated
+      ? new Date(info.last_updated).getTime() / 1000
+      : null;
+    const age = lastUpdatedSecs ? nowSecs - lastUpdatedSecs : null;
+
+    const label = info.audio_only
+      ? (s === "encoding" ? "audio remux" : s)
+      : s;
+
     if (["fetching", "encoding", "uploading", "verifying", "replacing"].includes(s)) {
-      const elapsed = info.last_updated
-        ? Math.max(0, (Date.now() - new Date(info.last_updated).getTime()) / 1000)
-        : null;
-      active.push({ path, status: info.status, elapsed, last_updated: info.last_updated });
+      active.push({ path, status: label, elapsed: age, last_updated: info.last_updated, audio_only: !!info.audio_only });
+    } else if (["replaced", "verified"].includes(s) && age !== null && age < 60) {
+      // Show recently completed items for 60 seconds so the activity panel doesn't go blank
+      recentlyDone.push({ path, status: label || s, elapsed: age, last_updated: info.last_updated, audio_only: !!info.audio_only, done: true });
     }
   }
-  // Most recently updated first
+
   active.sort((a, b) => (b.last_updated || "").localeCompare(a.last_updated || ""));
-  return active;
+  recentlyDone.sort((a, b) => (b.last_updated || "").localeCompare(a.last_updated || ""));
+
+  return [...active, ...recentlyDone.slice(0, 8)];
 }
 
 function getUpNext(data, priorityPaths, limit = 15) {
@@ -318,33 +332,38 @@ export function PipelinePage({ wsData, onFileClick }) {
         <>
           <SectionTitle>Current Activity ({activeFiles.length})</SectionTitle>
           <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 24 }}>
-            {activeFiles.map(({ path, status, elapsed }, i) => {
-              const isStale = elapsed != null && elapsed > 3600;
+            {activeFiles.map(({ path, status, elapsed, audio_only, done }, i) => {
+              const isStale = !done && elapsed != null && elapsed > 3600;
+              const dotColour = done ? PALETTE.green : isStale ? PALETTE.red : audio_only ? PALETTE.cyan : PALETTE.accent;
+              const badgeColour = done ? PALETTE.green : audio_only ? PALETTE.cyan : PALETTE.accent;
+              const filename = path.split(/[\\/]/).pop();
               return (
                 <div key={i} style={{
                   background: PALETTE.surface,
-                  border: `1px solid ${isStale ? PALETTE.red + "44" : PALETTE.border}`,
+                  border: `1px solid ${done ? PALETTE.green + "33" : isStale ? PALETTE.red + "44" : PALETTE.border}`,
                   borderRadius: 10, padding: "12px 16px",
                   display: "flex", alignItems: "center", gap: 12,
+                  opacity: done ? 0.6 : 1,
                 }}>
                   <div style={{
                     width: 8, height: 8, borderRadius: "50%", flexShrink: 0,
-                    background: isStale ? PALETTE.red : PALETTE.accent,
-                    animation: isStale ? "none" : "pulse 1.5s infinite",
+                    background: dotColour,
+                    animation: done || isStale ? "none" : "pulse 1.5s infinite",
                   }} />
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ color: PALETTE.textMuted, fontSize: 12, wordBreak: "break-all" }}>{path}</div>
+                    <div style={{ color: PALETTE.text, fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{filename}</div>
+                    <div style={{ color: PALETTE.textMuted, fontSize: 10, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", marginTop: 2 }}>{path}</div>
                   </div>
                   <div style={{ display: "flex", alignItems: "center", gap: 12, flexShrink: 0 }}>
                     <span style={{
                       fontSize: 11, fontWeight: 600, padding: "2px 8px", borderRadius: 4,
-                      background: PALETTE.surfaceLight, color: PALETTE.accent,
-                    }}>{status}</span>
+                      background: badgeColour + "22", color: badgeColour,
+                    }}>{done ? "done" : status}</span>
                     {elapsed != null && (
                       <span style={{
                         fontSize: 11, fontFamily: "'JetBrains Mono', monospace",
                         color: isStale ? PALETTE.red : PALETTE.textMuted,
-                      }}>{formatETA(elapsed)}</span>
+                      }}>{done ? `${Math.round(elapsed)}s ago` : formatETA(elapsed)}</span>
                     )}
                   </div>
                 </div>

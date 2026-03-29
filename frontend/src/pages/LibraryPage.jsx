@@ -112,10 +112,14 @@ const FILENAME_PATTERNS = [
   { key: "source", label: "Source tags", test: (stem) => /\b(WEB[-.]?DL|WEBRip|BluRay|BDRip|HDTV|DVDRip|REMUX)\b/i.test(stem) },
   { key: "codec", label: "Codec tags", test: (stem) => /\b(x264|x265|H\.?264|H\.?265|HEVC|AVC)\b/i.test(stem) },
   { key: "group", label: "Release groups", test: (stem) => {
-    // Bracket at end: [GROUP] but not common words like [Halloween], [Extended]
+    // Bracket at end: flag only if content has digits, technical keywords, or is ALL-CAPS (case-sensitive)
     const endBracket = stem.match(/\[([A-Za-z0-9.-]+)\]\s*$/);
-    if (endBracket && /[0-9]|^[A-Z]{2,}$|x26[45]|rip|web|blu/i.test(endBracket[1])) return true;
-    // Bracket with tech content anywhere
+    if (endBracket) {
+      const inner = endBracket[1];
+      if (/[0-9]|x26[45]|rip|web|blu/i.test(inner)) return true; // tech content
+      if (/^[A-Z0-9]{2,}$/.test(inner)) return true;              // ALL-CAPS only (case-sensitive, e.g. YIFY, NTb)
+    }
+    // Bracket with tech content anywhere in name
     return /\[[-A-Za-z0-9.]*(?:x264|x265|WEB|BluRay|HDTV|DL|Rip|720|1080|2160)[-A-Za-z0-9.]*\]/i.test(stem);
   }},
   { key: "service", label: "Service tags", test: (stem) => /\b(AMZN|DSNP|HULU|HBO|ATVP|PCOK|PMTP)\b/i.test(stem) || /\bMAX\b/.test(stem) },
@@ -612,6 +616,144 @@ function SubtitleHealth({ files, onFileClick }) {
   );
 }
 
+function PlexDrillDown({ titles, label, onClose }) {
+  if (!titles?.length) return null;
+  return (
+    <div style={{
+      background: PALETTE.bg, border: `1px solid ${PALETTE.accent}44`,
+      borderRadius: 10, padding: 14, marginTop: 10,
+    }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+        <span style={{ color: PALETTE.text, fontSize: 13, fontWeight: 600 }}>{label} — {fmtNum(titles.length)}</span>
+        <button onClick={onClose} style={{
+          background: "transparent", border: `1px solid ${PALETTE.border}`, borderRadius: 5,
+          color: PALETTE.textMuted, padding: "2px 8px", fontSize: 11, cursor: "pointer",
+        }}>✕</button>
+      </div>
+      <div style={{ maxHeight: 280, overflowY: "auto", columns: titles.length > 20 ? 2 : 1, columnGap: 16 }}>
+        {titles.map((t) => (
+          <div key={t} style={{ color: PALETTE.textMuted, fontSize: 12, padding: "2px 0", breakInside: "avoid" }}>{t}</div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function PlexMetadataPanel({ s }) {
+  const [drill, setDrill] = useState(null); // { label, titles }
+
+  const isMovie = s.section_type !== "show";
+  const totalLabel = isMovie ? "Total Movies" : "Total Shows";
+  const totalCount = isMovie ? s.total_movies : s.total_shows;
+
+  const topGenres = Object.entries(s.genres || {}).sort((a, b) => b[1] - a[1]).slice(0, 15);
+  const topCollections = Object.entries(s.collections || {}).sort((a, b) => b[1] - a[1]).slice(0, 15);
+  const topRatings = Object.entries(s.content_ratings || {}).sort((a, b) => b[1] - a[1]);
+
+  const clickRow = (label, titles) => {
+    if (drill?.label === label) { setDrill(null); return; }
+    setDrill({ label, titles: titles || [] });
+  };
+
+  const rowStyle = (active) => ({
+    display: "flex", justifyContent: "space-between", fontSize: 12,
+    padding: "3px 6px", borderRadius: 4, cursor: "pointer",
+    background: active ? PALETTE.accent + "22" : "transparent",
+    transition: "background 0.1s",
+  });
+
+  return (
+    <div style={{ marginBottom: 24 }}>
+      <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 16 }}>
+        <StatCard label={totalLabel} value={fmtNum(totalCount)} />
+        <StatCard
+          label="Unrated" value={fmtNum(s.unrated_count)}
+          colour={s.unrated_count > 0 ? PALETTE.accentWarm : PALETTE.green}
+          onClick={() => clickRow("Unrated", s.unrated_titles)}
+        />
+        <StatCard
+          label="No Genre" value={fmtNum(s.no_genre_count)}
+          colour={s.no_genre_count > 0 ? PALETTE.accentWarm : PALETTE.green}
+          onClick={() => clickRow("No Genre", s.no_genre_titles)}
+        />
+        {isMovie && (
+          <StatCard label="No Collection" value={fmtNum(s.no_collection_count)} />
+        )}
+      </div>
+
+      <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+        {/* Content Ratings */}
+        <div style={{ flex: "1 1 260px", background: PALETTE.surface, border: `1px solid ${PALETTE.border}`, borderRadius: 12, padding: 16 }}>
+          <div style={{ color: PALETTE.text, fontSize: 13, fontWeight: 600, marginBottom: 8 }}>Content Ratings</div>
+          {topRatings.map(([r, c]) => {
+            const active = drill?.label === `Rating: ${r}`;
+            return (
+              <div
+                key={r}
+                style={rowStyle(active)}
+                onClick={() => clickRow(`Rating: ${r}`, s.rating_titles?.[r])}
+                onMouseEnter={(e) => { if (!active) e.currentTarget.style.background = PALETTE.surfaceLight; }}
+                onMouseLeave={(e) => { e.currentTarget.style.background = active ? PALETTE.accent + "22" : "transparent"; }}
+              >
+                <span style={{ color: r === "(unrated)" ? PALETTE.accentWarm : PALETTE.textMuted }}>{r}</span>
+                <span style={{ fontFamily: "'JetBrains Mono', monospace", color: PALETTE.textMuted }}>{c}</span>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Top Genres */}
+        <div style={{ flex: "1 1 260px", background: PALETTE.surface, border: `1px solid ${PALETTE.border}`, borderRadius: 12, padding: 16 }}>
+          <div style={{ color: PALETTE.text, fontSize: 13, fontWeight: 600, marginBottom: 8 }}>Top Genres</div>
+          {topGenres.map(([g, c]) => {
+            const active = drill?.label === `Genre: ${g}`;
+            return (
+              <div
+                key={g}
+                style={rowStyle(active)}
+                onClick={() => clickRow(`Genre: ${g}`, s.genre_titles?.[g])}
+                onMouseEnter={(e) => { if (!active) e.currentTarget.style.background = PALETTE.surfaceLight; }}
+                onMouseLeave={(e) => { e.currentTarget.style.background = active ? PALETTE.accent + "22" : "transparent"; }}
+              >
+                <span style={{ color: PALETTE.textMuted }}>{g}</span>
+                <span style={{ fontFamily: "'JetBrains Mono', monospace", color: PALETTE.textMuted }}>{c}</span>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Top Collections */}
+        <div style={{ flex: "1 1 260px", background: PALETTE.surface, border: `1px solid ${PALETTE.border}`, borderRadius: 12, padding: 16 }}>
+          <div style={{ color: PALETTE.text, fontSize: 13, fontWeight: 600, marginBottom: 8 }}>Top Collections</div>
+          {topCollections.map(([c, n]) => {
+            const active = drill?.label === `Collection: ${c}`;
+            return (
+              <div
+                key={c}
+                style={rowStyle(active)}
+                onClick={() => clickRow(`Collection: ${c}`, s.collection_titles?.[c])}
+                onMouseEnter={(e) => { if (!active) e.currentTarget.style.background = PALETTE.surfaceLight; }}
+                onMouseLeave={(e) => { e.currentTarget.style.background = active ? PALETTE.accent + "22" : "transparent"; }}
+              >
+                <span style={{ color: PALETTE.textMuted }}>{c}</span>
+                <span style={{ fontFamily: "'JetBrains Mono', monospace", color: PALETTE.textMuted }}>{n}</span>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {drill && (
+        <PlexDrillDown
+          label={drill.label}
+          titles={drill.titles}
+          onClose={() => setDrill(null)}
+        />
+      )}
+    </div>
+  );
+}
+
 function PlexMetadata() {
   const [audit, setAudit] = useState(null);
   useEffect(() => {
@@ -620,60 +762,23 @@ function PlexMetadata() {
 
   if (!audit || !audit.sections?.length) return null;
 
+  const movieSections = audit.sections.filter((s) => s.section_type === "movie" || !s.section_type);
+  const showSections = audit.sections.filter((s) => s.section_type === "show");
+
   return (
     <>
-      <SectionTitle>Plex Metadata</SectionTitle>
-      {audit.sections.map((s, idx) => {
-        const topGenres = Object.entries(s.genres || {}).sort((a, b) => b[1] - a[1]).slice(0, 12);
-        const topCollections = Object.entries(s.collections || {}).sort((a, b) => b[1] - a[1]).slice(0, 12);
-        const topRatings = Object.entries(s.content_ratings || {}).sort((a, b) => b[1] - a[1]);
-
-        return (
-          <div key={idx} style={{ marginBottom: 24 }}>
-            <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 16 }}>
-              <StatCard label="Total Movies" value={fmtNum(s.total_movies)} />
-              <StatCard label="Unrated" value={fmtNum(s.unrated_count)} colour={s.unrated_count > 0 ? PALETTE.accentWarm : PALETTE.green} />
-              <StatCard label="No Genre" value={fmtNum(s.no_genre_count)} colour={s.no_genre_count > 0 ? PALETTE.accentWarm : PALETTE.green} />
-              <StatCard label="No Collection" value={fmtNum(s.no_collection_count)} />
-            </div>
-
-            <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
-              {/* Content Ratings */}
-              <div style={{ flex: "1 1 280px", background: PALETTE.surface, border: `1px solid ${PALETTE.border}`, borderRadius: 12, padding: 16 }}>
-                <div style={{ color: PALETTE.text, fontSize: 13, fontWeight: 600, marginBottom: 8 }}>Content Ratings</div>
-                {topRatings.map(([r, c]) => (
-                  <div key={r} style={{ display: "flex", justifyContent: "space-between", fontSize: 12, padding: "2px 0", color: r === "(unrated)" ? PALETTE.accentWarm : PALETTE.textMuted }}>
-                    <span>{r}</span>
-                    <span style={{ fontFamily: "'JetBrains Mono', monospace" }}>{c}</span>
-                  </div>
-                ))}
-              </div>
-
-              {/* Top Genres */}
-              <div style={{ flex: "1 1 280px", background: PALETTE.surface, border: `1px solid ${PALETTE.border}`, borderRadius: 12, padding: 16 }}>
-                <div style={{ color: PALETTE.text, fontSize: 13, fontWeight: 600, marginBottom: 8 }}>Top Genres</div>
-                {topGenres.map(([g, c]) => (
-                  <div key={g} style={{ display: "flex", justifyContent: "space-between", fontSize: 12, padding: "2px 0", color: PALETTE.textMuted }}>
-                    <span>{g}</span>
-                    <span style={{ fontFamily: "'JetBrains Mono', monospace" }}>{c}</span>
-                  </div>
-                ))}
-              </div>
-
-              {/* Top Collections */}
-              <div style={{ flex: "1 1 280px", background: PALETTE.surface, border: `1px solid ${PALETTE.border}`, borderRadius: 12, padding: 16 }}>
-                <div style={{ color: PALETTE.text, fontSize: 13, fontWeight: 600, marginBottom: 8 }}>Top Collections</div>
-                {topCollections.map(([c, n]) => (
-                  <div key={c} style={{ display: "flex", justifyContent: "space-between", fontSize: 12, padding: "2px 0", color: PALETTE.textMuted }}>
-                    <span>{c}</span>
-                    <span style={{ fontFamily: "'JetBrains Mono', monospace" }}>{n}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
-        );
-      })}
+      {movieSections.length > 0 && (
+        <>
+          <SectionTitle>Plex Metadata — Movies</SectionTitle>
+          {movieSections.map((s, idx) => <PlexMetadataPanel key={idx} s={s} />)}
+        </>
+      )}
+      {showSections.length > 0 && (
+        <>
+          <SectionTitle>Plex Metadata — Series</SectionTitle>
+          {showSections.map((s, idx) => <PlexMetadataPanel key={idx} s={s} />)}
+        </>
+      )}
     </>
   );
 }
@@ -863,6 +968,24 @@ function AudioSavingsEstimate({ files }) {
       detail: [...c.codecs].join(", "),
     }));
 
+  // Non-English audio stats
+  const KEEP_LANGS = new Set(["eng", "und", ""]);
+  let foreignStreams = 0;
+  let foreignEstGB = 0;
+  files.forEach((f) => {
+    const streams = f.audio_streams || [];
+    if (streams.length <= 1) return; // single-track files: always keep
+    const totalBr = streams.reduce((s, a) => s + (a.bitrate_kbps || 0), 0);
+    streams.forEach((a) => {
+      const lang = (a.language || "").toLowerCase().trim();
+      if (!KEEP_LANGS.has(lang)) {
+        foreignStreams++;
+        const share = totalBr > 0 ? (a.bitrate_kbps || 0) / totalBr : 1 / streams.length;
+        foreignEstGB += (f.audio_estimated_size_gb || 0) * share;
+      }
+    });
+  });
+
   return (
     <div>
       <SectionTitle>Estimated Audio Re-encoding Savings</SectionTitle>
@@ -871,6 +994,7 @@ function AudioSavingsEstimate({ files }) {
         <StatCard label="Est. After Re-encode" value={fmt(totalAudioGB - totalSaving)} colour={PALETTE.green} />
         <StatCard label="Est. Savings" value={fmt(totalSaving)} sub={totalAudioGB > 0 ? `~${((totalSaving / totalAudioGB) * 100).toFixed(0)}% reduction` : ""} colour={PALETTE.accentWarm} />
         <StatCard label="Already Efficient" value={fmt(efficientSize)} sub={`${categories["Already efficient"].count} streams`} colour={PALETTE.purple} />
+        <StatCard label="Foreign Audio" value={fmtNum(foreignStreams)} sub={foreignEstGB > 0.01 ? `~${fmt(foreignEstGB)} stripped on encode` : "stripped on encode"} colour={PALETTE.textMuted} />
       </div>
       <div style={{ background: PALETTE.surface, border: `1px solid ${PALETTE.border}`, borderRadius: 12, padding: 20 }}>
         <div style={{ color: PALETTE.text, fontSize: 15, fontWeight: 600, marginBottom: 16 }}>Savings Breakdown</div>
@@ -900,6 +1024,77 @@ function AudioSavingsEstimate({ files }) {
         </div>
       </div>
     </div>
+  );
+}
+
+function SubtitleAnalysis({ files }) {
+  // Subtitle bitrate isn't reported by ffprobe, so estimate from codec type + duration
+  const CODEC_KBPS = {
+    hdmv_pgs_subtitle: 40,   // image-based PGS, ~40 kbps avg
+    dvd_subtitle:      30,   // image-based VOBSUB
+    subrip:            0.3,  // SRT text — negligible
+    ass:               0.3,
+    mov_text:          0.3,
+    unknown:           5,
+  };
+  const KEEP_LANGS = new Set(["eng", "und", ""]);
+
+  let imageSubs = 0, imageEstGB = 0;
+  let textSubs = 0, textEstGB = 0;
+  let foreignSubs = 0, foreignEstGB = 0;
+  const codecCounts = {};
+
+  files.forEach((f) => {
+    const dur = f.duration_seconds || 0;
+    (f.subtitle_streams || []).forEach((s) => {
+      const codec = s.codec || "unknown";
+      const lang = (s.language || "").toLowerCase().trim();
+      const kbps = CODEC_KBPS[codec] ?? 5;
+      const estGB = (kbps * 1000 * dur) / 8 / 1e9;
+      codecCounts[codec] = (codecCounts[codec] || 0) + 1;
+
+      const isImage = codec === "hdmv_pgs_subtitle" || codec === "dvd_subtitle";
+      if (isImage) { imageSubs++; imageEstGB += estGB; }
+      else { textSubs++; textEstGB += estGB; }
+
+      if (!KEEP_LANGS.has(lang)) { foreignSubs++; foreignEstGB += estGB; }
+    });
+  });
+
+  const totalSubs = imageSubs + textSubs;
+  if (totalSubs === 0) return null;
+
+  const codecRows = Object.entries(codecCounts).sort((a, b) => b[1] - a[1]);
+
+  return (
+    <>
+      <SectionTitle>Subtitle Tracks</SectionTitle>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 12, marginBottom: 16 }}>
+        <StatCard label="Total Streams" value={fmtNum(totalSubs)} />
+        <StatCard label="Image-based (PGS/DVD)" value={fmtNum(imageSubs)} sub={`~${fmt(imageEstGB)} est.`} colour={PALETTE.accentWarm} />
+        <StatCard label="Text-based (SRT/ASS)" value={fmtNum(textSubs)} sub="~negligible size" colour={PALETTE.green} />
+        <StatCard label="Foreign Language" value={fmtNum(foreignSubs)} sub={`~${fmt(foreignEstGB)} stripped on encode`} colour={PALETTE.textMuted} />
+      </div>
+      <div style={{ background: PALETTE.surface, border: `1px solid ${PALETTE.border}`, borderRadius: 12, padding: 16 }}>
+        <div style={{ color: PALETTE.text, fontSize: 13, fontWeight: 600, marginBottom: 10 }}>By Codec</div>
+        {codecRows.map(([codec, count]) => {
+          const kbps = CODEC_KBPS[codec] ?? 5;
+          const isImage = codec === "hdmv_pgs_subtitle" || codec === "dvd_subtitle";
+          return (
+            <div key={codec} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 12, padding: "3px 0", borderBottom: `1px solid ${PALETTE.border}22` }}>
+              <span style={{ color: PALETTE.text, fontFamily: "'JetBrains Mono', monospace" }}>{codec}</span>
+              <span style={{ display: "flex", gap: 16, color: PALETTE.textMuted }}>
+                <span>{fmtNum(count)} streams</span>
+                <span style={{ color: isImage ? PALETTE.accentWarm : PALETTE.textMuted }}>{isImage ? `~${kbps} kbps/stream` : "text (~0)"}</span>
+              </span>
+            </div>
+          );
+        })}
+        <div style={{ color: PALETTE.textMuted, fontSize: 11, marginTop: 10, fontStyle: "italic" }}>
+          PGS/DVD subtitle sizes are estimates (~40/30 kbps avg). Text-based (SRT, ASS) are negligible. Pipeline strips non-English subs on encode.
+        </div>
+      </div>
+    </>
   );
 }
 
@@ -1459,6 +1654,7 @@ export function LibraryPage({ onFileClick }) {
         );
       })()}
       <AudioSavingsEstimate files={files} />
+      <SubtitleAnalysis files={files} />
 
       {/* Filename Health */}
       <FilenameHealth files={files} onReload={loadReport} />

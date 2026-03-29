@@ -1,15 +1,22 @@
 import { PALETTE } from "../theme";
 
-export function StatCard({ label, value, sub, colour }) {
+export function StatCard({ label, value, sub, colour, onClick }) {
   return (
-    <div style={{
-      background: PALETTE.surface,
-      border: `1px solid ${PALETTE.border}`,
-      borderRadius: 12,
-      padding: "20px 24px",
-      flex: "1 1 180px",
-      minWidth: 160,
-    }}>
+    <div
+      onClick={onClick}
+      style={{
+        background: PALETTE.surface,
+        border: `1px solid ${PALETTE.border}`,
+        borderRadius: 12,
+        padding: "20px 24px",
+        flex: "1 1 180px",
+        minWidth: 160,
+        cursor: onClick ? "pointer" : "default",
+        transition: "border-color 0.15s",
+      }}
+      onMouseEnter={(e) => { if (onClick) e.currentTarget.style.borderColor = PALETTE.accent; }}
+      onMouseLeave={(e) => { if (onClick) e.currentTarget.style.borderColor = PALETTE.border; }}
+    >
       <div style={{ color: PALETTE.textMuted, fontSize: 12, fontWeight: 500, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 6 }}>{label}</div>
       <div style={{ color: colour || PALETTE.text, fontSize: 28, fontWeight: 700, fontFamily: "'JetBrains Mono', monospace", lineHeight: 1.1 }}>{value}</div>
       {sub && <div style={{ color: PALETTE.textMuted, fontSize: 12, marginTop: 4 }}>{sub}</div>}

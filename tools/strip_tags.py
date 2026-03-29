@@ -33,7 +33,7 @@ _BASE_TAG_PARTS = (
     r"|WEB[-.]?DL|WEBRip|BluRay|Blu[-.]?Ray|BDRip|BDRemux|HDTV|DVDRip|REMUX|WEB"
     # Streaming services
     r"|NF|AMZN|DSNP|HULU|MAX|HBO|ATVP|PCOK|PMTP|STAN|CRAV|Netflix"
-    r"|BINGE|ROKU|iT|MA|CRITERION|MUBI|TUBI|SHUDDER|PMNP|SHO|STRP"
+    r"|BINGE|ROKU|(?-i:iT)|MA|CRITERION|MUBI|TUBI|SHUDDER|PMNP|SHO|STRP"
     # Video codecs
     r"|x264|x265|H\.?264|H\.?265|HEVC|AVC|AV1|XviD|DivX|VP9|VP8|MPEG[24]"
     # Audio codecs / channels

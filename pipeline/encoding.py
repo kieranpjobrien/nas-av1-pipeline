@@ -538,7 +538,7 @@ def stage_audio_remux(source_filepath: str, item: dict, staging_dir: str,
     encode_start = time.time()
     state.set_file(source_filepath, FileStatus.ENCODING,
                    local_path=local_input, output_path=output_path,
-                   encode_start=encode_start)
+                   encode_start=encode_start, audio_only=True)
 
     logging.info(f"Audio remux: {item['filename']}")
     audio_streams = item.get("audio_streams", [])
