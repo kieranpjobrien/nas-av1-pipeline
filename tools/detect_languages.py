@@ -38,6 +38,38 @@ TEXT_SUB_CODECS = {"subrip", "srt", "ass", "ssa", "webvtt", "mov_text", "text", 
 BITMAP_SUB_CODECS = {"dvd_subtitle", "hdmv_pgs_subtitle", "dvbsub", "xsub", "pgssub"}
 UND_LANGS = {"und", "unk", ""}
 
+# ISO 639-1 (2-letter) → ISO 639-2/B (3-letter) — what MKV/mkvpropedit expects
+_ISO1_TO_ISO2 = {
+    "af": "afr", "ar": "ara", "az": "aze", "be": "bel", "bg": "bul",
+    "bn": "ben", "bs": "bos", "ca": "cat", "cs": "ces", "cy": "wel",
+    "da": "dan", "de": "deu", "el": "ell", "en": "eng", "eo": "epo",
+    "es": "spa", "et": "est", "eu": "baq", "fa": "per", "fi": "fin",
+    "fr": "fra", "ga": "gle", "gl": "glg", "gu": "guj", "he": "heb",
+    "hi": "hin", "hr": "hrv", "hu": "hun", "hy": "arm", "id": "ind",
+    "is": "ice", "it": "ita", "ja": "jpn", "ka": "geo", "kk": "kaz",
+    "km": "khm", "kn": "kan", "ko": "kor", "lt": "lit", "lv": "lav",
+    "mk": "mac", "ml": "mal", "mn": "mon", "mr": "mar", "ms": "may",
+    "mt": "mlt", "my": "bur", "nb": "nob", "ne": "nep", "nl": "dut",
+    "no": "nor", "pa": "pan", "pl": "pol", "pt": "por", "ro": "ron",
+    "ru": "rus", "sk": "slk", "sl": "slv", "so": "som", "sq": "alb",
+    "sr": "srp", "sv": "swe", "sw": "swa", "ta": "tam", "te": "tel",
+    "th": "tha", "tl": "tgl", "tr": "tur", "uk": "ukr", "ur": "urd",
+    "uz": "uzb", "vi": "vie", "zh": "zho", "zh-cn": "chi", "zh-tw": "chi",
+    # already 3-letter pass-throughs (from heuristic inference copying media_report codes)
+    "eng": "eng", "fre": "fra", "ger": "deu", "chi": "chi", "spa": "spa",
+    "por": "por", "ita": "ita", "jpn": "jpn", "kor": "kor", "rus": "rus",
+    "ara": "ara", "dut": "dut", "swe": "swe", "nor": "nor", "dan": "dan",
+    "fin": "fin", "pol": "pol", "hun": "hun", "ces": "ces", "ron": "ron",
+    "tur": "tur", "ell": "ell", "heb": "heb", "hin": "hin", "tha": "tha",
+    "vie": "vie", "ind": "ind", "hrv": "hrv", "ukr": "ukr", "slk": "slk",
+    "slv": "slv", "bul": "bul", "srp": "srp", "nob": "nob",
+}
+
+
+def to_iso2(lang: str) -> str:
+    """Normalise any detected language code to ISO 639-2 for mkvpropedit."""
+    return _ISO1_TO_ISO2.get(lang.lower(), lang.lower())
+
 RESULTS_PATH = STAGING_DIR / "control" / "language_detections.json"
 
 
@@ -300,6 +332,7 @@ def apply_detection(result: dict, min_confidence: float = 0.80) -> bool:
 
     # mkvpropedit uses 1-based track specifiers per type: track:a1, track:s1, etc.
     track_spec = f"track:{'a' if track_type == 'audio' else 's'}{stream_index + 1}"
+    language = to_iso2(language)  # mkvpropedit requires ISO 639-2
 
     cmd = [
         "mkvpropedit", filepath,
