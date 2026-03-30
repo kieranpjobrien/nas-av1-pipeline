@@ -303,9 +303,22 @@ class Pipeline:
             current_status = existing["status"] if existing else None
 
             if current_status in (None, FileStatus.PENDING.value):
-                local_path = stage_fetch(item, self.staging_dir, effective_config, self.state)
+                # Retry fetch up to 10 times with 30s backoff if buffer is full.
+                local_path = None
+                for _attempt in range(10):
+                    if self._shutdown:
+                        return
+                    local_path = stage_fetch(item, self.staging_dir, effective_config, self.state)
+                    if local_path is not None:
+                        break
+                    # stage_fetch returns None when buffer full — wait for space
+                    logging.info(f"Audio fetch waiting for buffer space: {item['filename']} (attempt {_attempt + 1}/10)")
+                    for _ in range(6):  # 30s total, interruptible
+                        if self._shutdown:
+                            return
+                        time.sleep(5)
                 if local_path is None:
-                    logging.warning(f"Audio remux fetch failed: {item['filename']}")
+                    logging.warning(f"Audio remux fetch failed after retries: {item['filename']}")
                     self.state.set_file(filepath, FileStatus.ERROR,
                                         error="fetch failed for audio remux", stage="fetch")
                     self.state.stats["errors"] += 1
@@ -893,13 +906,9 @@ class Pipeline:
 
             # Audio-only items: dispatch to background thread (no GPU needed)
             if ready_item.get("audio_only") and len(audio_threads) < MAX_AUDIO_THREADS:
-                # Mark as ENCODING immediately so the main loop doesn't re-select
-                # this item on the next iteration before the thread updates state.
-                existing_info = self.state.get_file(filepath) or {}
-                if existing_info.get("status") == FileStatus.FETCHED.value:
-                    self.state.set_file(filepath, FileStatus.ENCODING,
-                                        local_path=existing_info.get("local_path"),
-                                        audio_only=True)
+                # Do NOT pre-set to ENCODING here — _audio_remux_async must see FETCHED
+                # status to actually run stage_audio_remux.  Re-dispatch is prevented by
+                # the dispatched set below, not by a state pre-set.
                 effective_config = self._apply_gentle_overrides(ready_item)
                 t = threading.Thread(
                     target=self._audio_remux_async,
