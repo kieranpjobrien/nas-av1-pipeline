@@ -117,26 +117,16 @@ def format_duration(secs: float) -> str:
 def _should_transcode_audio(audio: dict, config: dict) -> bool:
     """Decide whether an audio stream should be transcoded to EAC-3.
 
-    Transcodes: lossless codecs (always), DTS core >700kbps, AC-3 >400kbps.
-    Copies: AAC, Opus, EAC-3, MP3, low-bitrate AC-3/DTS, anything else efficient.
+    Transcodes everything except EAC-3 (already target codec).
     """
-    lossless_codecs = config.get("lossless_audio_codecs", set())
     codec_name = (audio.get("codec", "") or "").lower().strip()
     codec_raw = (audio.get("codec_raw", "") or audio.get("codec", "") or "").lower().strip()
 
-    # Lossless: always transcode
-    if audio.get("lossless", False) or codec_raw in lossless_codecs or codec_name in lossless_codecs:
-        return True
+    # EAC-3 is the target codec — no point re-encoding
+    if codec_raw in ("eac3", "eac-3", "e-ac-3") or codec_name in ("eac3", "eac-3", "e-ac-3"):
+        return False
 
-    # Bitrate-based thresholds for lossy codecs
-    thresholds = config.get("audio_bulky_threshold_kbps", {})
-    bitrate = audio.get("bitrate_kbps") or 0
-    for codec_pattern, threshold in thresholds.items():
-        if codec_pattern in codec_raw or codec_pattern in codec_name:
-            if bitrate > threshold:
-                return True
-
-    return False
+    return True
 
 
 def has_bulky_audio(item: dict, config: dict) -> bool:
