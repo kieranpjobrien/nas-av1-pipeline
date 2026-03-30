@@ -230,13 +230,111 @@ def infer_audio_language(file_entry: dict, audio_idx: int) -> tuple[Optional[str
 # Per-file processing
 # ---------------------------------------------------------------------------
 
+def _infer_pgs_from_siblings(
+    file_entry: dict,
+    detected_text_langs: dict[int, str],
+) -> dict[int, tuple[str, str]]:
+    """Infer PGS/DVD subtitle languages from sibling text subs.
+
+    Uses two strategies:
+    1. Positional mapping: if N text subs with known languages and N bitmap subs,
+       map 1:1 by relative order (e.g. text subs 0-5 are [eng,fre,spa,...] →
+       bitmap subs 6-11 follow the same order).
+    2. Unanimous: if all known subs (pre-existing + detected) agree on one language,
+       assign it to all bitmap subs.
+
+    Args:
+        file_entry: the file dict from media_report
+        detected_text_langs: {sub_all_idx: lang_code} from text extraction pass
+
+    Returns:
+        {sub_all_idx: (lang_code, reason)} for each inferred bitmap sub.
+    """
+    subs = file_entry.get("subtitle_streams", [])
+    inferred: dict[int, tuple[str, str]] = {}
+
+    # Build complete known-language map: pre-existing + just-detected
+    known_langs: dict[int, str] = {}
+    for idx, s in enumerate(subs):
+        existing = (s.get("language") or "und").lower().strip()
+        if existing not in UND_LANGS:
+            known_langs[idx] = existing
+    known_langs.update(detected_text_langs)
+
+    # Identify undetermined bitmap subs
+    und_bitmap_idxs = []
+    for idx, s in enumerate(subs):
+        codec = (s.get("codec") or "").lower()
+        lang = (s.get("language") or "und").lower().strip()
+        if lang in UND_LANGS and codec in BITMAP_SUB_CODECS:
+            und_bitmap_idxs.append(idx)
+
+    if not und_bitmap_idxs or not known_langs:
+        return inferred
+
+    # Strategy 1: all known subs agree → assign that language to all bitmap subs
+    unique_langs = set(known_langs.values())
+    if len(unique_langs) == 1:
+        lang = next(iter(unique_langs))
+        for idx in und_bitmap_idxs:
+            inferred[idx] = (lang, f"all {len(known_langs)} known subs are '{lang}'")
+        return inferred
+
+    # Strategy 2: positional mapping — known text subs and bitmap subs in matching count
+    known_text_idxs = sorted(
+        idx for idx in known_langs
+        if (subs[idx].get("codec") or "").lower() in TEXT_SUB_CODECS
+    )
+    if len(known_text_idxs) == len(und_bitmap_idxs):
+        for text_idx, bmp_idx in zip(known_text_idxs, und_bitmap_idxs):
+            lang = known_langs[text_idx]
+            inferred[bmp_idx] = (lang, f"positional match with text sub {text_idx} ('{lang}')")
+        return inferred
+
+    return inferred
+
+
+def _infer_audio_from_sub_majority(
+    file_entry: dict,
+    audio_idx: int,
+    detected_text_langs: dict[int, str],
+) -> tuple[Optional[str], str]:
+    """Infer audio language from majority subtitle language.
+
+    If ≥70% of identified subtitle tracks share the same language (pre-existing +
+    detected), assign that to undetermined audio. Lower confidence (0.8) because
+    this is a weaker signal than the existing heuristics.
+    """
+    subs = file_entry.get("subtitle_streams", [])
+    known_langs: list[str] = []
+    for idx, s in enumerate(subs):
+        lang = (s.get("language") or "und").lower().strip()
+        if lang not in UND_LANGS:
+            known_langs.append(lang)
+        elif idx in detected_text_langs:
+            known_langs.append(detected_text_langs[idx])
+
+    if len(known_langs) < 2:
+        return None, "insufficient context"
+
+    from collections import Counter
+    counts = Counter(known_langs)
+    top_lang, top_count = counts.most_common(1)[0]
+    ratio = top_count / len(known_langs)
+    if ratio >= 0.7:
+        return top_lang, f"subtitle majority {top_count}/{len(known_langs)} are '{top_lang}'"
+    return None, "insufficient context"
+
+
 def process_file(file_entry: dict) -> list[dict]:
     """Return a list of detection results for all undetermined tracks in a file."""
     filepath = file_entry["filepath"]
     results = []
 
-    # --- Subtitle tracks ---
-    # sub_all_idx == the ffmpeg -map 0:s:N index (counts ALL subtitle streams)
+    # --- Pass 1: Text subtitle extraction ---
+    detected_text_langs: dict[int, str] = {}  # sub_all_idx → lang code
+    text_results: list[dict] = []
+
     for sub_all_idx, stream in enumerate(file_entry.get("subtitle_streams", [])):
         lang = (stream.get("language") or "und").lower().strip()
         codec = stream.get("codec", "").lower()
@@ -247,7 +345,7 @@ def process_file(file_entry: dict) -> list[dict]:
             text = extract_subtitle_text(filepath, sub_all_idx)
             if text:
                 detected, confidence = detect_language(text)
-                results.append({
+                entry = {
                     "filepath": filepath,
                     "track_type": "subtitle",
                     "stream_index": sub_all_idx,
@@ -256,9 +354,12 @@ def process_file(file_entry: dict) -> list[dict]:
                     "confidence": confidence,
                     "method": "text_extraction",
                     "chars_sampled": len(text),
-                })
+                }
+                text_results.append(entry)
+                if detected and detected != "und" and confidence >= 0.5:
+                    detected_text_langs[sub_all_idx] = detected
             else:
-                results.append({
+                text_results.append({
                     "filepath": filepath,
                     "track_type": "subtitle",
                     "stream_index": sub_all_idx,
@@ -268,7 +369,30 @@ def process_file(file_entry: dict) -> list[dict]:
                     "method": "text_extraction_failed",
                     "chars_sampled": 0,
                 })
-        elif codec in BITMAP_SUB_CODECS:
+
+    results.extend(text_results)
+
+    # --- Pass 2: Infer PGS/DVD subs from sibling text subs ---
+    pgs_inferred = _infer_pgs_from_siblings(file_entry, detected_text_langs)
+    for sub_all_idx, stream in enumerate(file_entry.get("subtitle_streams", [])):
+        lang = (stream.get("language") or "und").lower().strip()
+        codec = stream.get("codec", "").lower()
+        if lang not in UND_LANGS or codec not in BITMAP_SUB_CODECS:
+            continue
+
+        if sub_all_idx in pgs_inferred:
+            inferred_lang, reason = pgs_inferred[sub_all_idx]
+            results.append({
+                "filepath": filepath,
+                "track_type": "subtitle",
+                "stream_index": sub_all_idx,
+                "codec": codec,
+                "detected_language": inferred_lang,
+                "confidence": 0.85,
+                "method": "sibling_inference",
+                "reason": reason,
+            })
+        else:
             results.append({
                 "filepath": filepath,
                 "track_type": "subtitle",
@@ -276,23 +400,27 @@ def process_file(file_entry: dict) -> list[dict]:
                 "codec": codec,
                 "detected_language": None,
                 "confidence": 0.0,
-                "method": "bitmap_skipped",
+                "method": "bitmap_no_match",
                 "chars_sampled": 0,
             })
 
-    # --- Audio tracks ---
+    # --- Pass 3: Audio tracks (existing heuristics + subtitle majority fallback) ---
     for audio_idx, stream in enumerate(file_entry.get("audio_streams", [])):
         lang = (stream.get("language") or "und").lower().strip()
         if lang not in UND_LANGS:
             continue
         detected, reason = infer_audio_language(file_entry, audio_idx)
+        if not detected:
+            detected, reason = _infer_audio_from_sub_majority(
+                file_entry, audio_idx, detected_text_langs,
+            )
         results.append({
             "filepath": filepath,
             "track_type": "audio",
             "stream_index": audio_idx,
             "codec": stream.get("codec", ""),
             "detected_language": detected,
-            "confidence": 0.9 if detected else 0.0,  # heuristic — no probability available
+            "confidence": 0.9 if detected and "majority" not in reason else (0.8 if detected else 0.0),
             "method": "heuristic",
             "reason": reason,
         })
