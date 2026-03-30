@@ -304,52 +304,114 @@ def process_file(file_entry: dict) -> list[dict]:
 # Applying detections back to files
 # ---------------------------------------------------------------------------
 
-def apply_detection(result: dict, min_confidence: float = 0.80) -> bool:
-    """Write a detected language tag back to a file using mkvpropedit.
+def _apply_file_mkvpropedit(filepath: str, detections: list[dict]) -> tuple[int, int]:
+    """Apply all language detections for a file in a single mkvpropedit call.
 
-    Only acts on MKV files. Requires mkvpropedit (MKVToolNix) on PATH.
-    Returns True on success.
+    Batches every track edit into one process invocation (fast, in-place).
+    Returns (applied_count, failed_count).
     """
-    if not result.get("detected_language"):
-        return False
-    if result.get("confidence", 0) < min_confidence:
-        return False
-    if result.get("method") in ("bitmap_skipped", "text_extraction_failed"):
-        return False
+    args: list[str] = ["mkvpropedit", filepath]
+    for det in detections:
+        track_type = det["track_type"]
+        stream_index = det["stream_index"]
+        language = to_iso2(det["detected_language"])
+        # mkvpropedit 1-based track specifiers per type: track:a1, track:s1, etc.
+        track_spec = f"track:{'a' if track_type == 'audio' else 's'}{stream_index + 1}"
+        args += ["--edit", track_spec, "--set", f"language={language}"]
 
-    filepath = result["filepath"]
-    if not filepath.lower().endswith(".mkv"):
-        logging.warning(f"  Skipping non-MKV (mkvpropedit only supports MKV): {Path(filepath).name}")
-        return False
-
-    if not shutil.which("mkvpropedit"):
-        logging.error("mkvpropedit not found. Install MKVToolNix: winget install MKVToolNix.MKVToolNix")
-        return False
-
-    track_type = result["track_type"]
-    stream_index = result["stream_index"]
-    language = result["detected_language"]
-
-    # mkvpropedit uses 1-based track specifiers per type: track:a1, track:s1, etc.
-    track_spec = f"track:{'a' if track_type == 'audio' else 's'}{stream_index + 1}"
-    language = to_iso2(language)  # mkvpropedit requires ISO 639-2
-
-    cmd = [
-        "mkvpropedit", filepath,
-        "--edit", track_spec,
-        "--set", f"language={language}",
-    ]
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        proc = subprocess.run(args, capture_output=True, text=True, timeout=60)
         if proc.returncode == 0:
-            logging.info(f"  Applied {language} to {track_type} track {stream_index + 1}: {Path(filepath).name}")
-            return True
+            for det in detections:
+                logging.info(
+                    f"  Applied {to_iso2(det['detected_language'])} to {det['track_type']} "
+                    f"track {det['stream_index'] + 1}: {Path(filepath).name}"
+                )
+            return len(detections), 0
         else:
-            logging.error(f"  mkvpropedit failed: {proc.stderr.strip()}")
-            return False
+            logging.error(f"  mkvpropedit failed for {Path(filepath).name}: {proc.stderr.strip()}")
+            return 0, len(detections)
     except subprocess.TimeoutExpired:
         logging.error(f"  mkvpropedit timed out for {Path(filepath).name}")
-        return False
+        return 0, len(detections)
+
+
+def _apply_file_ffmpeg(filepath: str, detections: list[dict]) -> tuple[int, int]:
+    """Apply all language detections for a file in a single ffmpeg -c copy call.
+
+    Writes to a temp file then replaces the original. Slower than mkvpropedit
+    but requires no extra install beyond ffmpeg.
+    Returns (applied_count, failed_count).
+    """
+    tmp_path = filepath + ".langfix_tmp.mkv"
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", filepath, "-c", "copy"]
+    for det in detections:
+        track_type = det["track_type"]
+        stream_index = det["stream_index"]
+        language = to_iso2(det["detected_language"])
+        # ffmpeg metadata stream specifiers: s:a:N for audio, s:s:N for subtitle
+        stream_type = "a" if track_type == "audio" else "s"
+        cmd += [f"-metadata:s:{stream_type}:{stream_index}", f"language={language}"]
+    cmd.append(tmp_path)
+
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        if proc.returncode == 0:
+            os.replace(tmp_path, filepath)
+            for det in detections:
+                logging.info(
+                    f"  Applied {to_iso2(det['detected_language'])} to {det['track_type']} "
+                    f"track {det['stream_index'] + 1}: {Path(filepath).name}"
+                )
+            return len(detections), 0
+        else:
+            logging.error(f"  ffmpeg failed for {Path(filepath).name}: {proc.stderr.strip()}")
+            return 0, len(detections)
+    except subprocess.TimeoutExpired:
+        logging.error(f"  ffmpeg timed out for {Path(filepath).name}")
+        return 0, len(detections)
+    finally:
+        # Clean up temp file on any failure path
+        if os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+
+def apply_detections_for_file(
+    filepath: str,
+    detections: list[dict],
+    min_confidence: float = 0.80,
+) -> tuple[int, int]:
+    """Apply language detections for a single file.
+
+    Filters by min_confidence and skips failed/bitmap detections, then tries
+    mkvpropedit (preferred — fast, in-place) for MKV files if available,
+    falling back to ffmpeg -c copy (slower, no extra install required).
+    Returns (applied_count, failed_count).
+    """
+    # Filter to actionable detections
+    actionable = [
+        d for d in detections
+        if d.get("detected_language")
+        and d.get("confidence", 0) >= min_confidence
+        and d.get("method") not in ("bitmap_skipped", "text_extraction_failed")
+    ]
+    if not actionable:
+        return 0, 0
+
+    is_mkv = filepath.lower().endswith(".mkv")
+    use_mkvpropedit = is_mkv and shutil.which("mkvpropedit") is not None
+
+    if use_mkvpropedit:
+        return _apply_file_mkvpropedit(filepath, actionable)
+    else:
+        if not is_mkv:
+            logging.warning(f"  Non-MKV file — using ffmpeg remux: {Path(filepath).name}")
+        else:
+            logging.info(f"  mkvpropedit not found — falling back to ffmpeg: {Path(filepath).name}")
+        return _apply_file_ffmpeg(filepath, actionable)
 
 
 # ---------------------------------------------------------------------------
@@ -407,10 +469,10 @@ def main():
     logging.info(f"Min confidence: {args.min_confidence}")
     if args.apply:
         if shutil.which("mkvpropedit"):
-            logging.info("mkvpropedit: found — will apply detections")
+            logging.info("mkvpropedit: found — will apply via mkvpropedit")
         else:
-            logging.warning("mkvpropedit: NOT FOUND — detections will be saved but not applied")
-            logging.warning("  Install with: winget install MKVToolNix.MKVToolNix")
+            logging.info("mkvpropedit: not found — will apply via ffmpeg (slower)")
+            logging.info("  To use mkvpropedit: winget install MKVToolNix.MKVToolNix")
 
     # Process files in parallel (subtitle extraction is I/O bound)
     all_results = []
@@ -462,14 +524,22 @@ def main():
         json.dump(output, f, indent=2, ensure_ascii=False)
     logging.info(f"\nResults saved to {args.output}")
 
-    # Apply if requested
+    # Apply if requested — group detections by filepath and process one file at a time
     if args.apply:
-        logging.info(f"\nApplying {len(detected)} detections...")
-        applied = 0
-        for result in detected:
-            if apply_detection(result, args.min_confidence):
-                applied += 1
-        logging.info(f"Applied: {applied}/{len(detected)}")
+        logging.info(f"\nApplying {len(detected)} detections across files...")
+        by_file: dict[str, list[dict]] = {}
+        for det in detected:
+            by_file.setdefault(det["filepath"], []).append(det)
+
+        total_applied = 0
+        total_failed = 0
+        for file_num, (fp, file_dets) in enumerate(by_file.items(), 1):
+            logging.info(f"  [{file_num}/{len(by_file)}] {Path(fp).name} ({len(file_dets)} track(s))")
+            applied, failed = apply_detections_for_file(fp, file_dets, args.min_confidence)
+            total_applied += applied
+            total_failed += failed
+
+        logging.info(f"Applied: {total_applied}/{len(detected)}  Failed: {total_failed}")
 
 
 if __name__ == "__main__":
