@@ -11,9 +11,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from paths import MEDIA_REPORT
 from pipeline.config import get_res_key
 from pipeline.encoding import format_bytes, format_duration, get_duration
 from pipeline.state import FileStatus, PipelineState
+from tools.scanner import update_report_entry
 
 
 def get_staging_usage(staging_dir: str) -> int:
@@ -340,6 +342,13 @@ def stage_replace(source_filepath: str, item: dict, config: dict, state: Pipelin
             state.set_file(source_filepath, FileStatus.REPLACED, final_path=final_path,
                            replace_end=time.time())
             logging.info(f"Replaced: {item['filename']} -> {final_name}")
+
+            # Patch media_report.json for this file so the library tab reflects
+            # the new codec/size immediately without a full rescan.
+            try:
+                update_report_entry(final_path, str(MEDIA_REPORT), item.get("library_type", ""))
+            except Exception as _e:
+                logging.warning(f"Media report patch failed (non-fatal): {_e}")
 
             # Trigger Plex scan for the specific section (non-blocking)
             _trigger_plex_scan_async(source_filepath)

@@ -17,6 +17,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
@@ -231,6 +232,71 @@ def scan_directory(directory: str, library_type: str) -> list[str]:
             if Path(fname).suffix.lower() in VIDEO_EXTENSIONS:
                 files.append(os.path.join(root, fname))
     return files
+
+
+_report_update_lock = threading.Lock()
+
+
+def update_report_entry(filepath: str, report_path: str, library_type: str) -> bool:
+    """Re-probe a single NAS file and patch its entry in media_report.json in-place.
+
+    Called after stage_replace so the library tab immediately reflects the new
+    codec, size, and bitrate without waiting for a full rescan.  Thread-safe via
+    a module-level lock — concurrent replacements (upload worker + audio threads)
+    queue safely.
+
+    Args:
+        filepath:     Absolute path to the now-replaced file on the NAS.
+        report_path:  Path to media_report.json.
+        library_type: "movie" or "series".
+
+    Returns True on success, False if probe or I/O fails (caller should warn).
+    """
+    probe = probe_file(filepath)
+    if probe is None:
+        return False
+    entry = extract_info(filepath, probe, library_type)
+
+    with _report_update_lock:
+        try:
+            with open(report_path, "r", encoding="utf-8") as f:
+                report = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return False
+
+        files = report.get("files", [])
+
+        # Replace existing entry (match on filepath — handles .mp4→.mkv renames too)
+        updated = False
+        for i, e in enumerate(files):
+            if e.get("filepath") == filepath:
+                files[i] = entry
+                updated = True
+                break
+        if not updated:
+            files.append(entry)
+
+        # Patch summary counts/sizes in-place
+        total_size = sum(e.get("file_size_bytes", 0) for e in files)
+        movie_files = [e for e in files if e.get("library_type") == "movie"]
+        series_files = [e for e in files if e.get("library_type") == "series"]
+        summary = report.setdefault("summary", {})
+        summary["total_files"] = len(files)
+        summary["total_size_gb"] = round(total_size / 1024**3, 2)
+        summary["total_size_tb"] = round(total_size / 1024**4, 3)
+        summary.setdefault("movies", {})["count"] = len(movie_files)
+        summary["movies"]["size_gb"] = round(
+            sum(e.get("file_size_bytes", 0) for e in movie_files) / 1024**3, 2
+        )
+        summary.setdefault("series", {})["count"] = len(series_files)
+        summary["series"]["size_gb"] = round(
+            sum(e.get("file_size_bytes", 0) for e in series_files) / 1024**3, 2
+        )
+
+        with open(report_path, "w", encoding="utf-8") as f:
+            json.dump(report, f, indent=2, ensure_ascii=False)
+
+    return True
 
 
 EN_TOKENS = {"eng", "en", "english"}
