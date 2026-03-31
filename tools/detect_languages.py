@@ -32,6 +32,23 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+# Common install locations for mkvpropedit (may not be on PATH)
+_MKVPROPEDIT_SEARCH = [
+    r"C:\Program Files\MKVToolNix\mkvpropedit.exe",
+    r"C:\Program Files (x86)\MKVToolNix\mkvpropedit.exe",
+]
+
+
+def _find_mkvpropedit() -> Optional[str]:
+    """Find mkvpropedit binary — check PATH first, then common install dirs."""
+    found = shutil.which("mkvpropedit")
+    if found:
+        return found
+    for path in _MKVPROPEDIT_SEARCH:
+        if os.path.isfile(path):
+            return path
+    return None
+
 from paths import MEDIA_REPORT, STAGING_DIR
 
 TEXT_SUB_CODECS = {"subrip", "srt", "ass", "ssa", "webvtt", "mov_text", "text", "microdvd"}
@@ -438,7 +455,8 @@ def _apply_file_mkvpropedit(filepath: str, detections: list[dict]) -> tuple[int,
     Batches every track edit into one process invocation (fast, in-place).
     Returns (applied_count, failed_count).
     """
-    args: list[str] = ["mkvpropedit", filepath]
+    mkvprop = _find_mkvpropedit() or "mkvpropedit"
+    args: list[str] = [mkvprop, filepath]
     for det in detections:
         track_type = det["track_type"]
         stream_index = det["stream_index"]
@@ -530,7 +548,7 @@ def apply_detections_for_file(
         return 0, 0
 
     is_mkv = filepath.lower().endswith(".mkv")
-    use_mkvpropedit = is_mkv and shutil.which("mkvpropedit") is not None
+    use_mkvpropedit = is_mkv and _find_mkvpropedit() is not None
 
     if use_mkvpropedit:
         return _apply_file_mkvpropedit(filepath, actionable)
@@ -596,8 +614,8 @@ def main():
     logging.info(f"Files with undetermined tracks: {len(to_process)}")
     logging.info(f"Min confidence: {args.min_confidence}")
     if args.apply:
-        if shutil.which("mkvpropedit"):
-            logging.info("mkvpropedit: found — will apply via mkvpropedit")
+        if _find_mkvpropedit():
+            logging.info(f"mkvpropedit: found at {_find_mkvpropedit()} — will apply via mkvpropedit")
         else:
             logging.info("mkvpropedit: not found — will apply via ffmpeg (slower)")
             logging.info("  To use mkvpropedit: winget install MKVToolNix.MKVToolNix")

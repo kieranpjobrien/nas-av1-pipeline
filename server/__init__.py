@@ -693,8 +693,9 @@ def get_language_detections():
 
 @app.get("/api/mkvpropedit-available")
 def mkvpropedit_available():
-    import shutil as _shutil
-    return {"available": _shutil.which("mkvpropedit") is not None}
+    from tools.detect_languages import _find_mkvpropedit
+    found = _find_mkvpropedit()
+    return {"available": found is not None, "path": found}
 
 
 # -- Dismissed items (persisted in staging dir) --
