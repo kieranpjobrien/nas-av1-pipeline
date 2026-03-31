@@ -398,6 +398,8 @@ def main():
                         help="Skip language detection post-processing (fast probe-only scan)")
     parser.add_argument("--whisper", action="store_true",
                         help="Use faster-whisper (GPU) for audio language detection during scan")
+    parser.add_argument("--skip-tmdb", action="store_true",
+                        help="Skip TMDb metadata enrichment")
     args = parser.parse_args()
 
     all_files = []
@@ -514,6 +516,12 @@ def main():
             whisper_all=args.whisper,
             workers=args.workers,
         )
+
+    # Post-processing: TMDb metadata enrichment
+    if not args.skip_tmdb:
+        print(f"\nRunning TMDb metadata enrichment...")
+        from tools.tmdb import enrich_report as tmdb_enrich
+        report = tmdb_enrich(report, workers=args.workers)
 
     output_path = args.output
     tmp_path = output_path + ".tmp"

@@ -238,6 +238,10 @@ export function ControlPage({ wsControl }) {
       <ProcessRow name="plex_metadata" label="Plex Metadata Audit" startLabel="Run Audit" onFlash={showFlash} />
       <ProcessRow name="plex_apply_rules" label="Plex Apply Rules" startLabel="Apply Rules" onFlash={showFlash} />
 
+      {/* Metadata */}
+      <div style={{ marginTop: 16, marginBottom: 4, color: PALETTE.textMuted, fontSize: 11, fontWeight: 600, textTransform: "uppercase", letterSpacing: 1 }}>Metadata</div>
+      <ProcessRow name="tmdb_enrich" label="TMDb Enrichment" startLabel="Enrich" onFlash={showFlash} />
+
       <div style={{ marginBottom: 32 }} />
 
       {/* Pipeline Control */}

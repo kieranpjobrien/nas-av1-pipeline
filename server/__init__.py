@@ -178,6 +178,10 @@ PROCESS_CONFIGS = {
         "cmd": [sys.executable, "-m", "tools.detect_languages", "--apply", "--min-confidence", "0.85"],
         "cwd": str(Path(__file__).parent.parent),
     },
+    "tmdb_enrich": {
+        "cmd": [sys.executable, "-m", "tools.tmdb"],
+        "cwd": str(Path(__file__).parent.parent),
+    },
 }
 
 STOP_TIMEOUT = 15  # seconds to wait for graceful stop before terminate
