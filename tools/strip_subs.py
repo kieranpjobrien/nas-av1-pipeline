@@ -1,9 +1,11 @@
 """
 Strip Non-English Subtitles
 ============================
-Remuxes files to remove non-English subtitle streams. Stream copy only —
-no re-encoding, very fast. Targets files that have already been encoded
-to AV1 and still carry foreign subtitle bloat (especially PGS bitmap subs).
+Remuxes files to remove non-English subtitle streams using mkvmerge (preferred,
+fast local staging) or ffmpeg fallback. Stream copy only — no re-encoding.
+
+For NAS files: copies to local staging, remuxes locally, copies back. This
+avoids the catastrophic slowness of ffmpeg remuxing directly over SMB.
 
 Usage:
     python -m tools.strip_subs                    # dry run — show what would be stripped
@@ -14,15 +16,32 @@ Usage:
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
 import time
 from pathlib import Path
 
-from paths import NAS_MOVIES, NAS_SERIES, MEDIA_REPORT
+from paths import NAS_MOVIES, NAS_SERIES, MEDIA_REPORT, STAGING_DIR
 
 KEEP_LANGS = {"eng", "en", "english", "und", ""}
+
+# MKVToolNix common install locations
+_MKVMERGE_SEARCH = [
+    r"C:\Program Files\MKVToolNix\mkvmerge.exe",
+    r"C:\Program Files (x86)\MKVToolNix\mkvmerge.exe",
+]
+
+
+def _find_mkvmerge() -> str | None:
+    found = shutil.which("mkvmerge")
+    if found:
+        return found
+    for path in _MKVMERGE_SEARCH:
+        if os.path.isfile(path):
+            return path
+    return None
 
 
 def _get_files_with_non_english_subs(report_path: Path,
@@ -79,62 +98,114 @@ def _get_files_with_non_english_subs(report_path: Path,
     return results
 
 
-def _remux_strip_subs(filepath: str, keep_indices: list[int]) -> bool:
-    """Remux a file, keeping only specified subtitle stream indices. Returns True on success."""
-    tmp_fd, tmp_path = tempfile.mkstemp(suffix=".mkv", dir=os.path.dirname(filepath))
-    os.close(tmp_fd)
-
-    cmd = [
-        "ffmpeg", "-y",
-        "-i", filepath,
-        "-map", "0:v",
-        "-map", "0:a",
-    ]
-    for idx in keep_indices:
-        cmd.extend(["-map", f"0:s:{idx}"])
-
-    cmd.extend([
-        "-c", "copy",
-        "-map_metadata", "0",
-        tmp_path,
-    ])
+def _remux_mkvmerge(filepath: str, keep_indices: list[int], local_dir: str,
+                    mkvmerge: str) -> bool:
+    """Strip subs using mkvmerge via local staging (fast)."""
+    basename = os.path.basename(filepath)
+    local_src = os.path.join(local_dir, "src_" + basename)
+    local_dst = os.path.join(local_dir, "dst_" + basename)
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=3600,
+        # Copy NAS → local
+        shutil.copy2(filepath, local_src)
+
+        # Build mkvmerge command: keep only specified subtitle tracks
+        # mkvmerge uses track IDs from the file. Subtitle track IDs need to be
+        # determined from the stream order. We use --subtitle-tracks with
+        # comma-separated indices (0-based within subtitle type).
+        if keep_indices:
+            sub_spec = ",".join(str(i) for i in keep_indices)
+            cmd = [mkvmerge, "-o", local_dst, "--subtitle-tracks", sub_spec, local_src]
+        else:
+            # No subs to keep — strip all
+            cmd = [mkvmerge, "-o", local_dst, "--no-subtitles", local_src]
+
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600,
                                 encoding="utf-8", errors="replace")
-        if result.returncode != 0:
-            print(f"  ERROR: ffmpeg failed for {os.path.basename(filepath)}")
+        # mkvmerge returns 0 for success, 1 for warnings (still ok), 2 for error
+        if result.returncode >= 2:
+            print(f"  ERROR: mkvmerge failed for {basename}")
             print(f"  stderr: {result.stderr[:500]}")
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
             return False
 
-        # Verify output exists and is reasonable size (at least 50% of original)
-        if not os.path.exists(tmp_path):
-            return False
-        tmp_size = os.path.getsize(tmp_path)
-        orig_size = os.path.getsize(filepath)
-        if tmp_size < orig_size * 0.5:
-            print(f"  ERROR: Output too small ({tmp_size} vs {orig_size}), keeping original")
-            os.remove(tmp_path)
+        if not os.path.exists(local_dst):
+            print(f"  ERROR: mkvmerge produced no output for {basename}")
             return False
 
-        # Replace original
-        os.replace(tmp_path, filepath)
-        saved = orig_size - tmp_size
+        dst_size = os.path.getsize(local_dst)
+        src_size = os.path.getsize(local_src)
+        if dst_size < src_size * 0.3:
+            print(f"  ERROR: Output too small ({dst_size} vs {src_size}), keeping original")
+            return False
+
+        # Copy result back to NAS and replace
+        shutil.copy2(local_dst, filepath)
+        saved = src_size - dst_size
         print(f"  Saved {saved / (1024**2):.1f} MB")
         return True
 
     except subprocess.TimeoutExpired:
-        print(f"  ERROR: Timeout for {os.path.basename(filepath)}")
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
+        print(f"  ERROR: Timeout for {basename}")
         return False
     except Exception as e:
         print(f"  ERROR: {e}")
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
         return False
+    finally:
+        for p in (local_src, local_dst):
+            if os.path.exists(p):
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+
+
+def _remux_ffmpeg(filepath: str, keep_indices: list[int], local_dir: str) -> bool:
+    """Strip subs using ffmpeg via local staging (fallback)."""
+    basename = os.path.basename(filepath)
+    local_src = os.path.join(local_dir, "src_" + basename)
+    local_dst = os.path.join(local_dir, "dst_" + basename)
+
+    try:
+        shutil.copy2(filepath, local_src)
+
+        cmd = ["ffmpeg", "-y", "-i", local_src, "-map", "0:v", "-map", "0:a"]
+        for idx in keep_indices:
+            cmd.extend(["-map", f"0:s:{idx}"])
+        cmd.extend(["-c", "copy", "-map_metadata", "0", local_dst])
+
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600,
+                                encoding="utf-8", errors="replace")
+        if result.returncode != 0:
+            print(f"  ERROR: ffmpeg failed for {basename}")
+            print(f"  stderr: {result.stderr[:500]}")
+            return False
+
+        if not os.path.exists(local_dst):
+            return False
+        dst_size = os.path.getsize(local_dst)
+        src_size = os.path.getsize(local_src)
+        if dst_size < src_size * 0.3:
+            print(f"  ERROR: Output too small ({dst_size} vs {src_size}), keeping original")
+            return False
+
+        shutil.copy2(local_dst, filepath)
+        saved = src_size - dst_size
+        print(f"  Saved {saved / (1024**2):.1f} MB")
+        return True
+
+    except subprocess.TimeoutExpired:
+        print(f"  ERROR: Timeout for {basename}")
+        return False
+    except Exception as e:
+        print(f"  ERROR: {e}")
+        return False
+    finally:
+        for p in (local_src, local_dst):
+            if os.path.exists(p):
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
 
 
 def main():
@@ -177,6 +248,16 @@ def main():
         print(f"\nRun with --execute to actually strip subtitles.")
         return
 
+    # Set up local staging directory
+    local_dir = os.path.join(str(STAGING_DIR), "strip_subs_tmp")
+    os.makedirs(local_dir, exist_ok=True)
+
+    mkvmerge = _find_mkvmerge()
+    if mkvmerge:
+        print(f"Using mkvmerge: {mkvmerge}")
+    else:
+        print("mkvmerge not found — falling back to ffmpeg")
+    print(f"Local staging: {local_dir}")
     print(f"Stripping subtitles from {len(files)} files...")
     print("(Stream copy only — no re-encoding, CPU only, safe with pipeline)\n")
 
@@ -189,22 +270,25 @@ def main():
         completed += 1
         elapsed = time.monotonic() - start_time
         if completed > 1 and elapsed > 0:
-            remaining = (len(files) - completed) * (elapsed / completed)
-            eta = f"~{remaining / 60:.0f}m" if remaining >= 60 else f"~{remaining:.0f}s"
+            rate = elapsed / (completed - 1)
+            remaining = (len(files) - completed) * rate
+            eta = f"ETA: ~{remaining / 60:.0f}m" if remaining >= 60 else f"ETA: ~{remaining:.0f}s"
         else:
-            eta = "..."
+            eta = ""
 
-        print(f"  Progress: {completed}/{len(files)} ({100 * completed / len(files):.0f}%) "
-              f"ETA: {eta} — {f['filename']}", flush=True)
+        print(f"  [{completed}/{len(files)}] {eta} — {f['filename']}", flush=True)
 
-        orig_size = 0
-        try:
-            orig_size = os.path.getsize(f["filepath"])
-        except OSError:
+        if not os.path.exists(f["filepath"]):
             print(f"  SKIP: file not found")
             continue
 
-        ok = _remux_strip_subs(f["filepath"], f["keep_indices"])
+        orig_size = os.path.getsize(f["filepath"])
+
+        if mkvmerge:
+            ok = _remux_mkvmerge(f["filepath"], f["keep_indices"], local_dir, mkvmerge)
+        else:
+            ok = _remux_ffmpeg(f["filepath"], f["keep_indices"], local_dir)
+
         if ok:
             success += 1
             try:
@@ -218,6 +302,12 @@ def main():
     print(f"\nDone: {success}/{len(files)} files processed in {elapsed_str}")
     print(f"Total saved: {total_saved / (1024**3):.2f} GB")
     print("\nRun a library rescan to update the media report.")
+
+    # Clean up staging
+    try:
+        os.rmdir(local_dir)
+    except OSError:
+        pass
 
 
 if __name__ == "__main__":
