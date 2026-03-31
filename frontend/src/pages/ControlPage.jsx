@@ -225,6 +225,7 @@ export function ControlPage({ wsControl }) {
       <ProcessRow name="plex_metadata" label="Plex Metadata Audit" startLabel="Run Audit" onFlash={showFlash} />
       <ProcessRow name="plex_apply_rules" label="Plex Apply Rules" startLabel="Apply Rules" onFlash={showFlash} />
       <ProcessRow name="detect_languages" label="Language Detect" startLabel="Run Scan" onFlash={showFlash} />
+      <ProcessRow name="detect_languages_whisper" label="Language Detect (Whisper)" startLabel="Run Whisper" onFlash={showFlash} badge="GPU — don't run with pipeline" />
       <ProcessRow name="apply_languages" label="Language Apply" startLabel="Apply Tags" onFlash={showFlash} />
       <div style={{ marginBottom: 32 }} />
 

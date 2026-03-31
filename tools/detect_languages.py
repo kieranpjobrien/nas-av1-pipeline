@@ -27,6 +27,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
@@ -244,6 +245,105 @@ def infer_audio_language(file_entry: dict, audio_idx: int) -> tuple[Optional[str
 
 
 # ---------------------------------------------------------------------------
+# Whisper-based audio language detection
+# ---------------------------------------------------------------------------
+
+_whisper_model = None  # lazy singleton
+
+
+def _get_whisper_model():
+    """Lazy-load the faster-whisper model (small, GPU). Cached as singleton."""
+    global _whisper_model
+    if _whisper_model is None:
+        try:
+            from faster_whisper import WhisperModel
+            _whisper_model = WhisperModel("small", device="cuda", compute_type="float16")
+            logging.info("Loaded faster-whisper model (small, cuda/float16)")
+        except Exception as e:
+            logging.warning(f"Failed to load whisper on GPU, trying CPU: {e}")
+            try:
+                from faster_whisper import WhisperModel
+                _whisper_model = WhisperModel("small", device="cpu", compute_type="int8")
+                logging.info("Loaded faster-whisper model (small, cpu/int8)")
+            except Exception as e2:
+                logging.error(f"Failed to load whisper model: {e2}")
+                return None
+    return _whisper_model
+
+
+def detect_audio_language_whisper(
+    filepath: str,
+    audio_stream_index: int,
+    sample_duration: int = 30,
+    sample_offset: int = 60,
+) -> tuple[Optional[str], float]:
+    """Detect language from an audio stream using faster-whisper.
+
+    Extracts a short audio sample via ffmpeg, then runs whisper's language
+    detection (no full transcription needed). Returns (lang_code, confidence)
+    or (None, 0.0) on failure.
+
+    Args:
+        filepath: Path to media file.
+        audio_stream_index: 0-based audio stream index.
+        sample_duration: Seconds of audio to sample (default 30).
+        sample_offset: Start offset in seconds (default 60, skip intros).
+    """
+    model = _get_whisper_model()
+    if model is None:
+        return None, 0.0
+
+    # Extract audio sample to a temp WAV file
+    tmp_wav = os.path.join(tempfile.gettempdir(), f"whisper_sample_{os.getpid()}_{audio_stream_index}.wav")
+    cmd = [
+        "ffmpeg", "-hide_banner", "-loglevel", "error",
+        "-ss", str(sample_offset),
+        "-i", filepath,
+        "-map", f"0:a:{audio_stream_index}",
+        "-t", str(sample_duration),
+        "-ac", "1",          # mono
+        "-ar", "16000",      # 16kHz (whisper native)
+        "-y", tmp_wav,
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, timeout=60)
+        if result.returncode != 0 or not os.path.exists(tmp_wav):
+            # Retry without offset (file might be shorter than 60s)
+            cmd[3] = "0"
+            result = subprocess.run(cmd, capture_output=True, timeout=60)
+            if result.returncode != 0 or not os.path.exists(tmp_wav):
+                return None, 0.0
+
+        # Check file isn't empty/tiny
+        if os.path.getsize(tmp_wav) < 10_000:
+            return None, 0.0
+
+        # Run whisper language detection
+        segments, info = model.transcribe(tmp_wav, beam_size=1, best_of=1,
+                                          language=None, without_timestamps=True)
+        # Consume the generator to finalise detection
+        for _ in segments:
+            break
+
+        lang = info.language
+        prob = info.language_probability
+
+        if lang and prob > 0.5:
+            return lang, round(prob, 3)
+        return None, 0.0
+
+    except Exception as e:
+        logging.debug(f"Whisper detection failed for {os.path.basename(filepath)} a:{audio_stream_index}: {e}")
+        return None, 0.0
+    finally:
+        if os.path.exists(tmp_wav):
+            try:
+                os.remove(tmp_wav)
+            except OSError:
+                pass
+
+
+# ---------------------------------------------------------------------------
 # Per-file processing
 # ---------------------------------------------------------------------------
 
@@ -343,7 +443,7 @@ def _infer_audio_from_sub_majority(
     return None, "insufficient context"
 
 
-def process_file(file_entry: dict) -> list[dict]:
+def process_file(file_entry: dict, use_whisper: bool = False, whisper_all: bool = False) -> list[dict]:
     """Return a list of detection results for all undetermined tracks in a file."""
     filepath = file_entry["filepath"]
     results = []
@@ -421,7 +521,7 @@ def process_file(file_entry: dict) -> list[dict]:
                 "chars_sampled": 0,
             })
 
-    # --- Pass 3: Audio tracks (existing heuristics + subtitle majority fallback) ---
+    # --- Pass 3: Audio tracks (heuristics → subtitle majority → whisper fallback) ---
     for audio_idx, stream in enumerate(file_entry.get("audio_streams", [])):
         lang = (stream.get("language") or "und").lower().strip()
         if lang not in UND_LANGS:
@@ -431,14 +531,34 @@ def process_file(file_entry: dict) -> list[dict]:
             detected, reason = _infer_audio_from_sub_majority(
                 file_entry, audio_idx, detected_text_langs,
             )
+        conf = 0.9 if detected and "majority" not in reason else (0.8 if detected else 0.0)
+        method = "heuristic"
+
+        # Whisper for audio tracks — either as fallback or for all und tracks
+        if use_whisper and (not detected or whisper_all):
+            w_lang, w_conf = detect_audio_language_whisper(filepath, audio_idx)
+            if w_lang and w_conf > 0.5:
+                if whisper_all and detected:
+                    # Running whisper on everything — override heuristic if whisper is more confident
+                    if w_conf > conf:
+                        detected = w_lang
+                        conf = w_conf
+                        method = "whisper"
+                        reason = f"whisper detection (prob={w_conf:.2f})"
+                else:
+                    detected = w_lang
+                    conf = w_conf
+                    method = "whisper"
+                    reason = f"whisper detection (prob={w_conf:.2f})"
+
         results.append({
             "filepath": filepath,
             "track_type": "audio",
             "stream_index": audio_idx,
             "codec": stream.get("codec", ""),
             "detected_language": detected,
-            "confidence": 0.9 if detected and "majority" not in reason else (0.8 if detected else 0.0),
-            "method": "heuristic",
+            "confidence": conf,
+            "method": method,
             "reason": reason,
         })
 
@@ -574,11 +694,33 @@ def main():
                         help="Minimum confidence to include/apply a detection (default: 0.80)")
     parser.add_argument("--file", type=str,
                         help="Process a single file instead of the full library")
+    parser.add_argument("--whisper", action="store_true",
+                        help="Use faster-whisper (GPU) for audio tracks that heuristics can't resolve")
+    parser.add_argument("--whisper-all", action="store_true",
+                        help="Run whisper on ALL undetermined audio tracks (not just heuristic failures)")
     parser.add_argument("--workers", type=int, default=4,
                         help="Parallel workers for subtitle extraction (default: 4)")
     parser.add_argument("--output", type=str, default=str(RESULTS_PATH),
                         help="Output JSON path")
     args = parser.parse_args()
+
+    use_whisper = args.whisper or args.whisper_all
+
+    # Check pipeline isn't encoding (whisper competes for GPU)
+    if use_whisper:
+        pipeline_state_path = STAGING_DIR / "pipeline_state.json"
+        if pipeline_state_path.exists():
+            try:
+                with open(pipeline_state_path, encoding="utf-8") as f:
+                    pstate = json.load(f)
+                encoding = [fp for fp, info in pstate.get("files", {}).items()
+                            if info.get("status") == "encoding" and not info.get("audio_only")]
+                if encoding:
+                    logging.error(f"Pipeline is actively encoding {len(encoding)} file(s) on GPU.")
+                    logging.error("Whisper would compete for VRAM. Stop the pipeline first, or run without --whisper.")
+                    sys.exit(1)
+            except Exception:
+                pass  # can't read state, proceed anyway
 
     # Load report
     try:
@@ -620,23 +762,38 @@ def main():
             logging.info("mkvpropedit: not found — will apply via ffmpeg (slower)")
             logging.info("  To use mkvpropedit: winget install MKVToolNix.MKVToolNix")
 
-    # Process files in parallel (subtitle extraction is I/O bound)
+    # Process files — parallel for subtitle extraction, serial for whisper (GPU)
     all_results = []
     completed = 0
     total = len(to_process)
 
-    with ThreadPoolExecutor(max_workers=args.workers) as executor:
-        futures = {executor.submit(process_file, entry): entry for entry in to_process}
-        for future in as_completed(futures):
+    if use_whisper:
+        # Serial processing when whisper is active (GPU is not thread-safe)
+        logging.info(f"Whisper mode — processing files sequentially (GPU)")
+        if use_whisper:
+            _get_whisper_model()  # pre-load model once
+        for entry in to_process:
             completed += 1
-            if completed % 50 == 0 or completed == total:
+            if completed % 10 == 0 or completed == total:
                 logging.info(f"  Progress: {completed}/{total}")
             try:
-                results = future.result()
+                results = process_file(entry, use_whisper=True, whisper_all=args.whisper_all)
                 all_results.extend(results)
             except Exception as e:
-                entry = futures[future]
                 logging.warning(f"  Error processing {entry.get('filename', '?')}: {e}")
+    else:
+        with ThreadPoolExecutor(max_workers=args.workers) as executor:
+            futures = {executor.submit(process_file, entry): entry for entry in to_process}
+            for future in as_completed(futures):
+                completed += 1
+                if completed % 50 == 0 or completed == total:
+                    logging.info(f"  Progress: {completed}/{total}")
+                try:
+                    results = future.result()
+                    all_results.extend(results)
+                except Exception as e:
+                    entry = futures[future]
+                    logging.warning(f"  Error processing {entry.get('filename', '?')}: {e}")
 
     # Filter to usable detections
     detected = [r for r in all_results if r.get("detected_language") and r.get("confidence", 0) >= args.min_confidence]

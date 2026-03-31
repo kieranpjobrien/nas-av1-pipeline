@@ -41,7 +41,7 @@ function lastMeaningfulLine(lines) {
   return null;
 }
 
-export function ProcessRow({ name, label, startLabel, onFlash }) {
+export function ProcessRow({ name, label, startLabel, onFlash, badge }) {
   const [status, setStatus] = useState("idle");
   const [pid, setPid] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -154,12 +154,20 @@ export function ProcessRow({ name, label, startLabel, onFlash }) {
         <div style={{ flex: "1 1 120px", minWidth: 0 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <span style={{ color: PALETTE.text, fontSize: 14, fontWeight: 600 }}>{label}</span>
-            {isRunning && isCpuOnly && (
+            {isRunning && isCpuOnly && !badge && (
               <span style={{
                 fontSize: 10, color: PALETTE.green, background: PALETTE.green + "18",
                 padding: "1px 6px", borderRadius: 4, whiteSpace: "nowrap",
               }}>
                 CPU only — safe with pipeline
+              </span>
+            )}
+            {badge && (
+              <span style={{
+                fontSize: 10, color: PALETTE.accentWarm || "#f97316", background: (PALETTE.accentWarm || "#f97316") + "18",
+                padding: "1px 6px", borderRadius: 4, whiteSpace: "nowrap",
+              }}>
+                {badge}
               </span>
             )}
           </div>

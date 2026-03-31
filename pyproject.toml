@@ -5,6 +5,7 @@ description = "AV1 re-encoding pipeline, dashboard, and NAS utility tools"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115",
+    "faster-whisper>=1.2.1",
     "langdetect>=1.0.9",
     "uvicorn[standard]>=0.34",
 ]
