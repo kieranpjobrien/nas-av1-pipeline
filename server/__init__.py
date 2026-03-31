@@ -169,10 +169,6 @@ PROCESS_CONFIGS = {
         "cmd": [sys.executable, "-m", "tools.strip_subs", "--execute"],
         "cwd": str(Path(__file__).parent.parent),
     },
-    "detect_languages": {
-        "cmd": [sys.executable, "-m", "tools.detect_languages", "--workers", "6"],
-        "cwd": str(Path(__file__).parent.parent),
-    },
     "detect_languages_whisper": {
         "cmd": [sys.executable, "-m", "tools.detect_languages", "--whisper-all"],
         "cwd": str(Path(__file__).parent.parent),
@@ -686,14 +682,6 @@ def get_process_logs(name: str, last_n: int = 50):
     if name not in VALID_PROCESS_NAMES:
         raise HTTPException(404, f"Unknown process: {name}")
     return {"lines": pm.get_logs(name, last_n)}
-
-
-@app.get("/api/language-detections")
-def get_language_detections():
-    data = read_json_safe(STAGING_DIR / "control" / "language_detections.json")
-    if data is None:
-        return {"detected": [], "low_confidence": [], "failed": [], "total_processed_files": 0, "total_tracks_checked": 0}
-    return data
 
 
 @app.get("/api/mkvpropedit-available")

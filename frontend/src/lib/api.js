@@ -65,6 +65,5 @@ export const api = {
   getFileDetail: (path) => fetchJSON(`/file-detail?path=${encodeURIComponent(path)}`),
   getConfig: () => fetchJSON("/config"),
   setConfig: (overrides) => putJSON("/config", overrides),
-  getLanguageDetections: () => fetchJSON("/language-detections"),
   getMkvpropedAvailable: () => fetchJSON("/mkvpropedit-available"),
 };

@@ -56,6 +56,23 @@ TEXT_SUB_CODECS = {"subrip", "srt", "ass", "ssa", "webvtt", "mov_text", "text", 
 BITMAP_SUB_CODECS = {"dvd_subtitle", "hdmv_pgs_subtitle", "dvbsub", "xsub", "pgssub"}
 UND_LANGS = {"und", "unk", ""}
 
+# Tesseract common install locations
+_TESSERACT_SEARCH = [
+    r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+    r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+]
+
+
+def _find_tesseract() -> Optional[str]:
+    """Find tesseract binary — check PATH first, then common install dirs."""
+    found = shutil.which("tesseract")
+    if found:
+        return found
+    for path in _TESSERACT_SEARCH:
+        if os.path.isfile(path):
+            return path
+    return None
+
 # ISO 639-1 (2-letter) → ISO 639-2/B (3-letter) — what MKV/mkvpropedit expects
 _ISO1_TO_ISO2 = {
     "af": "afr", "ar": "ara", "az": "aze", "be": "bel", "bg": "bul",
@@ -88,7 +105,6 @@ def to_iso2(lang: str) -> str:
     """Normalise any detected language code to ISO 639-2 for mkvpropedit."""
     return _ISO1_TO_ISO2.get(lang.lower(), lang.lower())
 
-RESULTS_PATH = STAGING_DIR / "control" / "language_detections.json"
 
 
 # ---------------------------------------------------------------------------
@@ -128,6 +144,81 @@ def extract_subtitle_text(filepath: str, sub_stream_index: int, max_chars: int =
     # Collapse whitespace
     raw = " ".join(raw.split())
     return raw[:max_chars] if raw.strip() else None
+
+
+def extract_bitmap_subtitle_text(
+    filepath: str,
+    sub_stream_index: int,
+    sample_frames: int = 10,
+    max_chars: int = 4000,
+) -> Optional[str]:
+    """Extract text from a bitmap subtitle stream (PGS/DVD) via ffmpeg + Tesseract OCR.
+
+    Extracts the first N subtitle frames as PNG images, runs Tesseract on each,
+    and aggregates the text for language detection.
+
+    Returns stripped text or None on failure / if Tesseract is not installed.
+    """
+    tesseract = _find_tesseract()
+    if not tesseract:
+        return None
+
+    tmp_dir = os.path.join(tempfile.gettempdir(), f"ocr_sub_{os.getpid()}_{sub_stream_index}")
+    os.makedirs(tmp_dir, exist_ok=True)
+
+    try:
+        # Extract subtitle frames as images
+        pattern = os.path.join(tmp_dir, "sub_%04d.png")
+        cmd = [
+            "ffmpeg", "-hide_banner", "-loglevel", "error",
+            "-i", filepath,
+            "-map", f"0:s:{sub_stream_index}",
+            "-t", "300",   # first 5 minutes
+            "-frames:v", str(sample_frames),
+            pattern,
+        ]
+        try:
+            subprocess.run(cmd, capture_output=True, timeout=120)
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            return None
+
+        # Find extracted images
+        images = sorted(
+            f for f in os.listdir(tmp_dir) if f.endswith(".png")
+        )[:sample_frames]
+
+        if not images:
+            return None
+
+        # OCR each image
+        all_text = []
+        for img_name in images:
+            img_path = os.path.join(tmp_dir, img_name)
+            try:
+                ocr_cmd = [tesseract, img_path, "stdout", "--oem", "3", "--psm", "6"]
+                result = subprocess.run(ocr_cmd, capture_output=True, text=True, timeout=30)
+                if result.returncode == 0 and result.stdout.strip():
+                    all_text.append(result.stdout.strip())
+            except (subprocess.TimeoutExpired, FileNotFoundError):
+                continue
+
+        if not all_text:
+            return None
+
+        combined = " ".join(all_text)
+        # Clean OCR artifacts
+        combined = re.sub(r"[|_]{2,}", "", combined)
+        combined = " ".join(combined.split())
+        return combined[:max_chars] if combined.strip() else None
+
+    finally:
+        # Clean up temp images
+        try:
+            for f in os.listdir(tmp_dir):
+                os.remove(os.path.join(tmp_dir, f))
+            os.rmdir(tmp_dir)
+        except OSError:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -489,7 +580,7 @@ def process_file(file_entry: dict, use_whisper: bool = False, whisper_all: bool 
 
     results.extend(text_results)
 
-    # --- Pass 2: Infer PGS/DVD subs from sibling text subs ---
+    # --- Pass 2: Bitmap subs — OCR first, then sibling inference fallback ---
     pgs_inferred = _infer_pgs_from_siblings(file_entry, detected_text_langs)
     for sub_all_idx, stream in enumerate(file_entry.get("subtitle_streams", [])):
         lang = (stream.get("language") or "und").lower().strip()
@@ -497,6 +588,25 @@ def process_file(file_entry: dict, use_whisper: bool = False, whisper_all: bool 
         if lang not in UND_LANGS or codec not in BITMAP_SUB_CODECS:
             continue
 
+        # Try OCR first (most accurate for bitmap subs)
+        ocr_text = extract_bitmap_subtitle_text(filepath, sub_all_idx)
+        if ocr_text:
+            detected, confidence = detect_language(ocr_text)
+            if detected and detected != "und" and confidence >= 0.5:
+                detected_text_langs[sub_all_idx] = detected  # feed back for other heuristics
+                results.append({
+                    "filepath": filepath,
+                    "track_type": "subtitle",
+                    "stream_index": sub_all_idx,
+                    "codec": codec,
+                    "detected_language": detected,
+                    "confidence": confidence,
+                    "method": "ocr_extraction",
+                    "chars_sampled": len(ocr_text),
+                })
+                continue
+
+        # Fall back to sibling inference
         if sub_all_idx in pgs_inferred:
             inferred_lang, reason = pgs_inferred[sub_all_idx]
             results.append({
@@ -563,6 +673,118 @@ def process_file(file_entry: dict, use_whisper: bool = False, whisper_all: bool 
         })
 
     return results
+
+
+# ---------------------------------------------------------------------------
+# Enriching media report in-place
+# ---------------------------------------------------------------------------
+
+def enrich_report(
+    report: dict,
+    use_whisper: bool = False,
+    whisper_all: bool = False,
+    workers: int = 6,
+    min_confidence: float = 0.80,
+) -> dict:
+    """Run language detection on all files and patch results into report entries.
+
+    Modifies the report dict in-place — adds `detected_language`, `detection_confidence`,
+    and `detection_method` fields to each audio_stream and subtitle_stream entry that
+    has an undetermined language tag.
+
+    Returns the modified report.
+    """
+    files = report.get("files", [])
+
+    # Filter to files with undetermined tracks
+    to_process = []
+    for entry in files:
+        has_und = any(
+            (s.get("language") or "und").lower().strip() in UND_LANGS
+            for streams in (entry.get("subtitle_streams", []), entry.get("audio_streams", []))
+            for s in streams
+        )
+        if has_und:
+            to_process.append(entry)
+
+    if not to_process:
+        logging.info("No undetermined tracks found — skipping language detection")
+        return report
+
+    logging.info(f"Language detection: {len(to_process)} files with undetermined tracks")
+    if _find_tesseract():
+        logging.info(f"  Tesseract: found at {_find_tesseract()}")
+    else:
+        logging.info("  Tesseract: not found — bitmap OCR disabled")
+
+    completed = 0
+    total = len(to_process)
+    detection_stats = {"detected": 0, "failed": 0}
+
+    if use_whisper:
+        logging.info("  Whisper: enabled — processing sequentially (GPU)")
+        _get_whisper_model()
+        for entry in to_process:
+            completed += 1
+            if completed % 10 == 0 or completed == total:
+                logging.info(f"  Language progress: {completed}/{total}")
+            _apply_detections_to_entry(entry, use_whisper, whisper_all, min_confidence, detection_stats)
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {executor.submit(process_file, entry): entry for entry in to_process}
+            for future in as_completed(futures):
+                completed += 1
+                if completed % 50 == 0 or completed == total:
+                    logging.info(f"  Language progress: {completed}/{total}")
+                try:
+                    entry = futures[future]
+                    results = future.result()
+                    _patch_entry_from_results(entry, results, min_confidence, detection_stats)
+                except Exception as e:
+                    logging.warning(f"  Language detection error: {e}")
+
+    logging.info(f"  Language detection complete: {detection_stats['detected']} detected, "
+                 f"{detection_stats['failed']} unresolved")
+
+    # Add scan metadata to summary
+    report.setdefault("summary", {})["language_scan_date"] = datetime.now().isoformat()
+    report["summary"]["language_detected_count"] = detection_stats["detected"]
+    report["summary"]["language_unresolved_count"] = detection_stats["failed"]
+
+    return report
+
+
+def _apply_detections_to_entry(
+    entry: dict, use_whisper: bool, whisper_all: bool,
+    min_confidence: float, stats: dict,
+) -> None:
+    """Process a single file entry and patch detection results in-place (whisper mode)."""
+    results = process_file(entry, use_whisper=use_whisper, whisper_all=whisper_all)
+    _patch_entry_from_results(entry, results, min_confidence, stats)
+
+
+def _patch_entry_from_results(
+    entry: dict, results: list[dict], min_confidence: float, stats: dict,
+) -> None:
+    """Patch detection results directly onto the stream dicts in the entry."""
+    for det in results:
+        track_type = det["track_type"]
+        idx = det["stream_index"]
+        streams = entry.get(f"{track_type}_streams", [])
+        if idx >= len(streams):
+            continue
+
+        lang = det.get("detected_language")
+        conf = det.get("confidence", 0)
+        method = det.get("method", "")
+
+        if lang and lang != "und" and conf >= min_confidence:
+            streams[idx]["detected_language"] = lang
+            streams[idx]["detection_confidence"] = conf
+            streams[idx]["detection_method"] = method
+            stats["detected"] = stats.get("detected", 0) + 1
+        else:
+            stats["failed"] = stats.get("failed", 0) + 1
 
 
 # ---------------------------------------------------------------------------
@@ -689,19 +911,15 @@ def main():
 
     parser = argparse.ArgumentParser(description="Detect languages for undetermined subtitle/audio tracks")
     parser.add_argument("--apply", action="store_true",
-                        help="Write detected languages back to MKV files using mkvpropedit")
-    parser.add_argument("--min-confidence", type=float, default=0.80,
-                        help="Minimum confidence to include/apply a detection (default: 0.80)")
-    parser.add_argument("--file", type=str,
-                        help="Process a single file instead of the full library")
+                        help="Write detected languages back to MKV files using mkvpropedit/ffmpeg")
+    parser.add_argument("--min-confidence", type=float, default=0.85,
+                        help="Minimum confidence to apply a detection (default: 0.85)")
     parser.add_argument("--whisper", action="store_true",
                         help="Use faster-whisper (GPU) for audio tracks that heuristics can't resolve")
     parser.add_argument("--whisper-all", action="store_true",
-                        help="Run whisper on ALL undetermined audio tracks (not just heuristic failures)")
-    parser.add_argument("--workers", type=int, default=4,
-                        help="Parallel workers for subtitle extraction (default: 4)")
-    parser.add_argument("--output", type=str, default=str(RESULTS_PATH),
-                        help="Output JSON path")
+                        help="Run whisper on ALL undetermined audio tracks")
+    parser.add_argument("--workers", type=int, default=6,
+                        help="Parallel workers for subtitle extraction (default: 6)")
     args = parser.parse_args()
 
     use_whisper = args.whisper or args.whisper_all
@@ -720,9 +938,9 @@ def main():
                     logging.error("Whisper would compete for VRAM. Stop the pipeline first, or run without --whisper.")
                     sys.exit(1)
             except Exception:
-                pass  # can't read state, proceed anyway
+                pass
 
-    # Load report
+    # Load media report
     try:
         with open(MEDIA_REPORT, encoding="utf-8") as f:
             report = json.load(f)
@@ -730,119 +948,68 @@ def main():
         logging.error(f"media_report.json not found at {MEDIA_REPORT}")
         sys.exit(1)
 
-    all_files = report.get("files", [])
+    # Enrich report in-place with language detections
+    report = enrich_report(
+        report,
+        use_whisper=use_whisper,
+        whisper_all=args.whisper_all,
+        workers=args.workers,
+        min_confidence=args.min_confidence,
+    )
 
-    if args.file:
-        needle = os.path.normpath(args.file).lower()
-        all_files = [e for e in all_files if os.path.normpath(e["filepath"]).lower() == needle]
-        if not all_files:
-            logging.error(f"File not found in report: {args.file}")
-            sys.exit(1)
+    # Write enriched report back to media_report.json
+    tmp_path = str(MEDIA_REPORT) + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(report, f, indent=2, ensure_ascii=False)
+    os.replace(tmp_path, str(MEDIA_REPORT))
+    logging.info(f"Updated {MEDIA_REPORT}")
 
-    # Filter to files with at least one undetermined track
-    to_process = []
-    for entry in all_files:
-        has_und_sub = any(
-            (s.get("language") or "und").lower().strip() in UND_LANGS
-            for s in entry.get("subtitle_streams", [])
-        )
-        has_und_audio = any(
-            (s.get("language") or "und").lower().strip() in UND_LANGS
-            for s in entry.get("audio_streams", [])
-        )
-        if has_und_sub or has_und_audio:
-            to_process.append(entry)
-
-    logging.info(f"Files with undetermined tracks: {len(to_process)}")
-    logging.info(f"Min confidence: {args.min_confidence}")
+    # Apply if requested — write detected languages to actual MKV file metadata
     if args.apply:
+        logging.info(f"\nApplying detections to files via mkvpropedit/ffmpeg...")
         if _find_mkvpropedit():
-            logging.info(f"mkvpropedit: found at {_find_mkvpropedit()} — will apply via mkvpropedit")
+            logging.info(f"  mkvpropedit: {_find_mkvpropedit()}")
         else:
-            logging.info("mkvpropedit: not found — will apply via ffmpeg (slower)")
-            logging.info("  To use mkvpropedit: winget install MKVToolNix.MKVToolNix")
-
-    # Process files — parallel for subtitle extraction, serial for whisper (GPU)
-    all_results = []
-    completed = 0
-    total = len(to_process)
-
-    if use_whisper:
-        # Serial processing when whisper is active (GPU is not thread-safe)
-        logging.info(f"Whisper mode — processing files sequentially (GPU)")
-        if use_whisper:
-            _get_whisper_model()  # pre-load model once
-        for entry in to_process:
-            completed += 1
-            if completed % 10 == 0 or completed == total:
-                logging.info(f"  Progress: {completed}/{total}")
-            try:
-                results = process_file(entry, use_whisper=True, whisper_all=args.whisper_all)
-                all_results.extend(results)
-            except Exception as e:
-                logging.warning(f"  Error processing {entry.get('filename', '?')}: {e}")
-    else:
-        with ThreadPoolExecutor(max_workers=args.workers) as executor:
-            futures = {executor.submit(process_file, entry): entry for entry in to_process}
-            for future in as_completed(futures):
-                completed += 1
-                if completed % 50 == 0 or completed == total:
-                    logging.info(f"  Progress: {completed}/{total}")
-                try:
-                    results = future.result()
-                    all_results.extend(results)
-                except Exception as e:
-                    entry = futures[future]
-                    logging.warning(f"  Error processing {entry.get('filename', '?')}: {e}")
-
-    # Filter to usable detections
-    detected = [r for r in all_results if r.get("detected_language") and r.get("confidence", 0) >= args.min_confidence]
-    low_confidence = [r for r in all_results if r.get("detected_language") and r.get("confidence", 0) < args.min_confidence]
-    failed = [r for r in all_results if not r.get("detected_language")]
-
-    logging.info(f"\nResults:")
-    logging.info(f"  Detected (>= {args.min_confidence}): {len(detected)}")
-    logging.info(f"  Low confidence:                      {len(low_confidence)}")
-    logging.info(f"  Failed/skipped:                      {len(failed)}")
-
-    # Language distribution
-    from collections import Counter
-    lang_counts = Counter(r["detected_language"] for r in detected)
-    logging.info(f"\nDetected language distribution:")
-    for lang, count in lang_counts.most_common(15):
-        logging.info(f"  {lang}: {count}")
-
-    # Save results
-    output = {
-        "generated": datetime.now().isoformat(),
-        "min_confidence": args.min_confidence,
-        "total_processed_files": len(to_process),
-        "total_tracks_checked": len(all_results),
-        "detected": detected,
-        "low_confidence": low_confidence,
-        "failed": failed,
-    }
-    os.makedirs(os.path.dirname(args.output), exist_ok=True)
-    with open(args.output, "w", encoding="utf-8") as f:
-        json.dump(output, f, indent=2, ensure_ascii=False)
-    logging.info(f"\nResults saved to {args.output}")
-
-    # Apply if requested — group detections by filepath and process one file at a time
-    if args.apply:
-        logging.info(f"\nApplying {len(detected)} detections across files...")
-        by_file: dict[str, list[dict]] = {}
-        for det in detected:
-            by_file.setdefault(det["filepath"], []).append(det)
+            logging.info("  mkvpropedit: not found — using ffmpeg (slower)")
 
         total_applied = 0
         total_failed = 0
-        for file_num, (fp, file_dets) in enumerate(by_file.items(), 1):
-            logging.info(f"  [{file_num}/{len(by_file)}] {Path(fp).name} ({len(file_dets)} track(s))")
-            applied, failed = apply_detections_for_file(fp, file_dets, args.min_confidence)
+        file_count = 0
+
+        for entry in report.get("files", []):
+            # Collect detections from inline fields
+            detections = []
+            for i, s in enumerate(entry.get("subtitle_streams", [])):
+                if s.get("detected_language"):
+                    detections.append({
+                        "track_type": "subtitle",
+                        "stream_index": i,
+                        "detected_language": s["detected_language"],
+                        "confidence": s.get("detection_confidence", 0),
+                        "method": s.get("detection_method", ""),
+                    })
+            for i, a in enumerate(entry.get("audio_streams", [])):
+                if a.get("detected_language"):
+                    detections.append({
+                        "track_type": "audio",
+                        "stream_index": i,
+                        "detected_language": a["detected_language"],
+                        "confidence": a.get("detection_confidence", 0),
+                        "method": a.get("detection_method", ""),
+                    })
+
+            if not detections:
+                continue
+
+            file_count += 1
+            logging.info(f"  [{file_count}] {entry['filename']} ({len(detections)} track(s))")
+            applied, failed = apply_detections_for_file(
+                entry["filepath"], detections, args.min_confidence,
+            )
             total_applied += applied
             total_failed += failed
 
-        logging.info(f"Applied: {total_applied}/{len(detected)}  Failed: {total_failed}")
+        logging.info(f"Applied: {total_applied}  Failed: {total_failed}")
 
 
 if __name__ == "__main__":

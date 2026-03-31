@@ -229,8 +229,7 @@ export function ControlPage({ wsControl }) {
 
       {/* Language Detection */}
       <div style={{ marginTop: 16, marginBottom: 4, color: PALETTE.textMuted, fontSize: 11, fontWeight: 600, textTransform: "uppercase", letterSpacing: 1 }}>Language Detection</div>
-      <ProcessRow name="detect_languages" label="Language Detect (Text)" startLabel="Run Scan" onFlash={showFlash} />
-      <ProcessRow name="detect_languages_whisper" label="Language Detect (Whisper)" startLabel="Run Whisper" onFlash={showFlash} badge="GPU — stop pipeline first" />
+      <ProcessRow name="detect_languages_whisper" label="Deep Scan (Whisper)" startLabel="Run Once" onFlash={showFlash} badge="GPU — stop pipeline first" />
       <ProcessRow name="apply_languages" label="Apply Language Tags" startLabel="Apply Tags" onFlash={showFlash} />
 
       {/* Plex */}

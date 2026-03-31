@@ -68,7 +68,10 @@ def _get_files_with_non_english_subs(report_path: Path,
         strip_size_estimate = 0
 
         for i, sub in enumerate(subs):
+            # Use detected_language if file tag is undetermined
             lang = (sub.get("language") or "").lower().strip()
+            if lang in ("und", "unk", "") and sub.get("detected_language"):
+                lang = sub["detected_language"].lower().strip()
             codec = (sub.get("codec") or "").lower()
             is_bitmap = codec in ("hdmv_pgs_subtitle", "dvd_subtitle", "dvdsub",
                                    "pgssub", "pgs")

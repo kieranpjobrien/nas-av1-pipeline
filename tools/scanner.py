@@ -394,6 +394,10 @@ def main():
                         help="After scan, write CSV of files missing English audio")
     parser.add_argument("--missing-subs-csv", type=str, default=None, metavar="PATH",
                         help="After scan, write CSV of files missing subtitles or English subs")
+    parser.add_argument("--skip-lang-detect", action="store_true",
+                        help="Skip language detection post-processing (fast probe-only scan)")
+    parser.add_argument("--whisper", action="store_true",
+                        help="Use faster-whisper (GPU) for audio language detection during scan")
     args = parser.parse_args()
 
     all_files = []
@@ -499,6 +503,17 @@ def main():
         "summary": summary,
         "files": results,
     }
+
+    # Post-processing: language detection on undetermined tracks
+    if not args.skip_lang_detect:
+        print(f"\nRunning language detection on undetermined tracks...")
+        from tools.detect_languages import enrich_report
+        report = enrich_report(
+            report,
+            use_whisper=args.whisper,
+            whisper_all=args.whisper,
+            workers=args.workers,
+        )
 
     output_path = args.output
     tmp_path = output_path + ".tmp"

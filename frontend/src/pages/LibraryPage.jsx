@@ -336,42 +336,32 @@ function DuplicateGroups({ onReload, onFileClick }) {
   );
 }
 
-function LanguageHealth({ files, onReload }) {
-  const [detections, setDetections] = useState(null);
-  const [detectRunning, setDetectRunning] = useState(false);
+function LanguageHealth({ files, scanDate, onReload }) {
   const [applyRunning, setApplyRunning] = useState(false);
 
-  useEffect(() => {
-    api.getLanguageDetections().then(setDetections).catch(() => {});
-  }, []);
-
-  // Count undetermined audio and subtitle tracks directly from the files array
-  let undSubs = 0;
-  let undAudio = 0;
+  // Count from inline fields: "truly unknown" = und tag AND no detected_language
+  let undSubs = 0, undAudio = 0, detectedSubs = 0, detectedAudio = 0;
   for (const f of files) {
     for (const s of f.subtitle_streams || []) {
-      if (["und", "unk", ""].includes((s.language || "und").toLowerCase())) undSubs++;
+      const tagUnd = ["und", "unk", ""].includes((s.language || "und").toLowerCase());
+      if (tagUnd && s.detected_language) detectedSubs++;
+      else if (tagUnd) undSubs++;
     }
     for (const a of f.audio_streams || []) {
-      if (["und", "unk", ""].includes((a.language || "und").toLowerCase())) undAudio++;
+      const tagUnd = ["und", "unk", ""].includes((a.language || "und").toLowerCase());
+      if (tagUnd && a.detected_language) detectedAudio++;
+      else if (tagUnd) undAudio++;
     }
   }
 
-  if (undSubs === 0 && undAudio === 0) return null;
+  const totalDetected = detectedSubs + detectedAudio;
+  const totalUnd = undSubs + undAudio;
 
-  const lastScan = detections?.generated
-    ? new Date(detections.generated).toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" })
+  if (totalDetected === 0 && totalUnd === 0) return null;
+
+  const lastScan = scanDate
+    ? new Date(scanDate).toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" })
     : "Never";
-  const tracksTagged = detections?.detected?.length ?? 0;
-
-  const handleDetect = async () => {
-    setDetectRunning(true);
-    try {
-      await api.startProcess("detect_languages");
-    } catch {
-      setDetectRunning(false);
-    }
-  };
 
   const handleApply = async () => {
     setApplyRunning(true);
@@ -382,23 +372,6 @@ function LanguageHealth({ files, onReload }) {
     }
   };
 
-  // Poll detect_languages process until complete
-  useEffect(() => {
-    if (!detectRunning) return;
-    const id = setInterval(async () => {
-      try {
-        const s = await api.getProcessStatus("detect_languages");
-        if (s.status !== "running") {
-          setDetectRunning(false);
-          // Refresh detections results after scan completes
-          api.getLanguageDetections().then(setDetections).catch(() => {});
-        }
-      } catch { /* ignore */ }
-    }, 2000);
-    return () => clearInterval(id);
-  }, [detectRunning]);
-
-  // Poll apply_languages process until complete, then trigger library reload
   useEffect(() => {
     if (!applyRunning) return;
     const id = setInterval(async () => {
@@ -413,50 +386,43 @@ function LanguageHealth({ files, onReload }) {
     return () => clearInterval(id);
   }, [applyRunning, onReload]);
 
-  const btnBase = {
-    border: "none", borderRadius: 8, padding: "8px 18px",
-    fontSize: 13, fontWeight: 600,
-  };
+  const btnBase = { border: "none", borderRadius: 8, padding: "8px 18px", fontSize: 13, fontWeight: 600 };
 
   return (
     <div>
       <SectionTitle>Language Health</SectionTitle>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 12, marginBottom: 20, alignItems: "flex-start" }}>
-        <StatCard label="Undetermined Subtitles" value={fmtNum(undSubs)} colour={undSubs > 0 ? PALETTE.accentWarm : undefined} />
-        <StatCard label="Undetermined Audio" value={fmtNum(undAudio)} colour={undAudio > 0 ? PALETTE.accentWarm : undefined} />
+        <StatCard label="Unresolved Subtitles" value={fmtNum(undSubs)} colour={undSubs > 0 ? PALETTE.accentWarm : undefined} />
+        <StatCard label="Unresolved Audio" value={fmtNum(undAudio)} colour={undAudio > 0 ? PALETTE.accentWarm : undefined} />
+        <StatCard label="Detected (pending apply)" value={fmtNum(totalDetected)} colour={totalDetected > 0 ? PALETTE.accent : undefined} />
         <StatCard label="Last Scan" value={lastScan} />
-        <StatCard label="Tracks Tagged" value={fmtNum(tracksTagged)} />
       </div>
 
-      <div style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 20, flexWrap: "wrap" }}>
-        <button
-          onClick={handleDetect}
-          disabled={detectRunning || applyRunning}
-          style={{
-            ...btnBase,
-            background: (detectRunning || applyRunning) ? PALETTE.surfaceLight : PALETTE.accent,
-            color: (detectRunning || applyRunning) ? PALETTE.textMuted : "#fff",
-            cursor: (detectRunning || applyRunning) ? "default" : "pointer",
-          }}
-        >
-          {detectRunning ? "Scanning..." : "Detect Languages"}
-        </button>
-        <button
-          onClick={handleApply}
-          disabled={detectRunning || applyRunning || tracksTagged === 0}
-          style={{
-            ...btnBase,
-            background: (detectRunning || applyRunning || tracksTagged === 0) ? PALETTE.surfaceLight : PALETTE.accentWarm,
-            color: (detectRunning || applyRunning || tracksTagged === 0) ? PALETTE.textMuted : "#fff",
-            cursor: (detectRunning || applyRunning || tracksTagged === 0) ? "default" : "pointer",
-          }}
-        >
-          {applyRunning ? "Applying..." : "Apply Languages"}
-        </button>
-        <span style={{ color: PALETTE.textMuted, fontSize: 11 }}>
-          Apply uses mkvpropedit if installed, otherwise ffmpeg (slower).
-        </span>
-      </div>
+      {totalDetected > 0 && (
+        <div style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 20, flexWrap: "wrap" }}>
+          <button
+            onClick={handleApply}
+            disabled={applyRunning}
+            style={{
+              ...btnBase,
+              background: applyRunning ? PALETTE.surfaceLight : PALETTE.accentWarm,
+              color: applyRunning ? PALETTE.textMuted : "#fff",
+              cursor: applyRunning ? "default" : "pointer",
+            }}
+          >
+            {applyRunning ? "Applying..." : `Apply ${fmtNum(totalDetected)} Tags`}
+          </button>
+          <span style={{ color: PALETTE.textMuted, fontSize: 11 }}>
+            Writes detected languages to files. Uses mkvpropedit if installed, otherwise ffmpeg.
+          </span>
+        </div>
+      )}
+
+      {totalUnd > 0 && (
+        <div style={{ color: PALETTE.textMuted, fontSize: 11, marginBottom: 16 }}>
+          {fmtNum(totalUnd)} tracks still unresolved. Run Whisper from Controls for audio, or install Tesseract for bitmap subs.
+        </div>
+      )}
     </div>
   );
 }
@@ -1834,7 +1800,7 @@ export function LibraryPage({ onFileClick }) {
       <SubtitleAnalysis files={files} />
 
       {/* Language Health */}
-      <LanguageHealth files={files} onReload={loadReport} />
+      <LanguageHealth files={files} scanDate={data?.summary?.language_scan_date} onReload={loadReport} />
 
       {/* Filename Health */}
       <FilenameHealth files={files} onReload={loadReport} />
