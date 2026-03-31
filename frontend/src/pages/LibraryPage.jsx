@@ -1454,23 +1454,62 @@ function StatusBadge({ status }) {
   );
 }
 
+const SORT_OPTIONS = [
+  { key: "size-desc", label: "Size ↓" },
+  { key: "size-asc", label: "Size ↑" },
+  { key: "name-asc", label: "A → Z" },
+  { key: "name-desc", label: "Z → A" },
+];
+
+function sortFiles(files, sortKey) {
+  const sorted = [...files];
+  switch (sortKey) {
+    case "size-asc": return sorted.sort((a, b) => a.file_size_bytes - b.file_size_bytes);
+    case "name-asc": return sorted.sort((a, b) => (a.filename || "").localeCompare(b.filename || ""));
+    case "name-desc": return sorted.sort((a, b) => (b.filename || "").localeCompare(a.filename || ""));
+    case "size-desc":
+    default: return sorted.sort((a, b) => b.file_size_bytes - a.file_size_bytes);
+  }
+}
+
+const PAGE_SIZE = 100;
+
 function FilteredFileList({ files, title, onFileClick, onClose, statusMap }) {
   if (!files || files.length === 0) return null;
-  const sorted = [...files].sort((a, b) => b.file_size_bytes - a.file_size_bytes);
-  const shown = sorted.slice(0, 100);
+  const [sortKey, setSortKey] = useState("size-desc");
+  const [limit, setLimit] = useState(PAGE_SIZE);
+
+  const sorted = sortFiles(files, sortKey);
+  const shown = sorted.slice(0, limit);
+  const hasMore = limit < files.length;
+
+  const pillStyle = (active) => ({
+    background: active ? PALETTE.accent : "transparent",
+    border: `1px solid ${active ? PALETTE.accent : PALETTE.border}`,
+    borderRadius: 6, padding: "3px 8px", fontSize: 10, cursor: "pointer",
+    color: active ? "#fff" : PALETTE.textMuted, fontWeight: active ? 600 : 400,
+  });
+
   return (
     <div style={{
       background: PALETTE.surface, border: `1px solid ${PALETTE.accent}44`,
       borderRadius: 12, padding: 16, marginTop: 12, marginBottom: 24,
     }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, flexWrap: "wrap", gap: 8 }}>
         <div style={{ color: PALETTE.text, fontSize: 14, fontWeight: 600 }}>
           {title} — {fmtNum(files.length)} files
         </div>
-        <button onClick={onClose} style={{
-          background: "transparent", border: `1px solid ${PALETTE.border}`, borderRadius: 6,
-          color: PALETTE.textMuted, padding: "4px 10px", fontSize: 11, cursor: "pointer",
-        }}>✕ Close</button>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          {SORT_OPTIONS.map((opt) => (
+            <button key={opt.key} onClick={() => { setSortKey(opt.key); setLimit(PAGE_SIZE); }} style={pillStyle(sortKey === opt.key)}>
+              {opt.label}
+            </button>
+          ))}
+          <button onClick={onClose} style={{
+            background: "transparent", border: `1px solid ${PALETTE.border}`, borderRadius: 6,
+            color: PALETTE.textMuted, padding: "4px 10px", fontSize: 11, cursor: "pointer", marginLeft: 8,
+          }}>✕ Close</button>
+        </div>
       </div>
       <div style={{ maxHeight: 400, overflow: "auto" }}>
         {shown.map((f) => (
@@ -1497,11 +1536,24 @@ function FilteredFileList({ files, title, onFileClick, onClose, statusMap }) {
           </div>
         ))}
       </div>
-      {files.length > 100 && (
-        <div style={{ color: PALETTE.textMuted, fontSize: 11, marginTop: 8, textAlign: "center" }}>
-          Showing 100 of {fmtNum(files.length)} — sorted by size
-        </div>
-      )}
+      <div style={{ textAlign: "center", marginTop: 8 }}>
+        {hasMore ? (
+          <button
+            onClick={() => setLimit((l) => l + PAGE_SIZE)}
+            style={{
+              background: "transparent", border: `1px solid ${PALETTE.border}`,
+              borderRadius: 6, color: PALETTE.accent, padding: "5px 16px",
+              fontSize: 11, cursor: "pointer", fontWeight: 600,
+            }}
+          >
+            Show {Math.min(PAGE_SIZE, files.length - limit)} more ({fmtNum(limit)} of {fmtNum(files.length)})
+          </button>
+        ) : files.length > PAGE_SIZE ? (
+          <span style={{ color: PALETTE.textMuted, fontSize: 11 }}>
+            Showing all {fmtNum(files.length)}
+          </span>
+        ) : null}
+      </div>
     </div>
   );
 }
