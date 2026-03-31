@@ -12,6 +12,7 @@ Usage:
 
 import argparse
 import json
+import logging
 import os
 import re
 import sys
@@ -514,10 +515,139 @@ def enrich_report(report: dict, workers: int = 4, force: bool = False) -> dict:
 # ---------- CLI ----------
 
 
+def _find_mkvpropedit() -> str | None:
+    """Find mkvpropedit binary."""
+    import shutil
+    found = shutil.which("mkvpropedit")
+    if found:
+        return found
+    for path in (r"C:\Program Files\MKVToolNix\mkvpropedit.exe",
+                 r"C:\Program Files (x86)\MKVToolNix\mkvpropedit.exe"):
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+def write_tmdb_to_mkv(filepath: str, tmdb: dict) -> bool:
+    """Write TMDb metadata into an MKV file's global tags via mkvpropedit.
+
+    Sets title, date, genre, director, actors as MKV global segment tags.
+    These are read by media players and metadata tools.
+    """
+    import subprocess
+    import tempfile
+
+    mkvprop = _find_mkvpropedit()
+    if not mkvprop:
+        return False
+
+    if not filepath.lower().endswith(".mkv"):
+        return False
+
+    # Build MKV XML tags
+    tags = []
+
+    def add_tag(name: str, value: str) -> None:
+        tags.append(f'    <Simple><Name>{name}</Name><String>{_xml_escape(value)}</String></Simple>')
+
+    if tmdb.get("director"):
+        add_tag("DIRECTOR", tmdb["director"])
+    if tmdb.get("genres"):
+        add_tag("GENRE", ", ".join(tmdb["genres"]))
+    if tmdb.get("cast"):
+        for actor in tmdb["cast"][:10]:
+            add_tag("ACTOR", actor)
+    if tmdb.get("writers"):
+        for writer in tmdb["writers"][:5]:
+            add_tag("WRITTEN_BY", writer)
+    if tmdb.get("release_year"):
+        add_tag("DATE_RELEASED", str(tmdb["release_year"]))
+    if tmdb.get("content_rating"):
+        add_tag("LAW_RATING", tmdb["content_rating"])
+    if tmdb.get("imdb_id"):
+        add_tag("IMDB", tmdb["imdb_id"])
+    if tmdb.get("tmdb_id"):
+        add_tag("TMDB", str(tmdb["tmdb_id"]))
+    if tmdb.get("collection"):
+        add_tag("COLLECTION", tmdb["collection"])
+    if tmdb.get("original_language"):
+        add_tag("ORIGINAL_LANGUAGE", tmdb["original_language"])
+    if tmdb.get("vote_average"):
+        add_tag("RATING", str(tmdb["vote_average"]))
+    if tmdb.get("keywords"):
+        add_tag("KEYWORDS", ", ".join(tmdb["keywords"]))
+    # Series-specific
+    if tmdb.get("created_by"):
+        for creator in tmdb["created_by"]:
+            add_tag("WRITTEN_BY", creator)
+    if tmdb.get("networks"):
+        add_tag("PUBLISHER", ", ".join(tmdb["networks"]))
+
+    if not tags:
+        return False
+
+    xml = ('<?xml version="1.0" encoding="UTF-8"?>\n'
+           '<Tags>\n'
+           '  <Tag>\n'
+           '    <Targets><TargetTypeValue>50</TargetTypeValue></Targets>\n'
+           + "\n".join(tags) + "\n"
+           '  </Tag>\n'
+           '</Tags>\n')
+
+    # Write XML to temp file, run mkvpropedit
+    tmp_xml = os.path.join(tempfile.gettempdir(), f"tmdb_tags_{os.getpid()}.xml")
+    try:
+        with open(tmp_xml, "w", encoding="utf-8") as f:
+            f.write(xml)
+
+        result = subprocess.run(
+            [mkvprop, filepath, "--tags", f"global:{tmp_xml}"],
+            capture_output=True, text=True, timeout=30,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+    finally:
+        if os.path.exists(tmp_xml):
+            try:
+                os.remove(tmp_xml)
+            except OSError:
+                pass
+
+
+def _xml_escape(s: str) -> str:
+    """Escape XML special characters."""
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+
+
+def apply_tmdb_to_files(report: dict) -> tuple[int, int]:
+    """Write TMDb metadata to all MKV files that have tmdb data in the report.
+
+    Returns (success_count, fail_count).
+    """
+    success = 0
+    failed = 0
+    files = [f for f in report.get("files", []) if f.get("tmdb")]
+    logging.info(f"Writing TMDb metadata to {len(files)} files...")
+
+    for i, entry in enumerate(files):
+        if (i + 1) % 100 == 0 or i + 1 == len(files):
+            logging.info(f"  Progress: {i + 1}/{len(files)}")
+        ok = write_tmdb_to_mkv(entry["filepath"], entry["tmdb"])
+        if ok:
+            success += 1
+        else:
+            failed += 1
+
+    logging.info(f"  Done: {success} written, {failed} failed")
+    return success, failed
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Enrich media report with TMDb metadata")
     parser.add_argument("--report", type=str, default=str(MEDIA_REPORT), help="Path to media_report.json")
     parser.add_argument("--force", action="store_true", help="Re-enrich files that already have tmdb data")
+    parser.add_argument("--apply", action="store_true", help="Write TMDb metadata into MKV file tags")
     parser.add_argument("--file", type=str, default=None, help="Enrich a single file by path")
     parser.add_argument("--workers", type=int, default=4, help="Number of parallel workers")
     args = parser.parse_args()
@@ -558,6 +688,10 @@ def main() -> None:
         json.dump(report, f, indent=2, ensure_ascii=False)
     os.replace(tmp_path, report_path)
     print(f"Saved: {report_path}")
+
+    # Apply to MKV files if requested
+    if args.apply:
+        apply_tmdb_to_files(report)
 
 
 if __name__ == "__main__":

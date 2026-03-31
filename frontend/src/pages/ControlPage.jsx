@@ -245,6 +245,7 @@ export function ControlPage({ wsControl }) {
       {/* Metadata */}
       <div style={{ marginTop: 16, marginBottom: 4, color: PALETTE.textMuted, fontSize: 11, fontWeight: 600, textTransform: "uppercase", letterSpacing: 1 }}>Metadata</div>
       <ProcessRow name="tmdb_enrich" label="TMDb Enrichment" startLabel="Enrich" onFlash={showFlash} />
+      <ProcessRow name="tmdb_apply" label="Write TMDb to Files" startLabel="Write Tags" onFlash={showFlash} />
 
       <div style={{ marginBottom: 32 }} />
 

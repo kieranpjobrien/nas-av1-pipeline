@@ -182,6 +182,10 @@ PROCESS_CONFIGS = {
         "cmd": [sys.executable, "-m", "tools.tmdb"],
         "cwd": str(Path(__file__).parent.parent),
     },
+    "tmdb_apply": {
+        "cmd": [sys.executable, "-m", "tools.tmdb", "--apply"],
+        "cwd": str(Path(__file__).parent.parent),
+    },
     "rewatchables": {
         "cmd": [sys.executable, "-m", "tools.rewatchables"],
         "cwd": str(Path(__file__).parent.parent),

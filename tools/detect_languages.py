@@ -631,46 +631,61 @@ def process_file(file_entry: dict, use_whisper: bool = False, whisper_all: bool 
                 "chars_sampled": 0,
             })
 
-    # --- Pass 3: Audio tracks (heuristics → subtitle majority → whisper fallback) ---
+    # --- Pass 3: Audio tracks (heuristics → subtitle majority → whisper) ---
     for audio_idx, stream in enumerate(file_entry.get("audio_streams", [])):
         lang = (stream.get("language") or "und").lower().strip()
-        if lang not in UND_LANGS:
+        is_und = lang in UND_LANGS
+
+        # For non-whisper mode, skip tracks that already have a tag
+        if not is_und and not (use_whisper and whisper_all):
             continue
-        detected, reason = infer_audio_language(file_entry, audio_idx)
-        if not detected:
-            detected, reason = _infer_audio_from_sub_majority(
-                file_entry, audio_idx, detected_text_langs,
-            )
-        conf = 0.9 if detected and "majority" not in reason else (0.8 if detected else 0.0)
+
+        detected, reason = None, "insufficient context"
+        conf = 0.0
         method = "heuristic"
 
-        # Whisper for audio tracks — either as fallback or for all und tracks
-        if use_whisper and (not detected or whisper_all):
+        # Heuristic pass (only for undetermined tracks)
+        if is_und:
+            detected, reason = infer_audio_language(file_entry, audio_idx)
+            if not detected:
+                detected, reason = _infer_audio_from_sub_majority(
+                    file_entry, audio_idx, detected_text_langs,
+                )
+            conf = 0.9 if detected and "majority" not in reason else (0.8 if detected else 0.0)
+
+        # Whisper: run on ALL tracks when whisper_all, or as fallback for und
+        if use_whisper and (whisper_all or (is_und and not detected)):
             w_lang, w_conf = detect_audio_language_whisper(filepath, audio_idx)
             if w_lang and w_conf > 0.5:
-                if whisper_all and detected:
-                    # Running whisper on everything — override heuristic if whisper is more confident
-                    if w_conf > conf:
-                        detected = w_lang
-                        conf = w_conf
-                        method = "whisper"
-                        reason = f"whisper detection (prob={w_conf:.2f})"
-                else:
+                # Whisper overrides if more confident or if track already has a tag
+                if not detected or w_conf > conf:
                     detected = w_lang
                     conf = w_conf
                     method = "whisper"
                     reason = f"whisper detection (prob={w_conf:.2f})"
 
-        results.append({
-            "filepath": filepath,
-            "track_type": "audio",
-            "stream_index": audio_idx,
-            "codec": stream.get("codec", ""),
-            "detected_language": detected,
-            "confidence": conf,
-            "method": method,
-            "reason": reason,
-        })
+        if detected:
+            results.append({
+                "filepath": filepath,
+                "track_type": "audio",
+                "stream_index": audio_idx,
+                "codec": stream.get("codec", ""),
+                "detected_language": detected,
+                "confidence": conf,
+                "method": method,
+                "reason": reason,
+            })
+        elif is_und:
+            results.append({
+                "filepath": filepath,
+                "track_type": "audio",
+                "stream_index": audio_idx,
+                "codec": stream.get("codec", ""),
+                "detected_language": None,
+                "confidence": 0.0,
+                "method": method,
+                "reason": reason,
+            })
 
     return results
 
@@ -696,19 +711,24 @@ def enrich_report(
     """
     files = report.get("files", [])
 
-    # Filter to files with undetermined tracks
-    to_process = []
-    for entry in files:
-        has_und = any(
-            (s.get("language") or "und").lower().strip() in UND_LANGS
-            for streams in (entry.get("subtitle_streams", []), entry.get("audio_streams", []))
-            for s in streams
-        )
-        if has_und:
-            to_process.append(entry)
+    # Filter to files that need processing
+    if whisper_all:
+        # Whisper all: process every file with audio tracks
+        to_process = [e for e in files if e.get("audio_streams")]
+    else:
+        # Normal: only files with undetermined tracks
+        to_process = []
+        for entry in files:
+            has_und = any(
+                (s.get("language") or "und").lower().strip() in UND_LANGS
+                for streams in (entry.get("subtitle_streams", []), entry.get("audio_streams", []))
+                for s in streams
+            )
+            if has_und:
+                to_process.append(entry)
 
     if not to_process:
-        logging.info("No undetermined tracks found — skipping language detection")
+        logging.info("No tracks to process — skipping language detection")
         return report
 
     logging.info(f"Language detection: {len(to_process)} files with undetermined tracks")
