@@ -397,6 +397,13 @@ def _enrich_movie(entry: dict) -> dict | None:
     return meta
 
 
+def _clean_show_name(raw: str) -> str:
+    """Strip year suffix and clean up a show folder name for TMDb search."""
+    # "Archer (2009)" → "Archer", "The Wire" → "The Wire"
+    cleaned = re.sub(r"\s*\(\d{4}\)\s*$", "", raw).strip()
+    return cleaned if cleaned else raw
+
+
 def _enrich_series(entry: dict) -> dict | None:
     """Look up and return TMDb metadata for a single series entry."""
     # Try to get show name from directory path first (more reliable than filename)
@@ -406,11 +413,13 @@ def _enrich_series(entry: dict) -> dict | None:
     for i, p in enumerate(parts):
         if p.lower().startswith("season") or re.match(r"[Ss]\d+", p):
             if i > 0:
-                show_name = parts[i - 1]
+                show_name = _clean_show_name(parts[i - 1])
             break
 
     if not show_name:
         show_name, _, _ = parse_series_filename(entry["filename"])
+        if show_name:
+            show_name = _clean_show_name(show_name)
 
     if not show_name:
         return None
