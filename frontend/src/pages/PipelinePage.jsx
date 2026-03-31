@@ -216,6 +216,8 @@ export function PipelinePage({ wsData, onFileClick }) {
   const [resetting, setResetting] = useState(false);
   const [priorityPaths, setPriorityPaths] = useState([]);
   const [libraryTotal, setLibraryTotal] = useState(null);
+  const [completion, setCompletion] = useState(null);
+  const [quickWinsBusy, setQuickWinsBusy] = useState(false);
 
   useEffect(() => {
     const load = () => api.getPriority().then((p) => setPriorityPaths(p?.paths || [])).catch(() => {});
@@ -225,11 +227,28 @@ export function PipelinePage({ wsData, onFileClick }) {
   }, []);
 
   useEffect(() => {
-    fetch("/api/media-report")
-      .then((r) => r.ok ? r.json() : null)
-      .then((d) => { if (d?.summary?.total_files) setLibraryTotal(d.summary.total_files); })
-      .catch(() => {});
+    const load = () => {
+      api.getLibraryCompletion().then(setCompletion).catch(() => {});
+      fetch("/api/media-report")
+        .then((r) => r.ok ? r.json() : null)
+        .then((d) => { if (d?.summary?.total_files) setLibraryTotal(d.summary.total_files); })
+        .catch(() => {});
+    };
+    load();
+    const id = setInterval(load, 30000);
+    return () => clearInterval(id);
   }, []);
+
+  const handleQuickWins = async () => {
+    setQuickWinsBusy(true);
+    try {
+      const result = await api.quickWins();
+      if (result?.added > 0) {
+        api.getLibraryCompletion().then(setCompletion).catch(() => {});
+      }
+    } catch { /* ignore */ }
+    setQuickWinsBusy(false);
+  };
 
   const handleResetErrors = async () => {
     setResetting(true);
@@ -290,33 +309,77 @@ export function PipelinePage({ wsData, onFileClick }) {
 
   return (
     <div>
-      {/* Hero */}
+      {/* Hero — true completion */}
       <div style={{ background: PALETTE.surface, border: `1px solid ${PALETTE.border}`, borderRadius: 16, padding: "32px 40px", marginBottom: 24, textAlign: "center" }}>
-        <div style={{ fontSize: 56, fontWeight: 800, fontFamily: "'JetBrains Mono', monospace", color: PALETTE.green, lineHeight: 1 }}>
-          {pct.toFixed(1)}%
-        </div>
-        <div style={{ margin: "16px auto", maxWidth: 400, height: 8, background: PALETTE.surfaceLight, borderRadius: 4, overflow: "hidden" }}>
-          <div style={{ height: "100%", width: `${pct}%`, background: PALETTE.green, borderRadius: 4, transition: "width 0.5s ease" }} />
-        </div>
-        <div style={{ color: PALETTE.textMuted, fontSize: 13 }}>
-          {completed} / {total} files · {fmt(stats.bytes_saved || 0)} saved
-        </div>
-        {completed > 0 && overallETA != null ? (
-          <div style={{ color: PALETTE.accent, fontSize: 13, marginTop: 4, fontFamily: "'JetBrains Mono', monospace" }}>
-            ETA: {formatETA(overallETA)} remaining
+        {completion ? (
+          <>
+            <div style={{ fontSize: 56, fontWeight: 800, fontFamily: "'JetBrains Mono', monospace", color: PALETTE.green, lineHeight: 1 }}>
+              {completion.pct_done.toFixed(1)}%
+            </div>
+            <div style={{ color: PALETTE.textMuted, fontSize: 12, marginTop: 4 }}>fully done</div>
+            <div style={{ margin: "16px auto", maxWidth: 500, height: 8, background: PALETTE.surfaceLight, borderRadius: 4, overflow: "hidden" }}>
+              <div style={{ height: "100%", width: `${Math.min(completion.pct_done, 100)}%`, background: PALETTE.green, borderRadius: 4, transition: "width 0.5s ease" }} />
+            </div>
+            <div style={{ color: PALETTE.textMuted, fontSize: 13, marginTop: 8 }}>
+              {completion.fully_done.toLocaleString()} / {completion.total.toLocaleString()} files · {fmt(stats.bytes_saved || 0)} saved
+            </div>
+
+            {/* Breakdown bars */}
+            <div style={{ display: "flex", justifyContent: "center", gap: 24, marginTop: 16, flexWrap: "wrap" }}>
+              {[
+                { label: "AV1 Video", pct: completion.pct_video, count: completion.av1, colour: PALETTE.accent },
+                { label: "EAC-3 Audio", pct: completion.pct_audio, count: completion.eac3_done, colour: PALETTE.cyan || "#22d3ee" },
+                { label: "English Subs", pct: completion.pct_subs, count: completion.subs_done, colour: "#a78bfa" },
+              ].map(({ label, pct: p, count, colour }) => (
+                <div key={label} style={{ minWidth: 120, textAlign: "center" }}>
+                  <div style={{ fontSize: 18, fontWeight: 700, fontFamily: "'JetBrains Mono', monospace", color: colour }}>
+                    {p.toFixed(1)}%
+                  </div>
+                  <div style={{ margin: "4px auto", width: 100, height: 4, background: PALETTE.surfaceLight, borderRadius: 2, overflow: "hidden" }}>
+                    <div style={{ height: "100%", width: `${Math.min(p, 100)}%`, background: colour, borderRadius: 2 }} />
+                  </div>
+                  <div style={{ fontSize: 10, color: PALETTE.textMuted }}>{label} ({count.toLocaleString()})</div>
+                </div>
+              ))}
+            </div>
+
+            {/* Quick Wins */}
+            {(completion.quick_wins_audio_count > 0) && (
+              <div style={{ marginTop: 16 }}>
+                <button
+                  onClick={handleQuickWins}
+                  disabled={quickWinsBusy}
+                  style={{
+                    background: quickWinsBusy ? PALETTE.surfaceLight : PALETTE.accent,
+                    color: quickWinsBusy ? PALETTE.textMuted : "#fff",
+                    border: "none", borderRadius: 8, padding: "8px 20px",
+                    fontSize: 12, fontWeight: 600, cursor: quickWinsBusy ? "default" : "pointer",
+                  }}
+                >
+                  {quickWinsBusy ? "Queuing..." : `Quick Wins: Force ${completion.quick_wins_audio_count} audio remuxes to front`}
+                </button>
+              </div>
+            )}
+          </>
+        ) : (
+          <div style={{ fontSize: 56, fontWeight: 800, fontFamily: "'JetBrains Mono', monospace", color: PALETTE.green, lineHeight: 1 }}>
+            {pct.toFixed(1)}%
           </div>
-        ) : completed === 0 && total > 0 ? (
-          <div style={{ color: PALETTE.textMuted, fontSize: 12, marginTop: 4, fontStyle: "italic" }}>
-            Calculating ETA...
+        )}
+
+        {/* Encoding speed stats */}
+        {completed > 0 && overallETA != null && (
+          <div style={{ color: PALETTE.accent, fontSize: 13, marginTop: 12, fontFamily: "'JetBrains Mono', monospace" }}>
+            Encoding ETA: {formatETA(overallETA)} remaining
           </div>
-        ) : null}
+        )}
         {completed > 0 && stats.total_encode_time_secs > 0 && (
-          <div style={{ color: PALETTE.textMuted, fontSize: 11, marginTop: 8, display: "flex", justifyContent: "center", gap: 16 }}>
+          <div style={{ color: PALETTE.textMuted, fontSize: 11, marginTop: 4, display: "flex", justifyContent: "center", gap: 16 }}>
             {stats.total_content_duration_secs > 0 && (
-              <span>⏱ {(stats.total_encode_time_secs / (stats.total_content_duration_secs / 3600)).toFixed(1)} min/hr of content</span>
+              <span>{(stats.total_encode_time_secs / (stats.total_content_duration_secs / 3600)).toFixed(1)} min/hr of content</span>
             )}
             {stats.bytes_saved > 0 && (
-              <span>📦 {(stats.total_encode_time_secs / 60 / (stats.total_source_size_bytes > 0 ? stats.total_source_size_bytes / (1024 ** 3) : completed)).toFixed(1)} min/GB</span>
+              <span>{(stats.total_encode_time_secs / 60 / (stats.total_source_size_bytes > 0 ? stats.total_source_size_bytes / (1024 ** 3) : completed)).toFixed(1)} min/GB</span>
             )}
           </div>
         )}

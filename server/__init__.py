@@ -350,6 +350,79 @@ def get_media_report():
     return data
 
 
+@app.get("/api/library-completion")
+def get_library_completion():
+    """True library completion: AV1 video + EAC-3 audio + English-only subs."""
+    data = read_json_safe(MEDIA_REPORT)
+    if data is None:
+        raise HTTPException(404, "media_report.json not found")
+
+    files = data.get("files", [])
+    total = len(files)
+    keep_langs = {"eng", "en", "english", "und", ""}
+
+    counts = {
+        "total": total,
+        "av1": 0,
+        "eac3_done": 0,
+        "subs_done": 0,
+        "fully_done": 0,
+        "needs_video": 0,
+        "needs_audio": 0,
+        "needs_subs": 0,
+        "quick_wins_audio": [],  # AV1 files needing only audio fix
+        "quick_wins_subs": [],   # AV1 files needing only sub strip
+    }
+
+    for f in files:
+        fp = f.get("filepath", "")
+        is_av1 = f.get("video", {}).get("codec_raw") == "av1"
+
+        audio_ok = all(
+            (a.get("codec_raw") or a.get("codec", "")).lower() in ("eac3", "e-ac-3")
+            for a in f.get("audio_streams", [])
+        ) if f.get("audio_streams") else True
+
+        subs_ok = all(
+            (s.get("language") or s.get("detected_language") or "und").lower().strip() in keep_langs
+            for s in f.get("subtitle_streams", [])
+        )
+
+        if is_av1:
+            counts["av1"] += 1
+        else:
+            counts["needs_video"] += 1
+
+        if is_av1 and audio_ok:
+            counts["eac3_done"] += 1
+        elif is_av1:
+            counts["needs_audio"] += 1
+            if subs_ok:
+                counts["quick_wins_audio"].append(fp)
+
+        if is_av1 and subs_ok:
+            counts["subs_done"] += 1
+        elif is_av1:
+            counts["needs_subs"] += 1
+            if audio_ok:
+                counts["quick_wins_subs"].append(fp)
+
+        if is_av1 and audio_ok and subs_ok:
+            counts["fully_done"] += 1
+
+    counts["pct_video"] = round(100 * counts["av1"] / total, 1) if total else 0
+    counts["pct_audio"] = round(100 * counts["eac3_done"] / total, 1) if total else 0
+    counts["pct_subs"] = round(100 * counts["subs_done"] / total, 1) if total else 0
+    counts["pct_done"] = round(100 * counts["fully_done"] / total, 1) if total else 0
+    counts["quick_wins_audio_count"] = len(counts["quick_wins_audio"])
+    counts["quick_wins_subs_count"] = len(counts["quick_wins_subs"])
+    # Don't send full path lists in the summary — just counts
+    del counts["quick_wins_audio"]
+    del counts["quick_wins_subs"]
+
+    return counts
+
+
 @app.get("/api/duplicates")
 def get_duplicates():
     """Find duplicate files using title+duration matching with quality scoring."""
@@ -557,6 +630,44 @@ def toggle_force(req: ForceRequest):
     current.setdefault("patterns", [])
     drop_file("priority.json", current)
     return {"ok": True, "forced": req.action == "add", "force_count": len(force)}
+
+
+@app.post("/api/quick-wins")
+def quick_wins():
+    """Bulk-force AV1 files needing audio remux to the front of the pipeline queue."""
+    data = read_json_safe(MEDIA_REPORT)
+    if data is None:
+        raise HTTPException(404, "media_report.json not found")
+
+    files = data.get("files", [])
+    paths = []
+    for f in files:
+        if f.get("video", {}).get("codec_raw") != "av1":
+            continue
+        audio_ok = all(
+            (a.get("codec_raw") or a.get("codec", "")).lower() in ("eac3", "e-ac-3")
+            for a in f.get("audio_streams", [])
+        ) if f.get("audio_streams") else True
+        if not audio_ok:
+            paths.append(f["filepath"])
+
+    if not paths:
+        return {"ok": True, "added": 0, "message": "No audio quick wins found"}
+
+    current = read_json_safe(CONTROL_DIR / "priority.json") or {}
+    force = current.get("force", [])
+    existing = {os.path.normpath(p).lower() for p in force}
+    added = 0
+    for p in paths:
+        if os.path.normpath(p).lower() not in existing:
+            force.append(p)
+            added += 1
+
+    current["force"] = force
+    current.setdefault("paths", [])
+    current.setdefault("patterns", [])
+    drop_file("priority.json", current)
+    return {"ok": True, "added": added, "total_force": len(force)}
 
 
 @app.put("/api/control/gentle")
