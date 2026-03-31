@@ -216,17 +216,29 @@ export function ControlPage({ wsControl }) {
     <div>
       {/* Process Management */}
       <SectionTitle>Process Management</SectionTitle>
+
+      {/* Core */}
       <ProcessRow name="scanner" label="Media Scanner" startLabel="Rescan Library" onFlash={showFlash} />
       <ProcessRow name="pipeline" label="AV1 Pipeline" startLabel="Start Pipeline" onFlash={showFlash} />
+
+      {/* Subtitle & Audio Tools */}
+      <div style={{ marginTop: 16, marginBottom: 4, color: PALETTE.textMuted, fontSize: 11, fontWeight: 600, textTransform: "uppercase", letterSpacing: 1 }}>Subtitles &amp; Audio</div>
       <ProcessRow name="subtitles" label="Subtitle Check" startLabel="Run Check" onFlash={showFlash} />
       <ProcessRow name="strip_subs" label="Strip Non-English Subs" startLabel="Strip Subs" onFlash={showFlash} />
       <ProcessRow name="integrity" label="Integrity Check" startLabel="Run Check" onFlash={showFlash} />
+
+      {/* Language Detection */}
+      <div style={{ marginTop: 16, marginBottom: 4, color: PALETTE.textMuted, fontSize: 11, fontWeight: 600, textTransform: "uppercase", letterSpacing: 1 }}>Language Detection</div>
+      <ProcessRow name="detect_languages" label="Language Detect (Text)" startLabel="Run Scan" onFlash={showFlash} />
+      <ProcessRow name="detect_languages_whisper" label="Language Detect (Whisper)" startLabel="Run Whisper" onFlash={showFlash} badge="GPU — stop pipeline first" />
+      <ProcessRow name="apply_languages" label="Apply Language Tags" startLabel="Apply Tags" onFlash={showFlash} />
+
+      {/* Plex */}
+      <div style={{ marginTop: 16, marginBottom: 4, color: PALETTE.textMuted, fontSize: 11, fontWeight: 600, textTransform: "uppercase", letterSpacing: 1 }}>Plex</div>
       <ProcessRow name="plex_scan" label="Plex Library Scan" startLabel="Trigger Scan" onFlash={showFlash} />
       <ProcessRow name="plex_metadata" label="Plex Metadata Audit" startLabel="Run Audit" onFlash={showFlash} />
       <ProcessRow name="plex_apply_rules" label="Plex Apply Rules" startLabel="Apply Rules" onFlash={showFlash} />
-      <ProcessRow name="detect_languages" label="Language Detect" startLabel="Run Scan" onFlash={showFlash} />
-      <ProcessRow name="detect_languages_whisper" label="Language Detect (Whisper)" startLabel="Run Whisper" onFlash={showFlash} badge="GPU — don't run with pipeline" />
-      <ProcessRow name="apply_languages" label="Language Apply" startLabel="Apply Tags" onFlash={showFlash} />
+
       <div style={{ marginBottom: 32 }} />
 
       {/* Pipeline Control */}
