@@ -293,8 +293,10 @@ def update_report_entry(filepath: str, report_path: str, library_type: str) -> b
             sum(e.get("file_size_bytes", 0) for e in series_files) / 1024**3, 2
         )
 
-        with open(report_path, "w", encoding="utf-8") as f:
+        tmp_path = report_path + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(report, f, indent=2, ensure_ascii=False)
+        os.replace(tmp_path, report_path)
 
     return True
 
@@ -499,8 +501,10 @@ def main():
     }
 
     output_path = args.output
-    with open(output_path, "w", encoding="utf-8") as f:
+    tmp_path = output_path + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2, ensure_ascii=False)
+    os.replace(tmp_path, output_path)
 
     print(f"\n{'='*60}")
     print(f"Scan complete!")
