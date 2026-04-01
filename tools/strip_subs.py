@@ -227,6 +227,9 @@ def main():
         print("No files with non-English subtitles found.")
         return
 
+    # Sort smallest first — fast progress on small files, big ones at the end
+    files.sort(key=lambda f: f["file_size_bytes"])
+
     total_streams = sum(f["strip_count"] for f in files)
     total_estimate = sum(f["strip_size_estimate"] for f in files)
 
