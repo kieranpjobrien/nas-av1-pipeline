@@ -1073,7 +1073,23 @@ def main():
             total_applied += applied
             total_failed += failed_count
 
+            # Update report: promote detected_language → language, clear detection fields
+            if applied > 0:
+                for det in detections:
+                    if det.get("confidence", 0) < args.min_confidence:
+                        continue
+                    streams = entry.get(f"{det['track_type']}_streams", [])
+                    idx = det["stream_index"]
+                    if idx < len(streams):
+                        streams[idx]["language"] = to_iso2(det["detected_language"])
+                        streams[idx].pop("detected_language", None)
+                        streams[idx].pop("detection_confidence", None)
+                        streams[idx].pop("detection_method", None)
+
+        # Save updated report (languages promoted, detection fields cleared)
+        write_report(report)
         logging.info(f"Applied: {total_applied}  Failed: {total_failed}")
+        logging.info(f"Report updated")
     else:
         # Detection mode: run language detection and save to report
         report = enrich_report(
