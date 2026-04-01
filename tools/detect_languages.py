@@ -1109,14 +1109,16 @@ def main():
     parser.add_argument("--min-confidence", type=float, default=0.85,
                         help="Minimum confidence to apply a detection (default: 0.85)")
     parser.add_argument("--whisper", action="store_true",
-                        help="Use faster-whisper (GPU) for audio tracks that heuristics can't resolve")
+                        help="Use faster-whisper for audio tracks that heuristics can't resolve")
     parser.add_argument("--whisper-all", action="store_true",
-                        help="Run whisper on ALL undetermined audio tracks")
+                        help="Run whisper on ALL audio tracks (verify existing tags)")
+    parser.add_argument("--spot-check", type=int, default=0, metavar="N",
+                        help="Whisper spot-check: verify N random already-tagged tracks (e.g. --spot-check 200)")
     parser.add_argument("--workers", type=int, default=6,
                         help="Parallel workers for subtitle extraction (default: 6)")
     args = parser.parse_args()
 
-    use_whisper = args.whisper or args.whisper_all
+    use_whisper = args.whisper or args.whisper_all or args.spot_check > 0
 
     # Check pipeline isn't encoding (whisper competes for GPU)
     if use_whisper:
@@ -1143,8 +1145,53 @@ def main():
         logging.error(f"media_report.json not found at {MEDIA_REPORT}")
         sys.exit(1)
 
-    if args.apply:
-        # Apply-only mode: write existing detections to MKV files, no re-detection
+    if args.spot_check > 0:
+        # Spot-check mode: whisper a random sample of already-tagged tracks, report mismatches
+        import random
+
+        _get_whisper_model("tiny")
+        candidates = []
+        for entry in report.get("files", []):
+            for i, a in enumerate(entry.get("audio_streams", [])):
+                lang = (a.get("language") or "und").lower().strip()
+                if lang not in UND_LANGS:
+                    candidates.append((entry, i, lang))
+
+        sample_size = min(args.spot_check, len(candidates))
+        sample = random.sample(candidates, sample_size)
+        logging.info(f"Spot-checking {sample_size} already-tagged audio tracks...")
+
+        mismatches = []
+        for idx, (entry, audio_idx, existing_tag) in enumerate(sample):
+            if (idx + 1) % 20 == 0 or idx + 1 == sample_size:
+                logging.info(f"  Progress: {idx + 1}/{sample_size} ({len(mismatches)} mismatches)")
+            w_lang, w_conf = detect_audio_language_whisper(
+                entry["filepath"], audio_idx, entry.get("duration_seconds", 0),
+            )
+            if w_lang and w_conf >= 0.5:
+                w_iso = to_iso2(w_lang)
+                existing_iso = to_iso2(existing_tag)
+                if w_iso != existing_iso:
+                    mismatches.append({
+                        "filename": entry["filename"],
+                        "track": audio_idx,
+                        "tagged_as": existing_tag,
+                        "whisper_says": w_lang,
+                        "confidence": w_conf,
+                    })
+
+        logging.info(f"\nSpot-check complete: {len(mismatches)} mismatches out of {sample_size}")
+        if mismatches:
+            logging.info(f"\nMismatched tracks:")
+            for m in mismatches:
+                logging.info(f"  {m['filename']} track {m['track']}: "
+                             f"tagged '{m['tagged_as']}' but whisper says '{m['whisper_says']}' "
+                             f"(conf={m['confidence']:.2f})")
+        else:
+            logging.info("All spot-checked tags match whisper detection.")
+        return
+
+    elif args.apply:
         logging.info(f"Applying detections to files via mkvpropedit/ffmpeg...")
         if _find_mkvpropedit():
             logging.info(f"  mkvpropedit: {_find_mkvpropedit()}")

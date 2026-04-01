@@ -177,6 +177,10 @@ PROCESS_CONFIGS = {
         "cmd": [sys.executable, "-m", "tools.detect_languages", "--whisper"],
         "cwd": str(Path(__file__).parent.parent),
     },
+    "detect_languages_spotcheck": {
+        "cmd": [sys.executable, "-m", "tools.detect_languages", "--spot-check", "200"],
+        "cwd": str(Path(__file__).parent.parent),
+    },
     "apply_languages": {
         "cmd": [sys.executable, "-m", "tools.detect_languages", "--apply", "--min-confidence", "0.85"],
         "cwd": str(Path(__file__).parent.parent),
