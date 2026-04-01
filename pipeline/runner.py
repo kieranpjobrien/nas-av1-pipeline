@@ -155,9 +155,8 @@ class Pipeline:
         4. Look ahead: if GPU encode will take 10 min, fetch enough audio
            jobs to keep all audio threads busy for those 10 min
         """
-        MAX_PREFETCH_BYTES = self.config.get("max_fetch_buffer_bytes", 100 * 1024**3)
-        MAX_PREFETCH_FILES = 30
-        MAX_AUDIO_QUEUED = 8   # keep audio threads fed ahead
+        MAX_PREFETCH_BYTES = self.config.get("max_fetch_buffer_bytes", 200 * 1024**3)
+        MAX_AUDIO_QUEUED = 20  # keep audio threads well fed
 
         logging.info("Smart prefetch started (buffer: %s)", format_bytes(MAX_PREFETCH_BYTES))
 
@@ -170,7 +169,7 @@ class Pipeline:
                 (self.state.get_file(fp) or {}).get("input_size_bytes", 0) or 0
                 for fp in fetched_paths
             )
-            if len(fetched_paths) >= MAX_PREFETCH_FILES or pending_bytes >= MAX_PREFETCH_BYTES:
+            if pending_bytes >= MAX_PREFETCH_BYTES:
                 self._sleep_or_shutdown(10)
                 continue
 
@@ -269,9 +268,12 @@ class Pipeline:
                     if fetch_time > bandwidth_secs and fetched_any:
                         break  # don't overshoot, we've already fetched something
 
-                    # Re-check limits
-                    current_fetched = len(self.state.get_files_by_status(FileStatus.FETCHED))
-                    if current_fetched >= MAX_PREFETCH_FILES:
+                    # Re-check byte budget
+                    current_bytes = sum(
+                        (self.state.get_file(fp) or {}).get("input_size_bytes", 0) or 0
+                        for fp in self.state.get_files_by_status(FileStatus.FETCHED)
+                    )
+                    if current_bytes >= MAX_PREFETCH_BYTES:
                         break
 
                     result = stage_fetch(item, self.staging_dir, self.config, self.state)
@@ -282,8 +284,8 @@ class Pipeline:
                     if bandwidth_secs <= 0:
                         break
 
-            elif video_candidates and len(video_fetched) < 3:
-                # Audio is fed, pre-fetch next video job for GPU lookahead
+            elif video_candidates and len(video_fetched) < 10:
+                # Audio is fed, keep GPU lookahead deep
                 _, item = video_candidates[0]
                 result = stage_fetch(item, self.staging_dir, self.config, self.state)
                 if result is not None:
