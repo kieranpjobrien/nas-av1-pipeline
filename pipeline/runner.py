@@ -767,7 +767,7 @@ class Pipeline:
 
         # Track active audio remux threads
         audio_threads: list[threading.Thread] = []
-        MAX_AUDIO_THREADS = 2  # limit concurrent CPU remux jobs
+        MAX_AUDIO_THREADS = 4  # audio remux is I/O bound, more threads = better network utilisation
 
         processed = 0
         last_progress_at = 0
@@ -849,19 +849,19 @@ class Pipeline:
                     # in a background thread; re-selecting them causes duplicate dispatch.
                     if status == FileStatus.ENCODING.value and item.get("audio_only"):
                         continue
-                    # Prefer video items for the GPU; audio-only items for background threads
                     is_audio = item.get("audio_only", False)
                     audio_slots_full = len(audio_threads) >= MAX_AUDIO_THREADS
+
                     if is_force and ready_force is None:
                         ready_force = item
                     elif is_priority and ready_priority is None:
                         ready_priority = item
-                    elif ready_any is None:
-                        # If audio slots are full, skip audio items and find a video one
-                        if is_audio and audio_slots_full:
-                            pass  # don't select this, keep looking
-                        else:
-                            ready_any = item
+                    elif not is_audio and ready_any is None:
+                        # Video items: always eligible for GPU encode
+                        ready_any = item
+                    elif is_audio and not audio_slots_full and ready_any is None:
+                        # Audio items: only when threads have capacity
+                        ready_any = item
 
                 if status in (None, FileStatus.PENDING.value):
                     if first_pending is None:
@@ -913,21 +913,17 @@ class Pipeline:
 
             # Audio-only items: dispatch to background thread (no GPU needed)
             if ready_item.get("audio_only"):
-                if len(audio_threads) < MAX_AUDIO_THREADS:
-                    effective_config = self._apply_gentle_overrides(ready_item)
-                    t = threading.Thread(
-                        target=self._audio_remux_async,
-                        args=(ready_item, effective_config),
-                        daemon=True,
-                        name=f"audio-remux-{ready_item['filename'][:30]}",
-                    )
-                    t.start()
-                    audio_threads.append(t)
-                    dispatched.add(filepath)
-                    logging.info(f"  Dispatched audio remux to background thread")
-                else:
-                    # Audio threads full — don't block the GPU, just wait
-                    time.sleep(2)
+                effective_config = self._apply_gentle_overrides(ready_item)
+                t = threading.Thread(
+                    target=self._audio_remux_async,
+                    args=(ready_item, effective_config),
+                    daemon=True,
+                    name=f"audio-remux-{ready_item['filename'][:30]}",
+                )
+                t.start()
+                audio_threads.append(t)
+                dispatched.add(filepath)
+                logging.info(f"  Dispatched audio remux to background thread")
                 continue
 
             dispatched.add(filepath)
