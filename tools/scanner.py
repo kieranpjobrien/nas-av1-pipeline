@@ -380,6 +380,9 @@ def write_missing_subs_csv(report: dict, csv_path: str) -> int:
 
 
 def main():
+    # Force unbuffered stdout so progress appears in process logs immediately
+    sys.stdout.reconfigure(line_buffering=True)
+
     parser = argparse.ArgumentParser(description="Scan media library and produce analysis report")
     parser.add_argument("--movies", type=str, default=str(NAS_MOVIES),
                         help="Path to movies directory")

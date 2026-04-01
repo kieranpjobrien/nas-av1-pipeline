@@ -927,7 +927,8 @@ def apply_detections_for_file(
 # ---------------------------------------------------------------------------
 
 def main():
-    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    sys.stdout.reconfigure(line_buffering=True)
+    logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
 
     parser = argparse.ArgumentParser(description="Detect languages for undetermined subtitle/audio tracks")
     parser.add_argument("--apply", action="store_true",

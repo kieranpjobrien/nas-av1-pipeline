@@ -692,6 +692,7 @@ def apply_tmdb_to_files(report: dict) -> tuple[int, int]:
 
 
 def main() -> None:
+    sys.stdout.reconfigure(line_buffering=True)
     parser = argparse.ArgumentParser(description="Enrich media report with TMDb metadata")
     parser.add_argument("--report", type=str, default=str(MEDIA_REPORT), help="Path to media_report.json")
     parser.add_argument("--force", action="store_true", help="Re-enrich files that already have tmdb data")
