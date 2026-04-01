@@ -430,7 +430,7 @@ def _whisper_detect_one(model, wav_path: str) -> tuple[Optional[str], float]:
                                           language=None, without_timestamps=True)
         for _ in segments:
             break
-        if info.language and info.language_probability > 0.3:
+        if info.language and info.language_probability > 0.1:
             return info.language, round(info.language_probability, 3)
     except Exception:
         pass
