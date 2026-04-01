@@ -465,12 +465,14 @@ def detect_audio_language_whisper(
     audio_stream_index: int,
     duration_secs: float = 0,
 ) -> tuple[Optional[str], float]:
-    """Detect language using tiny-first with small escalation.
+    """Detect language using whisper-tiny with multi-sample majority vote.
 
     1. Extract 3 x 10s samples (one ffmpeg call)
-    2. Run whisper-tiny on first sample — if confidence >= 0.8, done
+    2. Run whisper-tiny on first sample — if high confidence, done
     3. If low confidence, run tiny on remaining samples + majority vote
-    4. If still < 0.8, escalate to whisper-small on first sample
+
+    No small model escalation — tiny at 0.35s/sample on CPU is fast enough.
+    Three agreeing samples compensate for lower per-sample confidence.
 
     Returns (lang_code, confidence) or (None, 0.0) on failure.
     """
@@ -480,34 +482,23 @@ def detect_audio_language_whisper(
         return None, 0.0
 
     try:
-        # Step 1: tiny model on first sample (fast screening)
         tiny = _get_whisper_model("tiny")
         if not tiny:
             return None, 0.0
 
+        # First sample — if high confidence, done instantly
         lang, prob = _whisper_detect_one(tiny, wav_paths[0])
-        if lang and prob >= 0.8:
+        if lang and prob >= 0.7:
             return lang, prob
 
-        # Step 2: tiny on remaining samples, majority vote
+        # Low confidence — check remaining samples for confirmation
         detections = [(lang, prob)] if lang else []
         for wav_path in wav_paths[1:]:
             l, p = _whisper_detect_one(tiny, wav_path)
             if l:
                 detections.append((l, p))
 
-        result_lang, result_conf = _majority_vote(detections)
-        if result_lang and result_conf >= 0.8:
-            return result_lang, result_conf
-
-        # Step 3: escalate to small model on first sample for confirmation
-        small = _get_whisper_model("small")
-        if small:
-            s_lang, s_prob = _whisper_detect_one(small, wav_paths[0])
-            if s_lang and s_prob > result_conf:
-                return s_lang, s_prob
-
-        return result_lang or lang, result_conf or prob
+        return _majority_vote(detections)
 
     except Exception as e:
         logging.debug(f"Whisper detection failed for {os.path.basename(filepath)} a:{audio_stream_index}: {e}")
@@ -548,33 +539,20 @@ def detect_audio_languages_for_file(
             results[aidx] = (None, 0.0)
             continue
 
-        # Tiny on first sample
+        # Tiny on first sample — high confidence = done
         lang, prob = _whisper_detect_one(tiny, wav_paths[0])
-        if lang and prob >= 0.8:
+        if lang and prob >= 0.7:
             results[aidx] = (lang, prob)
             continue
 
-        # Tiny on all samples, majority vote
+        # Low confidence — check remaining samples
         detections = [(lang, prob)] if lang else []
         for wp in wav_paths[1:]:
             l, p = _whisper_detect_one(tiny, wp)
             if l:
                 detections.append((l, p))
 
-        result_lang, result_conf = _majority_vote(detections)
-        if result_lang and result_conf >= 0.8:
-            results[aidx] = (result_lang, result_conf)
-            continue
-
-        # Escalate to small
-        small = _get_whisper_model("small")
-        if small:
-            s_lang, s_prob = _whisper_detect_one(small, wav_paths[0])
-            if s_lang and s_prob > (result_conf or 0):
-                results[aidx] = (s_lang, s_prob)
-                continue
-
-        results[aidx] = (result_lang, result_conf or 0.0)
+        results[aidx] = _majority_vote(detections)
 
     # Clean up all temp files
     for wav_list in all_samples.values():
