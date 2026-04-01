@@ -400,9 +400,6 @@ def main():
                         help="After scan, write CSV of files missing English audio")
     parser.add_argument("--missing-subs-csv", type=str, default=None, metavar="PATH",
                         help="After scan, write CSV of files missing subtitles or English subs")
-    # Legacy flags kept for backwards compat but no longer used — lang detect and TMDb are separate processes now
-    parser.add_argument("--skip-tmdb", action="store_true",
-                        help="Skip TMDb metadata enrichment")
     args = parser.parse_args()
 
     all_files = []
