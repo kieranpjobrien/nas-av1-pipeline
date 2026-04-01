@@ -24,6 +24,26 @@ def _has_foreign_subs(file_entry: dict, config: dict) -> bool:
     return False
 
 
+def _has_foreign_audio(file_entry: dict, config: dict) -> bool:
+    """Check if a file has non-English/non-original audio tracks that should be stripped.
+
+    Keeps track 0 (original language) and all English/und tracks.
+    Returns True if there are extra foreign tracks to remove.
+    """
+    if not config.get("strip_non_english_audio", True):
+        return False
+    audio = file_entry.get("audio_streams", [])
+    if len(audio) <= 1:
+        return False
+    for i, a in enumerate(audio):
+        if i == 0:
+            continue  # always keep original
+        lang = (a.get("language") or a.get("detected_language") or "und").lower().strip()
+        if lang not in _KEEP_LANGS:
+            return True
+    return False
+
+
 def build_priority_queue(report_path: str, config: dict, state: PipelineState,
                          is_reencode: Optional[Callable] = None) -> list[dict]:
     """Load report, filter already-AV1 files, sort by priority tier then file size.
@@ -78,13 +98,18 @@ def build_priority_queue(report_path: str, config: dict, state: PipelineState,
                     "audio_only": True,
                 })
                 continue
-            elif _has_foreign_subs(f, config):
-                # Audio is fine but has foreign subs — queue sub-strip-only remux
+            elif _has_foreign_subs(f, config) or _has_foreign_audio(f, config):
+                # AV1 + EAC-3 but has foreign subs/audio — cleanup remux
+                needs_subs = _has_foreign_subs(f, config)
+                needs_audio = _has_foreign_audio(f, config)
+                reason = "cleanup: " + " + ".join(
+                    [x for x in ["foreign subs" if needs_subs else "", "foreign audio" if needs_audio else ""] if x]
+                )
                 existing = state.get_file(filepath)
                 if existing and existing["status"] in (FileStatus.VERIFIED.value, FileStatus.SKIPPED.value):
-                    if existing.get("sub_strip"):
+                    if existing.get("cleanup_strip"):
                         continue
-                    state.set_file(filepath, FileStatus.PENDING, reason="sub strip needed")
+                    state.set_file(filepath, FileStatus.PENDING, reason=reason)
 
                 queue.append({
                     "filepath": filepath,
@@ -102,9 +127,9 @@ def build_priority_queue(report_path: str, config: dict, state: PipelineState,
                     "subtitle_count": f.get("subtitle_count", 0),
                     "library_type": f.get("library_type", ""),
                     "priority_tier": 1000,
-                    "tier_name": "Sub strip (AV1)",
+                    "tier_name": "Cleanup remux (AV1)",
                     "audio_only": True,
-                    "sub_strip": True,
+                    "cleanup_strip": True,
                 })
                 continue
             else:

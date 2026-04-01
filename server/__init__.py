@@ -389,10 +389,19 @@ def get_library_completion():
         fp = f.get("filepath", "")
         is_av1 = f.get("video", {}).get("codec_raw") == "av1"
 
-        audio_ok = all(
+        audio_codec_ok = all(
             (a.get("codec_raw") or a.get("codec", "")).lower() in ("eac3", "e-ac-3")
             for a in f.get("audio_streams", [])
         ) if f.get("audio_streams") else True
+
+        # Audio clean: only English/und/original tracks remain (no foreign dubs)
+        audio_streams = f.get("audio_streams", [])
+        audio_clean = all(
+            i == 0 or (a.get("language") or a.get("detected_language") or "und").lower().strip() in keep_langs
+            for i, a in enumerate(audio_streams)
+        ) if audio_streams else True
+
+        audio_ok = audio_codec_ok and audio_clean
 
         subs_ok = all(
             (s.get("language") or s.get("detected_language") or "und").lower().strip() in keep_langs
