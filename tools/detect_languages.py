@@ -362,74 +362,130 @@ def _get_whisper_model():
     return _whisper_model
 
 
+def _extract_audio_samples(
+    filepath: str,
+    audio_stream_index: int,
+    duration_secs: float,
+    sample_duration: int = 10,
+) -> list[str]:
+    """Batch-extract multiple audio samples from different points in a file.
+
+    Extracts 3 samples: near the start (60s in), ~30% through, ~60% through.
+    Returns list of WAV file paths. Single ffmpeg call with multiple outputs
+    isn't supported for seeking, so we use one call per sample but keep them
+    short (10s each).
+    """
+    tmp_dir = os.path.join(str(STAGING_DIR), "whisper_tmp")
+    os.makedirs(tmp_dir, exist_ok=True)
+    base = f"{os.getpid()}_{audio_stream_index}"
+
+    # Pick sample points: skip first 60s (logos/silence), then 30% and 60%
+    total = max(duration_secs, 120)
+    offsets = [
+        min(60, total * 0.05),           # near start (skip logos)
+        total * 0.3,                      # ~30% through
+        total * 0.6,                      # ~60% through
+    ]
+
+    wav_paths = []
+    for i, offset in enumerate(offsets):
+        wav_path = os.path.join(tmp_dir, f"{base}_s{i}.wav")
+        cmd = [
+            "ffmpeg", "-hide_banner", "-loglevel", "error",
+            "-ss", str(int(offset)),
+            "-i", filepath,
+            "-map", f"0:a:{audio_stream_index}",
+            "-t", str(sample_duration),
+            "-ac", "1", "-ar", "16000",
+            "-y", wav_path,
+        ]
+        try:
+            subprocess.run(cmd, capture_output=True, timeout=30)
+            if os.path.exists(wav_path) and os.path.getsize(wav_path) > 10_000:
+                wav_paths.append(wav_path)
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+
+    return wav_paths
+
+
+def _whisper_detect_one(model, wav_path: str) -> tuple[Optional[str], float]:
+    """Run whisper language detection on a single WAV sample."""
+    try:
+        segments, info = model.transcribe(wav_path, beam_size=1, best_of=1,
+                                          language=None, without_timestamps=True)
+        for _ in segments:
+            break
+        if info.language and info.language_probability > 0.3:
+            return info.language, round(info.language_probability, 3)
+    except Exception:
+        pass
+    return None, 0.0
+
+
 def detect_audio_language_whisper(
     filepath: str,
     audio_stream_index: int,
-    sample_duration: int = 30,
-    sample_offset: int = 60,
+    duration_secs: float = 0,
 ) -> tuple[Optional[str], float]:
-    """Detect language from an audio stream using faster-whisper.
+    """Detect language from an audio stream using multi-sample whisper analysis.
 
-    Extracts a short audio sample via ffmpeg, then runs whisper's language
-    detection (no full transcription needed). Returns (lang_code, confidence)
-    or (None, 0.0) on failure.
+    Takes 3 x 10-second samples from different points in the file (start, 30%, 60%)
+    to handle films that switch languages. Majority vote determines the result.
+    Disagreement between samples is flagged in the confidence score.
 
-    Args:
-        filepath: Path to media file.
-        audio_stream_index: 0-based audio stream index.
-        sample_duration: Seconds of audio to sample (default 30).
-        sample_offset: Start offset in seconds (default 60, skip intros).
+    Returns (lang_code, confidence) or (None, 0.0) on failure.
     """
     model = _get_whisper_model()
     if model is None:
         return None, 0.0
 
-    # Extract audio sample to a temp WAV file
-    tmp_wav = os.path.join(tempfile.gettempdir(), f"whisper_sample_{os.getpid()}_{audio_stream_index}.wav")
-    cmd = [
-        "ffmpeg", "-hide_banner", "-loglevel", "error",
-        "-ss", str(sample_offset),
-        "-i", filepath,
-        "-map", f"0:a:{audio_stream_index}",
-        "-t", str(sample_duration),
-        "-ac", "1",          # mono
-        "-ar", "16000",      # 16kHz (whisper native)
-        "-y", tmp_wav,
-    ]
-    try:
-        result = subprocess.run(cmd, capture_output=True, timeout=60)
-        if result.returncode != 0 or not os.path.exists(tmp_wav):
-            # Retry without offset (file might be shorter than 60s)
-            cmd[3] = "0"
-            result = subprocess.run(cmd, capture_output=True, timeout=60)
-            if result.returncode != 0 or not os.path.exists(tmp_wav):
-                return None, 0.0
+    wav_paths = _extract_audio_samples(filepath, audio_stream_index, duration_secs)
+    if not wav_paths:
+        return None, 0.0
 
-        # Check file isn't empty/tiny
-        if os.path.getsize(tmp_wav) < 10_000:
+    try:
+        # Run whisper on each sample
+        detections = []
+        for wav_path in wav_paths:
+            lang, prob = _whisper_detect_one(model, wav_path)
+            if lang:
+                detections.append((lang, prob))
+
+        if not detections:
             return None, 0.0
 
-        # Run whisper language detection
-        segments, info = model.transcribe(tmp_wav, beam_size=1, best_of=1,
-                                          language=None, without_timestamps=True)
-        # Consume the generator to finalise detection
-        for _ in segments:
-            break
+        # Single sample — use it directly
+        if len(detections) == 1:
+            return detections[0]
 
-        lang = info.language
-        prob = info.language_probability
+        # Majority vote
+        from collections import Counter
+        lang_counts = Counter(lang for lang, _ in detections)
+        majority_lang, majority_count = lang_counts.most_common(1)[0]
 
-        if lang and prob > 0.5:
-            return lang, round(prob, 3)
-        return None, 0.0
+        # All samples agree — high confidence
+        if majority_count == len(detections):
+            avg_prob = sum(p for l, p in detections) / len(detections)
+            return majority_lang, round(avg_prob, 3)
+
+        # Majority agrees — moderate confidence (flag mixed)
+        if majority_count > len(detections) / 2:
+            avg_prob = sum(p for l, p in detections if l == majority_lang) / majority_count
+            # Discount confidence for mixed results
+            return majority_lang, round(avg_prob * 0.85, 3)
+
+        # No majority — inconclusive, return most confident single detection
+        best = max(detections, key=lambda x: x[1])
+        return best[0], round(best[1] * 0.7, 3)
 
     except Exception as e:
         logging.debug(f"Whisper detection failed for {os.path.basename(filepath)} a:{audio_stream_index}: {e}")
         return None, 0.0
     finally:
-        if os.path.exists(tmp_wav):
+        for wav_path in wav_paths:
             try:
-                os.remove(tmp_wav)
+                os.remove(wav_path)
             except OSError:
                 pass
 
@@ -655,7 +711,9 @@ def process_file(file_entry: dict, use_whisper: bool = False, whisper_all: bool 
 
         # Whisper: run on ALL tracks when whisper_all, or as fallback for und
         if use_whisper and (whisper_all or (is_und and not detected)):
-            w_lang, w_conf = detect_audio_language_whisper(filepath, audio_idx)
+            w_lang, w_conf = detect_audio_language_whisper(
+                filepath, audio_idx, file_entry.get("duration_seconds", 0),
+            )
             if w_lang and w_conf > 0.5:
                 # Whisper overrides if more confident or if track already has a tag
                 if not detected or w_conf > conf:
