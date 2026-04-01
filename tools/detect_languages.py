@@ -368,45 +368,45 @@ def _extract_audio_samples(
     duration_secs: float,
     sample_duration: int = 10,
 ) -> list[str]:
-    """Batch-extract multiple audio samples from different points in a file.
+    """Extract 3 audio samples from different points in one ffmpeg call.
 
-    Extracts 3 samples: near the start (60s in), ~30% through, ~60% through.
-    Returns list of WAV file paths. Single ffmpeg call with multiple outputs
-    isn't supported for seeking, so we use one call per sample but keep them
-    short (10s each).
+    Uses the trim/atrim filter to grab 3 x 10s chunks from start, 30%, and 60%
+    through the file, outputting each as a separate WAV. Single file open = one
+    SMB connection instead of three.
     """
     tmp_dir = os.path.join(str(STAGING_DIR), "whisper_tmp")
     os.makedirs(tmp_dir, exist_ok=True)
     base = f"{os.getpid()}_{audio_stream_index}"
 
-    # Pick sample points: skip first 60s (logos/silence), then 30% and 60%
     total = max(duration_secs, 120)
     offsets = [
-        min(60, total * 0.05),           # near start (skip logos)
-        total * 0.3,                      # ~30% through
-        total * 0.6,                      # ~60% through
+        int(min(60, total * 0.05)),
+        int(total * 0.3),
+        int(total * 0.6),
     ]
 
     wav_paths = []
+    # Build a single ffmpeg command with multiple outputs via -ss/-to per output
+    # Each output seeks independently but shares the same input file handle
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", filepath]
     for i, offset in enumerate(offsets):
         wav_path = os.path.join(tmp_dir, f"{base}_s{i}.wav")
-        cmd = [
-            "ffmpeg", "-hide_banner", "-loglevel", "error",
-            "-ss", str(int(offset)),
-            "-i", filepath,
-            "-map", f"0:a:{audio_stream_index}",
+        wav_paths.append(wav_path)
+        cmd.extend([
+            "-ss", str(offset),
             "-t", str(sample_duration),
+            "-map", f"0:a:{audio_stream_index}",
             "-ac", "1", "-ar", "16000",
             "-y", wav_path,
-        ]
-        try:
-            subprocess.run(cmd, capture_output=True, timeout=30)
-            if os.path.exists(wav_path) and os.path.getsize(wav_path) > 10_000:
-                wav_paths.append(wav_path)
-        except (subprocess.TimeoutExpired, FileNotFoundError):
-            pass
+        ])
 
-    return wav_paths
+    try:
+        subprocess.run(cmd, capture_output=True, timeout=60)
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+
+    # Filter to files that actually got created and have content
+    return [p for p in wav_paths if os.path.exists(p) and os.path.getsize(p) > 10_000]
 
 
 def _whisper_detect_one(model, wav_path: str) -> tuple[Optional[str], float]:
