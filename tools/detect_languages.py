@@ -683,100 +683,106 @@ def _infer_audio_from_sub_majority(
     return None, "insufficient context"
 
 
-def process_file(file_entry: dict, use_whisper: bool = False, whisper_all: bool = False) -> list[dict]:
+def process_file(
+    file_entry: dict,
+    use_whisper: bool = False,
+    whisper_all: bool = False,
+    audio_only: bool = False,
+) -> list[dict]:
     """Return a list of detection results for all undetermined tracks in a file."""
     filepath = file_entry["filepath"]
     results = []
 
-    # --- Pass 1: Text subtitle extraction ---
+    # --- Pass 1: Text subtitle extraction (skip if audio_only) ---
     detected_text_langs: dict[int, str] = {}  # sub_all_idx → lang code
     text_results: list[dict] = []
 
-    for sub_all_idx, stream in enumerate(file_entry.get("subtitle_streams", [])):
-        lang = (stream.get("language") or "und").lower().strip()
-        codec = stream.get("codec", "").lower()
-        if lang not in UND_LANGS:
-            continue
+    if not audio_only:
+        for sub_all_idx, stream in enumerate(file_entry.get("subtitle_streams", [])):
+            lang = (stream.get("language") or "und").lower().strip()
+            codec = stream.get("codec", "").lower()
+            if lang not in UND_LANGS:
+                continue
 
-        if codec in TEXT_SUB_CODECS:
-            text = extract_subtitle_text(filepath, sub_all_idx)
-            if text:
-                detected, confidence = detect_language(text)
-                entry = {
+            if codec in TEXT_SUB_CODECS:
+                text = extract_subtitle_text(filepath, sub_all_idx)
+                if text:
+                    detected, confidence = detect_language(text)
+                    entry = {
+                        "filepath": filepath,
+                        "track_type": "subtitle",
+                        "stream_index": sub_all_idx,
+                        "codec": codec,
+                        "detected_language": detected,
+                        "confidence": confidence,
+                        "method": "text_extraction",
+                        "chars_sampled": len(text),
+                    }
+                    text_results.append(entry)
+                    if detected and detected != "und" and confidence >= 0.5:
+                        detected_text_langs[sub_all_idx] = detected
+                else:
+                    text_results.append({
+                        "filepath": filepath,
+                        "track_type": "subtitle",
+                        "stream_index": sub_all_idx,
+                        "codec": codec,
+                        "detected_language": None,
+                        "confidence": 0.0,
+                        "method": "text_extraction_failed",
+                        "chars_sampled": 0,
+                    })
+
+        results.extend(text_results)
+
+        # --- Pass 2: Bitmap subs — OCR first, then sibling inference fallback ---
+        pgs_inferred = _infer_pgs_from_siblings(file_entry, detected_text_langs)
+        for sub_all_idx, stream in enumerate(file_entry.get("subtitle_streams", [])):
+            lang = (stream.get("language") or "und").lower().strip()
+            codec = stream.get("codec", "").lower()
+            if lang not in UND_LANGS or codec not in BITMAP_SUB_CODECS:
+                continue
+
+            # Try OCR first (most accurate for bitmap subs)
+            ocr_text = extract_bitmap_subtitle_text(filepath, sub_all_idx)
+            if ocr_text:
+                detected, confidence = detect_language(ocr_text)
+                if detected and detected != "und" and confidence >= 0.5:
+                    detected_text_langs[sub_all_idx] = detected
+                    results.append({
+                        "filepath": filepath,
+                        "track_type": "subtitle",
+                        "stream_index": sub_all_idx,
+                        "codec": codec,
+                        "detected_language": detected,
+                        "confidence": confidence,
+                        "method": "ocr_extraction",
+                        "chars_sampled": len(ocr_text),
+                    })
+                    continue
+
+            # Fall back to sibling inference
+            if sub_all_idx in pgs_inferred:
+                inferred_lang, reason = pgs_inferred[sub_all_idx]
+                results.append({
                     "filepath": filepath,
                     "track_type": "subtitle",
                     "stream_index": sub_all_idx,
                     "codec": codec,
-                    "detected_language": detected,
-                    "confidence": confidence,
-                    "method": "text_extraction",
-                    "chars_sampled": len(text),
-                }
-                text_results.append(entry)
-                if detected and detected != "und" and confidence >= 0.5:
-                    detected_text_langs[sub_all_idx] = detected
+                    "detected_language": inferred_lang,
+                    "confidence": 0.85,
+                    "method": "sibling_inference",
+                    "reason": reason,
+                })
             else:
-                text_results.append({
+                results.append({
                     "filepath": filepath,
                     "track_type": "subtitle",
                     "stream_index": sub_all_idx,
                     "codec": codec,
                     "detected_language": None,
                     "confidence": 0.0,
-                    "method": "text_extraction_failed",
-                    "chars_sampled": 0,
-                })
-
-    results.extend(text_results)
-
-    # --- Pass 2: Bitmap subs — OCR first, then sibling inference fallback ---
-    pgs_inferred = _infer_pgs_from_siblings(file_entry, detected_text_langs)
-    for sub_all_idx, stream in enumerate(file_entry.get("subtitle_streams", [])):
-        lang = (stream.get("language") or "und").lower().strip()
-        codec = stream.get("codec", "").lower()
-        if lang not in UND_LANGS or codec not in BITMAP_SUB_CODECS:
-            continue
-
-        # Try OCR first (most accurate for bitmap subs)
-        ocr_text = extract_bitmap_subtitle_text(filepath, sub_all_idx)
-        if ocr_text:
-            detected, confidence = detect_language(ocr_text)
-            if detected and detected != "und" and confidence >= 0.5:
-                detected_text_langs[sub_all_idx] = detected  # feed back for other heuristics
-                results.append({
-                    "filepath": filepath,
-                    "track_type": "subtitle",
-                    "stream_index": sub_all_idx,
-                    "codec": codec,
-                    "detected_language": detected,
-                    "confidence": confidence,
-                    "method": "ocr_extraction",
-                    "chars_sampled": len(ocr_text),
-                })
-                continue
-
-        # Fall back to sibling inference
-        if sub_all_idx in pgs_inferred:
-            inferred_lang, reason = pgs_inferred[sub_all_idx]
-            results.append({
-                "filepath": filepath,
-                "track_type": "subtitle",
-                "stream_index": sub_all_idx,
-                "codec": codec,
-                "detected_language": inferred_lang,
-                "confidence": 0.85,
-                "method": "sibling_inference",
-                "reason": reason,
-            })
-        else:
-            results.append({
-                "filepath": filepath,
-                "track_type": "subtitle",
-                "stream_index": sub_all_idx,
-                "codec": codec,
-                "detected_language": None,
-                "confidence": 0.0,
-                "method": "bitmap_no_match",
+                    "method": "bitmap_no_match",
                 "chars_sampled": 0,
             })
 
@@ -944,7 +950,9 @@ def _apply_detections_to_entry(
     min_confidence: float, stats: dict,
 ) -> None:
     """Process a single file entry and patch detection results in-place (whisper mode)."""
-    results = process_file(entry, use_whisper=use_whisper, whisper_all=whisper_all)
+    # When running whisper, skip subtitle work entirely — audio only
+    results = process_file(entry, use_whisper=use_whisper, whisper_all=whisper_all,
+                           audio_only=use_whisper)
     _patch_entry_from_results(entry, results, min_confidence, stats)
 
 
