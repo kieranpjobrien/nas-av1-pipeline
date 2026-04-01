@@ -872,8 +872,19 @@ def enrich_report(
     if whisper_all:
         # Whisper all: process every file with audio tracks
         to_process = [e for e in files if e.get("audio_streams")]
+    elif use_whisper:
+        # Whisper (not all): only files with undetermined audio tracks
+        to_process = []
+        for entry in files:
+            has_und_audio = any(
+                (a.get("language") or "und").lower().strip() in UND_LANGS
+                and not (a.get("detection_method") == "whisper")
+                for a in entry.get("audio_streams", [])
+            )
+            if has_und_audio:
+                to_process.append(entry)
     else:
-        # Normal: only files with undetermined tracks
+        # Text/OCR mode: files with any undetermined tracks
         to_process = []
         for entry in files:
             has_und = any(
