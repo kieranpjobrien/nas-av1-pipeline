@@ -344,7 +344,11 @@ _whisper_small = None
 
 
 def _get_whisper_model(size: str = "tiny"):
-    """Lazy-load a faster-whisper model. Tiny for fast screening, small for confirmation."""
+    """Lazy-load a faster-whisper model. Tiny for fast screening, small for confirmation.
+
+    Uses CPU with int8 quantisation — tiny model runs at ~0.35s per 10s sample
+    on CPU which is fast enough (no CUDA cublas dependency needed).
+    """
     global _whisper_tiny, _whisper_small
     ref = _whisper_tiny if size == "tiny" else _whisper_small
     if ref is not None:
@@ -352,17 +356,11 @@ def _get_whisper_model(size: str = "tiny"):
 
     try:
         from faster_whisper import WhisperModel
-        model = WhisperModel(size, device="cuda", compute_type="float16")
-        logging.info(f"Loaded faster-whisper model ({size}, cuda/float16)")
+        model = WhisperModel(size, device="cpu", compute_type="int8")
+        logging.info(f"Loaded faster-whisper model ({size}, cpu/int8)")
     except Exception as e:
-        logging.warning(f"Failed to load whisper {size} on GPU, trying CPU: {e}")
-        try:
-            from faster_whisper import WhisperModel
-            model = WhisperModel(size, device="cpu", compute_type="int8")
-            logging.info(f"Loaded faster-whisper model ({size}, cpu/int8)")
-        except Exception as e2:
-            logging.error(f"Failed to load whisper model {size}: {e2}")
-            return None
+        logging.error(f"Failed to load whisper model {size}: {e}")
+        return None
 
     if size == "tiny":
         _whisper_tiny = model
@@ -423,7 +421,10 @@ def _extract_all_audio_samples(
 
 
 def _whisper_detect_one(model, wav_path: str) -> tuple[Optional[str], float]:
-    """Run whisper language detection on a single WAV sample."""
+    """Run whisper language detection on a single WAV sample.
+
+    Uses transcribe with early break — on CPU with tiny model this takes ~0.35s per sample.
+    """
     try:
         segments, info = model.transcribe(wav_path, beam_size=1, best_of=1,
                                           language=None, without_timestamps=True)
