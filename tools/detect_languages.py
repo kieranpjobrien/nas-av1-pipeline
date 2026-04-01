@@ -339,44 +339,52 @@ def infer_audio_language(file_entry: dict, audio_idx: int) -> tuple[Optional[str
 # Whisper-based audio language detection
 # ---------------------------------------------------------------------------
 
-_whisper_model = None  # lazy singleton
+_whisper_tiny = None
+_whisper_small = None
 
 
-def _get_whisper_model():
-    """Lazy-load the faster-whisper model (small, GPU). Cached as singleton."""
-    global _whisper_model
-    if _whisper_model is None:
+def _get_whisper_model(size: str = "tiny"):
+    """Lazy-load a faster-whisper model. Tiny for fast screening, small for confirmation."""
+    global _whisper_tiny, _whisper_small
+    ref = _whisper_tiny if size == "tiny" else _whisper_small
+    if ref is not None:
+        return ref
+
+    try:
+        from faster_whisper import WhisperModel
+        model = WhisperModel(size, device="cuda", compute_type="float16")
+        logging.info(f"Loaded faster-whisper model ({size}, cuda/float16)")
+    except Exception as e:
+        logging.warning(f"Failed to load whisper {size} on GPU, trying CPU: {e}")
         try:
             from faster_whisper import WhisperModel
-            _whisper_model = WhisperModel("small", device="cuda", compute_type="float16")
-            logging.info("Loaded faster-whisper model (small, cuda/float16)")
-        except Exception as e:
-            logging.warning(f"Failed to load whisper on GPU, trying CPU: {e}")
-            try:
-                from faster_whisper import WhisperModel
-                _whisper_model = WhisperModel("small", device="cpu", compute_type="int8")
-                logging.info("Loaded faster-whisper model (small, cpu/int8)")
-            except Exception as e2:
-                logging.error(f"Failed to load whisper model: {e2}")
-                return None
-    return _whisper_model
+            model = WhisperModel(size, device="cpu", compute_type="int8")
+            logging.info(f"Loaded faster-whisper model ({size}, cpu/int8)")
+        except Exception as e2:
+            logging.error(f"Failed to load whisper model {size}: {e2}")
+            return None
+
+    if size == "tiny":
+        _whisper_tiny = model
+    else:
+        _whisper_small = model
+    return model
 
 
-def _extract_audio_samples(
+def _extract_all_audio_samples(
     filepath: str,
-    audio_stream_index: int,
+    audio_indices: list[int],
     duration_secs: float,
     sample_duration: int = 10,
-) -> list[str]:
-    """Extract 3 audio samples from different points in one ffmpeg call.
+) -> dict[int, list[str]]:
+    """Extract audio samples for ALL tracks of a file in one ffmpeg call.
 
-    Uses the trim/atrim filter to grab 3 x 10s chunks from start, 30%, and 60%
-    through the file, outputting each as a separate WAV. Single file open = one
-    SMB connection instead of three.
+    Returns {audio_index: [wav_path, wav_path, wav_path], ...}.
+    Single file open over SMB regardless of how many tracks.
     """
     tmp_dir = os.path.join(str(STAGING_DIR), "whisper_tmp")
     os.makedirs(tmp_dir, exist_ok=True)
-    base = f"{os.getpid()}_{audio_stream_index}"
+    base = f"{os.getpid()}"
 
     total = max(duration_secs, 120)
     offsets = [
@@ -385,28 +393,33 @@ def _extract_audio_samples(
         int(total * 0.6),
     ]
 
-    wav_paths = []
-    # Build a single ffmpeg command with multiple outputs via -ss/-to per output
-    # Each output seeks independently but shares the same input file handle
+    result: dict[int, list[str]] = {}
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", filepath]
-    for i, offset in enumerate(offsets):
-        wav_path = os.path.join(tmp_dir, f"{base}_s{i}.wav")
-        wav_paths.append(wav_path)
-        cmd.extend([
-            "-ss", str(offset),
-            "-t", str(sample_duration),
-            "-map", f"0:a:{audio_stream_index}",
-            "-ac", "1", "-ar", "16000",
-            "-y", wav_path,
-        ])
+
+    for aidx in audio_indices:
+        paths = []
+        for si, offset in enumerate(offsets):
+            wav_path = os.path.join(tmp_dir, f"{base}_a{aidx}_s{si}.wav")
+            paths.append(wav_path)
+            cmd.extend([
+                "-ss", str(offset),
+                "-t", str(sample_duration),
+                "-map", f"0:a:{aidx}",
+                "-ac", "1", "-ar", "16000",
+                "-y", wav_path,
+            ])
+        result[aidx] = paths
 
     try:
-        subprocess.run(cmd, capture_output=True, timeout=60)
+        subprocess.run(cmd, capture_output=True, timeout=90)
     except (subprocess.TimeoutExpired, FileNotFoundError):
         pass
 
-    # Filter to files that actually got created and have content
-    return [p for p in wav_paths if os.path.exists(p) and os.path.getsize(p) > 10_000]
+    # Filter to files that got created
+    for aidx in list(result.keys()):
+        result[aidx] = [p for p in result[aidx] if os.path.exists(p) and os.path.getsize(p) > 10_000]
+
+    return result
 
 
 def _whisper_detect_one(model, wav_path: str) -> tuple[Optional[str], float]:
@@ -423,61 +436,77 @@ def _whisper_detect_one(model, wav_path: str) -> tuple[Optional[str], float]:
     return None, 0.0
 
 
+def _majority_vote(detections: list[tuple[str, float]]) -> tuple[Optional[str], float]:
+    """Majority vote across multiple whisper detections."""
+    if not detections:
+        return None, 0.0
+    if len(detections) == 1:
+        return detections[0]
+
+    from collections import Counter
+    lang_counts = Counter(lang for lang, _ in detections)
+    majority_lang, majority_count = lang_counts.most_common(1)[0]
+
+    if majority_count == len(detections):
+        avg_prob = sum(p for _, p in detections) / len(detections)
+        return majority_lang, round(avg_prob, 3)
+
+    if majority_count > len(detections) / 2:
+        avg_prob = sum(p for l, p in detections if l == majority_lang) / majority_count
+        return majority_lang, round(avg_prob * 0.85, 3)
+
+    best = max(detections, key=lambda x: x[1])
+    return best[0], round(best[1] * 0.7, 3)
+
+
 def detect_audio_language_whisper(
     filepath: str,
     audio_stream_index: int,
     duration_secs: float = 0,
 ) -> tuple[Optional[str], float]:
-    """Detect language from an audio stream using multi-sample whisper analysis.
+    """Detect language using tiny-first with small escalation.
 
-    Takes 3 x 10-second samples from different points in the file (start, 30%, 60%)
-    to handle films that switch languages. Majority vote determines the result.
-    Disagreement between samples is flagged in the confidence score.
+    1. Extract 3 x 10s samples (one ffmpeg call)
+    2. Run whisper-tiny on first sample — if confidence >= 0.8, done
+    3. If low confidence, run tiny on remaining samples + majority vote
+    4. If still < 0.8, escalate to whisper-small on first sample
 
     Returns (lang_code, confidence) or (None, 0.0) on failure.
     """
-    model = _get_whisper_model()
-    if model is None:
-        return None, 0.0
-
-    wav_paths = _extract_audio_samples(filepath, audio_stream_index, duration_secs)
+    samples = _extract_all_audio_samples(filepath, [audio_stream_index], duration_secs)
+    wav_paths = samples.get(audio_stream_index, [])
     if not wav_paths:
         return None, 0.0
 
     try:
-        # Run whisper on each sample
-        detections = []
-        for wav_path in wav_paths:
-            lang, prob = _whisper_detect_one(model, wav_path)
-            if lang:
-                detections.append((lang, prob))
-
-        if not detections:
+        # Step 1: tiny model on first sample (fast screening)
+        tiny = _get_whisper_model("tiny")
+        if not tiny:
             return None, 0.0
 
-        # Single sample — use it directly
-        if len(detections) == 1:
-            return detections[0]
+        lang, prob = _whisper_detect_one(tiny, wav_paths[0])
+        if lang and prob >= 0.8:
+            return lang, prob
 
-        # Majority vote
-        from collections import Counter
-        lang_counts = Counter(lang for lang, _ in detections)
-        majority_lang, majority_count = lang_counts.most_common(1)[0]
+        # Step 2: tiny on remaining samples, majority vote
+        detections = [(lang, prob)] if lang else []
+        for wav_path in wav_paths[1:]:
+            l, p = _whisper_detect_one(tiny, wav_path)
+            if l:
+                detections.append((l, p))
 
-        # All samples agree — high confidence
-        if majority_count == len(detections):
-            avg_prob = sum(p for l, p in detections) / len(detections)
-            return majority_lang, round(avg_prob, 3)
+        result_lang, result_conf = _majority_vote(detections)
+        if result_lang and result_conf >= 0.8:
+            return result_lang, result_conf
 
-        # Majority agrees — moderate confidence (flag mixed)
-        if majority_count > len(detections) / 2:
-            avg_prob = sum(p for l, p in detections if l == majority_lang) / majority_count
-            # Discount confidence for mixed results
-            return majority_lang, round(avg_prob * 0.85, 3)
+        # Step 3: escalate to small model on first sample for confirmation
+        small = _get_whisper_model("small")
+        if small:
+            s_lang, s_prob = _whisper_detect_one(small, wav_paths[0])
+            if s_lang and s_prob > result_conf:
+                return s_lang, s_prob
 
-        # No majority — inconclusive, return most confident single detection
-        best = max(detections, key=lambda x: x[1])
-        return best[0], round(best[1] * 0.7, 3)
+        return result_lang or lang, result_conf or prob
 
     except Exception as e:
         logging.debug(f"Whisper detection failed for {os.path.basename(filepath)} a:{audio_stream_index}: {e}")
@@ -488,6 +517,70 @@ def detect_audio_language_whisper(
                 os.remove(wav_path)
             except OSError:
                 pass
+
+
+def detect_audio_languages_for_file(
+    filepath: str,
+    audio_indices: list[int],
+    duration_secs: float = 0,
+) -> dict[int, tuple[Optional[str], float]]:
+    """Detect languages for ALL audio tracks of a file efficiently.
+
+    Batch-extracts all samples in one ffmpeg call, then runs whisper on each.
+    Uses tiny model first, escalates to small only when needed.
+    Returns {audio_index: (lang, confidence), ...}.
+    """
+    # Extract all tracks' samples in one file open
+    all_samples = _extract_all_audio_samples(filepath, audio_indices, duration_secs)
+
+    results: dict[int, tuple[Optional[str], float]] = {}
+    tiny = _get_whisper_model("tiny")
+    if not tiny:
+        return {i: (None, 0.0) for i in audio_indices}
+
+    for aidx in audio_indices:
+        wav_paths = all_samples.get(aidx, [])
+        if not wav_paths:
+            results[aidx] = (None, 0.0)
+            continue
+
+        # Tiny on first sample
+        lang, prob = _whisper_detect_one(tiny, wav_paths[0])
+        if lang and prob >= 0.8:
+            results[aidx] = (lang, prob)
+            continue
+
+        # Tiny on all samples, majority vote
+        detections = [(lang, prob)] if lang else []
+        for wp in wav_paths[1:]:
+            l, p = _whisper_detect_one(tiny, wp)
+            if l:
+                detections.append((l, p))
+
+        result_lang, result_conf = _majority_vote(detections)
+        if result_lang and result_conf >= 0.8:
+            results[aidx] = (result_lang, result_conf)
+            continue
+
+        # Escalate to small
+        small = _get_whisper_model("small")
+        if small:
+            s_lang, s_prob = _whisper_detect_one(small, wav_paths[0])
+            if s_lang and s_prob > (result_conf or 0):
+                results[aidx] = (s_lang, s_prob)
+                continue
+
+        results[aidx] = (result_lang, result_conf or 0.0)
+
+    # Clean up all temp files
+    for wav_list in all_samples.values():
+        for wp in wav_list:
+            try:
+                os.remove(wp)
+            except OSError:
+                pass
+
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -688,19 +781,24 @@ def process_file(file_entry: dict, use_whisper: bool = False, whisper_all: bool 
             })
 
     # --- Pass 3: Audio tracks (heuristics → subtitle majority → whisper) ---
+    # Collect which tracks need whisper so we can batch-extract all at once
+    audio_heuristics: dict[int, tuple] = {}  # idx → (detected, conf, method, reason)
+    whisper_candidates: list[int] = []
+
     for audio_idx, stream in enumerate(file_entry.get("audio_streams", [])):
         lang = (stream.get("language") or "und").lower().strip()
         is_und = lang in UND_LANGS
 
-        # For non-whisper mode, skip tracks that already have a tag
+        # Skip tracks already detected in a previous run
+        if stream.get("detected_language") and stream.get("detection_method") == "whisper":
+            continue
+
         if not is_und and not (use_whisper and whisper_all):
             continue
 
         detected, reason = None, "insufficient context"
         conf = 0.0
-        method = "heuristic"
 
-        # Heuristic pass (only for undetermined tracks)
         if is_und:
             detected, reason = infer_audio_language(file_entry, audio_idx)
             if not detected:
@@ -709,18 +807,27 @@ def process_file(file_entry: dict, use_whisper: bool = False, whisper_all: bool 
                 )
             conf = 0.9 if detected and "majority" not in reason else (0.8 if detected else 0.0)
 
-        # Whisper: run on ALL tracks when whisper_all, or as fallback for und
+        audio_heuristics[audio_idx] = (detected, conf, "heuristic", reason)
+
         if use_whisper and (whisper_all or (is_und and not detected)):
-            w_lang, w_conf = detect_audio_language_whisper(
-                filepath, audio_idx, file_entry.get("duration_seconds", 0),
-            )
-            if w_lang and w_conf > 0.5:
-                # Whisper overrides if more confident or if track already has a tag
-                if not detected or w_conf > conf:
-                    detected = w_lang
-                    conf = w_conf
-                    method = "whisper"
-                    reason = f"whisper detection (prob={w_conf:.2f})"
+            whisper_candidates.append(audio_idx)
+
+    # Batch whisper: extract all tracks' samples in one ffmpeg call
+    whisper_results: dict[int, tuple] = {}
+    if whisper_candidates:
+        whisper_results = detect_audio_languages_for_file(
+            filepath, whisper_candidates, file_entry.get("duration_seconds", 0),
+        )
+
+    # Merge heuristic + whisper results
+    for audio_idx, (detected, conf, method, reason) in audio_heuristics.items():
+        if audio_idx in whisper_results:
+            w_lang, w_conf = whisper_results[audio_idx]
+            if w_lang and w_conf > 0.5 and (not detected or w_conf > conf):
+                detected = w_lang
+                conf = w_conf
+                method = "whisper"
+                reason = f"whisper detection (prob={w_conf:.2f})"
 
         if detected:
             results.append({
