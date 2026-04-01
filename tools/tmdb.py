@@ -69,26 +69,40 @@ def _api_get(path: str, params: dict[str, str] | None = None) -> dict | list | N
 
 # ---------- Filename parsing ----------
 
-# Movie: "Movie Name (2024).mkv" or path ending in "Movie Name (2024)/Movie Name (2024).mkv"
-_MOVIE_RE = re.compile(r"^(.+?)\s*\((\d{4})\)\s*(?:\.\w+)?$")
+# Movie: "Movie Name (2024).mkv" or with edition suffix "Movie Name (2024) Extended Cut.mkv"
+_MOVIE_RE = re.compile(r"^(.+?)\s*\((\d{4})\)\s*(.*)$")
+# Scene: "Gran.Torino.2008.1080p.BluRay..." — dots as separators, year in the middle
+_SCENE_RE = re.compile(r"^(.+?)[.\s](\d{4})[.\s](?:\d{3,4}p|BluRay|WEB|HDR|German|DL)", re.IGNORECASE)
 # Series: "Show Name S01E05 Episode Title.mkv" (various separators)
 _SERIES_RE = re.compile(r"^(.+?)\s*[.\-_ ]*[Ss](\d{1,2})[Ee](\d{1,3})")
+# Edition suffixes to strip from titles
+_EDITION_SUFFIXES = re.compile(
+    r"\s*[-–—]?\s*(?:Director'?s?\s*Cut|Extended\s*(?:Cut|Edition)?|Unrated|IMAX|"
+    r"Theatrical\s*Cut|Remastered|EXTENDED|UNRATED)\s*$",
+    re.IGNORECASE,
+)
 
 
 def parse_movie_filename(filename: str) -> tuple[str, int | None]:
     """Extract (title, year) from a movie filename.
 
-    Args:
-        filename: Base filename like "Inception (2010).mkv".
-
-    Returns:
-        Tuple of (cleaned title, year) or (cleaned title, None) if unparseable.
+    Handles: clean names, edition suffixes, scene release naming, dots-as-separators.
     """
     name = Path(filename).stem
+
+    # Standard: "Movie Name (2024) Extended Cut"
     m = _MOVIE_RE.match(name)
     if m:
         title = m.group(1).strip().replace(".", " ")
+        title = _EDITION_SUFFIXES.sub("", title).strip()
         return title, int(m.group(2))
+
+    # Scene: "Gran.Torino.2008.1080p.BluRay.x264-OFT"
+    m = _SCENE_RE.match(name)
+    if m:
+        title = m.group(1).replace(".", " ").strip()
+        return title, int(m.group(2))
+
     # Fallback: strip extension, replace dots/underscores
     cleaned = name.replace(".", " ").replace("_", " ").strip()
     return cleaned, None
@@ -370,11 +384,26 @@ _tv_cache: dict[str, dict | None] = {}
 def _enrich_movie(entry: dict) -> dict | None:
     """Look up and return TMDb metadata for a single movie entry."""
     title, year = parse_movie_filename(entry["filename"])
-    if not title:
+    if not title or title.startswith("tmp"):
         return None
+
+    # Strip leftover edition suffixes the regex didn't catch
+    title = _EDITION_SUFFIXES.sub("", title).strip().rstrip(" -")
 
     results = search_movie(title, year)
     match = _pick_best_movie(results, title, year, entry.get("duration_seconds", 0))
+
+    # Retry: year might be part of the title (e.g. "Wonder Woman 1984")
+    if not match and year:
+        title_with_year = f"{title} {year}"
+        results2 = search_movie(title_with_year)
+        match = _pick_best_movie(results2, title_with_year, None, entry.get("duration_seconds", 0))
+
+    # Retry: without year (broader search)
+    if not match and year:
+        results3 = search_movie(title)
+        match = _pick_best_movie(results3, title, None, entry.get("duration_seconds", 0))
+
     if not match:
         return None
 
