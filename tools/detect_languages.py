@@ -899,7 +899,7 @@ def enrich_report(
         logging.info("No tracks to process — skipping language detection")
         return report
 
-    logging.info(f"Language detection: {len(to_process)} files with undetermined tracks")
+    logging.info(f"Language detection: {len(to_process)} files to process (whisper={use_whisper}, all={whisper_all})")
     if _find_tesseract():
         logging.info(f"  Tesseract: found at {_find_tesseract()}")
     else:
