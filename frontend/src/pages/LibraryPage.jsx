@@ -338,9 +338,12 @@ function DuplicateGroups({ onReload, onFileClick }) {
 
 function LanguageHealth({ files, scanDate, onReload }) {
   const [applyRunning, setApplyRunning] = useState(false);
+  const [showReview, setShowReview] = useState(false);
 
-  // Count from inline fields: "truly unknown" = und tag AND no detected_language
+  // Count from inline fields
   let undSubs = 0, undAudio = 0, detectedSubs = 0, detectedAudio = 0;
+  const needsReview = [];
+
   for (const f of files) {
     for (const s of f.subtitle_streams || []) {
       const tagUnd = ["und", "unk", ""].includes((s.language || "und").toLowerCase());
@@ -351,13 +354,17 @@ function LanguageHealth({ files, scanDate, onReload }) {
       const tagUnd = ["und", "unk", ""].includes((a.language || "und").toLowerCase());
       if (tagUnd && a.detected_language) detectedAudio++;
       else if (tagUnd) undAudio++;
+      // Low-confidence whisper = likely mixed-language, flag for review
+      if (a.detection_method === "whisper" && a.detection_confidence && a.detection_confidence < 0.75) {
+        needsReview.push({ filename: f.filename, filepath: f.filepath, track: `audio ${f.audio_streams.indexOf(a)}`, lang: a.detected_language, confidence: a.detection_confidence });
+      }
     }
   }
 
   const totalDetected = detectedSubs + detectedAudio;
   const totalUnd = undSubs + undAudio;
 
-  if (totalDetected === 0 && totalUnd === 0) return null;
+  if (totalDetected === 0 && totalUnd === 0 && needsReview.length === 0) return null;
 
   const lastScan = scanDate
     ? new Date(scanDate).toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" })
@@ -395,6 +402,9 @@ function LanguageHealth({ files, scanDate, onReload }) {
         <StatCard label="Unresolved Subtitles" value={fmtNum(undSubs)} colour={undSubs > 0 ? PALETTE.accentWarm : undefined} />
         <StatCard label="Unresolved Audio" value={fmtNum(undAudio)} colour={undAudio > 0 ? PALETTE.accentWarm : undefined} />
         <StatCard label="Detected (pending apply)" value={fmtNum(totalDetected)} colour={totalDetected > 0 ? PALETTE.accent : undefined} />
+        {needsReview.length > 0 && (
+          <StatCard label="Needs Review" value={fmtNum(needsReview.length)} colour="#f97316" />
+        )}
         <StatCard label="Last Scan" value={lastScan} />
       </div>
 
@@ -421,6 +431,32 @@ function LanguageHealth({ files, scanDate, onReload }) {
       {totalUnd > 0 && (
         <div style={{ color: PALETTE.textMuted, fontSize: 11, marginBottom: 16 }}>
           {fmtNum(totalUnd)} tracks still unresolved. Run Whisper from Controls for audio, or install Tesseract for bitmap subs.
+        </div>
+      )}
+
+      {needsReview.length > 0 && (
+        <div style={{ marginBottom: 16 }}>
+          <button
+            onClick={() => setShowReview(!showReview)}
+            style={{ background: "transparent", border: `1px solid #f97316`, borderRadius: 6, color: "#f97316", padding: "4px 12px", fontSize: 11, cursor: "pointer", fontWeight: 600 }}
+          >
+            {showReview ? "Hide" : "Show"} {needsReview.length} files needing review (mixed language?)
+          </button>
+          {showReview && (
+            <div style={{ background: PALETTE.surface, border: `1px solid ${PALETTE.border}`, borderRadius: 8, padding: 12, marginTop: 8, maxHeight: 300, overflow: "auto" }}>
+              {needsReview.map((r, i) => (
+                <div key={i} style={{ display: "flex", justifyContent: "space-between", padding: "4px 0", borderBottom: `1px solid ${PALETTE.border}22`, fontSize: 12 }}>
+                  <span style={{ color: PALETTE.text, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {r.filename}
+                  </span>
+                  <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, display: "flex", gap: 8, whiteSpace: "nowrap" }}>
+                    <span style={{ color: "#f97316" }}>{r.lang}</span>
+                    <span style={{ color: PALETTE.textMuted }}>{(r.confidence * 100).toFixed(0)}%</span>
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
     </div>
