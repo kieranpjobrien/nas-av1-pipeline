@@ -291,12 +291,17 @@ def main():
                 total_saved += orig_size - new_size
             except OSError:
                 pass
+            # Update media report so subtitle counts reflect the stripped file
+            try:
+                from tools.scanner import update_report_entry
+                update_report_entry(f["filepath"], str(MEDIA_REPORT), f.get("library_type", ""))
+            except Exception as e:
+                print(f"  Report update failed (non-fatal): {e}")
 
     elapsed = time.monotonic() - start_time
     elapsed_str = f"{elapsed / 60:.1f}m" if elapsed >= 60 else f"{elapsed:.0f}s"
     print(f"\nDone: {success}/{len(files)} files processed in {elapsed_str}")
     print(f"Total saved: {total_saved / (1024**3):.2f} GB")
-    print("\nRun a library rescan to update the media report.")
 
 
 if __name__ == "__main__":
