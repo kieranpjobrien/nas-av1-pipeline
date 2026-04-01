@@ -531,7 +531,10 @@ def detect_audio_languages_for_file(
     Returns {audio_index: (lang, confidence), ...}.
     """
     # Extract all tracks' samples in one file open
+    logging.info(f"    Extracting {len(audio_indices)} tracks × 3 samples...")
     all_samples = _extract_all_audio_samples(filepath, audio_indices, duration_secs)
+    extracted = sum(len(v) for v in all_samples.values())
+    logging.info(f"    Extracted {extracted} samples")
 
     results: dict[int, tuple[Optional[str], float]] = {}
     tiny = _get_whisper_model("tiny")
@@ -826,6 +829,7 @@ def process_file(
         )
 
     # Merge heuristic + whisper results
+    audio_streams = file_entry.get("audio_streams", [])
     for audio_idx, (detected, conf, method, reason) in audio_heuristics.items():
         if audio_idx in whisper_results:
             w_lang, w_conf = whisper_results[audio_idx]
@@ -835,28 +839,31 @@ def process_file(
                 method = "whisper"
                 reason = f"whisper detection (prob={w_conf:.2f})"
 
+        audio_codec = audio_streams[audio_idx].get("codec", "") if audio_idx < len(audio_streams) else ""
         if detected:
             results.append({
                 "filepath": filepath,
                 "track_type": "audio",
                 "stream_index": audio_idx,
-                "codec": stream.get("codec", ""),
+                "codec": audio_codec,
                 "detected_language": detected,
                 "confidence": conf,
                 "method": method,
                 "reason": reason,
             })
-        elif is_und:
-            results.append({
-                "filepath": filepath,
-                "track_type": "audio",
-                "stream_index": audio_idx,
-                "codec": stream.get("codec", ""),
-                "detected_language": None,
-                "confidence": 0.0,
-                "method": method,
-                "reason": reason,
-            })
+        else:
+            lang = (audio_streams[audio_idx].get("language") or "und").lower() if audio_idx < len(audio_streams) else "und"
+            if lang in UND_LANGS:
+                results.append({
+                    "filepath": filepath,
+                    "track_type": "audio",
+                    "stream_index": audio_idx,
+                    "codec": audio_codec,
+                    "detected_language": None,
+                    "confidence": 0.0,
+                    "method": method,
+                    "reason": reason,
+                })
 
     return results
 
@@ -914,12 +921,15 @@ def enrich_report(
 
     if use_whisper:
         logging.info("  Whisper: enabled — processing sequentially (GPU)")
-        _get_whisper_model()
+        _get_whisper_model("tiny")
         for entry in to_process:
             completed += 1
-            if completed % 10 == 0 or completed == total:
-                logging.info(f"  Language progress: {completed}/{total}")
-            _apply_detections_to_entry(entry, use_whisper, whisper_all, min_confidence, detection_stats)
+            n_audio = len(entry.get("audio_streams", []))
+            logging.info(f"  [{completed}/{total}] {entry.get('filename', '?')} ({n_audio} audio)")
+            try:
+                _apply_detections_to_entry(entry, use_whisper, whisper_all, min_confidence, detection_stats)
+            except Exception as e:
+                logging.warning(f"    Error: {e}")
     else:
         with ThreadPoolExecutor(max_workers=workers) as executor:
             futures = {executor.submit(process_file, entry): entry for entry in to_process}
