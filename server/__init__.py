@@ -174,9 +174,8 @@ PROCESS_CONFIGS = {
         "cwd": str(Path(__file__).parent.parent),
     },
     "detect_languages_whisper": {
-        "cmd": [sys.executable, "-m", "tools.detect_languages", "--whisper-all"],
+        "cmd": [sys.executable, "-m", "tools.detect_languages", "--whisper"],
         "cwd": str(Path(__file__).parent.parent),
-        "gpu": True,
     },
     "apply_languages": {
         "cmd": [sys.executable, "-m", "tools.detect_languages", "--apply", "--min-confidence", "0.85"],
