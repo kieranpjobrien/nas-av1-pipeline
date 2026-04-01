@@ -332,16 +332,21 @@ def _pick_best_tv(results: list[dict], title: str) -> dict | None:
     if not results:
         return None
 
-    title_lower = title.lower()
+    # Normalise for comparison: strip colons, dashes, lowercase
+    def norm(s: str) -> str:
+        return re.sub(r"[:\-–—]", "", s).lower().strip()
+
+    title_norm = norm(title)
     best, best_score = None, -1
 
     for r in results[:10]:
         score = 0.0
-        r_name = (r.get("name") or "").lower()
+        r_name = (r.get("name") or "")
+        r_norm = norm(r_name)
 
-        if r_name == title_lower:
+        if r_norm == title_norm:
             score += 10
-        elif title_lower in r_name or r_name in title_lower:
+        elif title_norm in r_norm or r_norm in title_norm:
             score += 5
 
         score += min((r.get("popularity") or 0) / 100, 2)
@@ -398,9 +403,14 @@ def _enrich_movie(entry: dict) -> dict | None:
 
 
 def _clean_show_name(raw: str) -> str:
-    """Strip year suffix and clean up a show folder name for TMDb search."""
-    # "Archer (2009)" → "Archer", "The Wire" → "The Wire"
-    cleaned = re.sub(r"\s*\(\d{4}\)\s*$", "", raw).strip()
+    """Clean up a show folder name for TMDb search.
+
+    Handles: year suffix "Archer (2009)", country suffix "Euphoria (US)",
+    dash-for-colon "Star Wars - The Clone Wars" → "Star Wars: The Clone Wars".
+    """
+    cleaned = re.sub(r"\s*\(\d{4}\)\s*$", "", raw).strip()  # strip year
+    cleaned = re.sub(r"\s*\([A-Z]{2,3}\)\s*$", "", cleaned).strip()  # strip country code
+    cleaned = re.sub(r"\s+-\s+", ": ", cleaned)  # dash → colon (NAS naming convention)
     return cleaned if cleaned else raw
 
 
