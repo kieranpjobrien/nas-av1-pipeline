@@ -116,106 +116,189 @@ class Pipeline:
             time.sleep(30)
         return False
 
+    def _estimate_encode_secs(self, item: dict) -> float:
+        """Predict how long a file will take to encode based on tier averages."""
+        if item.get("audio_only"):
+            # Audio remux: ~30s per GB (mostly network I/O)
+            return max(30, item.get("file_size_bytes", 0) / (1024**3) * 30)
+
+        res_key = get_res_key(item)
+        tier_stats = self.state.stats.get("tier_stats", {})
+        tier = tier_stats.get(res_key, {})
+        tier_completed = tier.get("completed", 0)
+        tier_time = tier.get("total_encode_time_secs", 0)
+        tier_bytes = tier.get("total_input_bytes", 0)
+
+        if tier_completed >= 2 and tier_bytes > 0:
+            # Per-byte rate for this tier
+            secs_per_byte = tier_time / tier_bytes
+            return item.get("file_size_bytes", 0) * secs_per_byte
+        # Fallback: overall average
+        overall = self.state.stats.get("total_encode_time_secs", 0)
+        overall_n = self.state.stats.get("completed", 0)
+        if overall_n > 0:
+            return overall / overall_n
+        return 300  # conservative 5-minute default
+
+    def _estimate_fetch_secs(self, item: dict) -> float:
+        """Predict fetch time based on file size and NAS throughput."""
+        NAS_THROUGHPUT = 100 * 1024**2  # ~100 MB/s over 1 Gbps
+        return max(2, item.get("file_size_bytes", 0) / NAS_THROUGHPUT)
+
     def _prefetch_worker(self, queue: list[dict]):
-        """Background thread: pre-fetch files from NAS while encoder is busy.
+        """Smart prefetch scheduler: keeps GPU and audio threads optimally fed.
 
-        Uses a byte-based buffer limit (from config) with a file count cap to
-        keep the GPU fed without over-fetching. Large 4K files get fewer
-        prefetches; small 720p files get more.
+        Strategy:
+        1. Always ensure the next GPU job is fetched (highest priority)
+        2. While GPU is encoding, fill remaining bandwidth with audio jobs
+        3. Prefer small audio jobs (more files processed per unit bandwidth)
+        4. Look ahead: if GPU encode will take 10 min, fetch enough audio
+           jobs to keep all audio threads busy for those 10 min
         """
-        MAX_PREFETCH_FILES = 20  # hard cap on file count
-        max_prefetch_bytes = self.config.get("max_fetch_buffer_bytes", 100 * 1024**3)
+        MAX_PREFETCH_BYTES = self.config.get("max_fetch_buffer_bytes", 100 * 1024**3)
+        MAX_PREFETCH_FILES = 30
+        MAX_AUDIO_QUEUED = 8   # keep audio threads fed ahead
 
-        logging.info("Prefetch thread started (buffer: %s, max %d files)",
-                     format_bytes(max_prefetch_bytes), MAX_PREFETCH_FILES)
+        logging.info("Smart prefetch started (buffer: %s)", format_bytes(MAX_PREFETCH_BYTES))
+
         while not self._shutdown:
             fetched_any = False
 
-            # Count pending fetched files and estimate their total size
+            # Check buffer limits
             fetched_paths = self.state.get_files_by_status(FileStatus.FETCHED)
-            pending_fetched = len(fetched_paths)
-            pending_bytes = 0
+            pending_bytes = sum(
+                (self.state.get_file(fp) or {}).get("input_size_bytes", 0) or 0
+                for fp in fetched_paths
+            )
+            if len(fetched_paths) >= MAX_PREFETCH_FILES or pending_bytes >= MAX_PREFETCH_BYTES:
+                self._sleep_or_shutdown(10)
+                continue
+
+            # Respect fetch pause
+            while self.control.is_fetch_paused() and not self._shutdown:
+                time.sleep(5)
+            if self._shutdown:
+                break
+
+            # Categorise fetched files
+            video_fetched = []
+            audio_fetched = []
             for fp in fetched_paths:
                 fi = self.state.get_file(fp)
                 if fi:
-                    pending_bytes += fi.get("input_size_bytes", 0) or 0
-            if pending_fetched >= MAX_PREFETCH_FILES or pending_bytes >= max_prefetch_bytes:
-                # Enough files queued for encoding, wait before fetching more
-                for _ in range(6):
-                    if self._shutdown:
-                        break
-                    time.sleep(5)
-                continue
+                    # Check if this is an audio-only job by looking at the queue
+                    queue_item = next((q for q in queue if q["filepath"] == fp), None)
+                    if queue_item and queue_item.get("audio_only"):
+                        audio_fetched.append(fp)
+                    else:
+                        video_fetched.append(fp)
 
-            # Build force and priority sets — fetch these first
-            force_set = {
-                os.path.normpath(p).lower()
-                for p in self.control.get_force_items()
-            }
-            priority_set = {
-                os.path.normpath(p).lower()
-                for p in self.control.get_priority_bumps()
-            }
+            # Build priority lookup
+            force_set = {os.path.normpath(p).lower() for p in self.control.get_force_items()}
+            priority_set = {os.path.normpath(p).lower() for p in self.control.get_priority_bumps()}
             priority_patterns = self.control.get_priority_patterns()
 
-            def _fetch_tier(item):
-                norm = os.path.normpath(item["filepath"]).lower()
-                if norm in force_set:
-                    tier = 0
-                elif norm in priority_set or any(
-                    fnmatch.fnmatch(norm, pat.lower()) for pat in priority_patterns
-                ):
-                    tier = 1
-                else:
-                    tier = 2
-                # Within each tier: audio-only first, then smallest file first
-                audio_first = 0 if item.get("audio_only") else 1
-                return (tier, audio_first, item.get("file_size_bytes", 0))
+            # Separate unfetched queue items into video and audio candidates
+            video_candidates = []
+            audio_candidates = []
 
-            # Sort queue: force first, then priority, then rest; smallest first within each tier
-            fetch_order = sorted(queue, key=_fetch_tier)
-
-            for item in fetch_order:
+            for item in queue:
                 if self._shutdown:
                     break
-
                 filepath = item["filepath"]
-
-                # Skip completed/error/already-fetched files
                 existing = self.state.get_file(filepath)
-                if existing and existing["status"] not in (
-                    FileStatus.PENDING.value, None
-                ):
+                if existing and existing["status"] not in (FileStatus.PENDING.value, None):
                     continue
-
-                # Skip if control system says so
                 if self.control.should_skip(filepath):
                     continue
 
-                # Re-check lookahead limit before each fetch
-                fetched_paths = self.state.get_files_by_status(FileStatus.FETCHED)
-                pending_fetched = len(fetched_paths)
-                if pending_fetched >= MAX_PREFETCH_FILES:
-                    break
+                norm = os.path.normpath(filepath).lower()
+                priority = 0 if norm in force_set else (1 if norm in priority_set or
+                    any(fnmatch.fnmatch(norm, p.lower()) for p in priority_patterns) else 2)
 
-                # Respect fetch pause
-                while self.control.is_fetch_paused() and not self._shutdown:
-                    time.sleep(5)
-                if self._shutdown:
-                    break
+                entry = (priority, item)
+                if item.get("audio_only"):
+                    audio_candidates.append(entry)
+                else:
+                    video_candidates.append(entry)
 
-                # Try to fetch — returns None if buffer full
+            # Sort: priority first, then by size (small first for audio, large for video doesn't matter)
+            video_candidates.sort(key=lambda x: (x[0], x[1].get("file_size_bytes", 0)))
+            audio_candidates.sort(key=lambda x: (x[0], x[1].get("file_size_bytes", 0)))
+
+            # Decision: what to fetch next?
+            #
+            # Rule 1: GPU must always have a job ready. If no video is fetched, fetch one NOW.
+            # Rule 2: While GPU is busy encoding, fill bandwidth with audio jobs.
+            # Rule 3: If GPU has a job queued and audio threads are fed, fetch next video job.
+
+            need_video = len(video_fetched) == 0 and video_candidates
+            audio_hungry = len(audio_fetched) < MAX_AUDIO_QUEUED and audio_candidates
+
+            if need_video:
+                # GPU has nothing ready — top priority
+                _, item = video_candidates[0]
                 result = stage_fetch(item, self.staging_dir, self.config, self.state)
                 if result is not None:
                     fetched_any = True
-                # If buffer full, skip to next item (will retry on next loop)
+                    logging.debug(f"Prefetch [GPU]: {item['filename']}")
 
-            if not fetched_any:
-                # Nothing was fetchable this pass — wait before retrying
-                for _ in range(6):  # 30s total, checking shutdown every 5s
+            elif audio_hungry:
+                # GPU is fed — fill audio queue with small jobs
+                # Estimate how much time we have (based on current GPU encode)
+                encoding_files = self.state.get_files_by_status(FileStatus.ENCODING)
+                gpu_time_left = 0
+                for fp in encoding_files:
+                    fi = self.state.get_file(fp)
+                    if fi and not fi.get("audio_only"):
+                        start = fi.get("encode_start", 0)
+                        if start:
+                            elapsed = time.time() - start
+                            # Find the queue item to estimate total time
+                            qi = next((q for q in queue if q["filepath"] == fp), None)
+                            if qi:
+                                est_total = self._estimate_encode_secs(qi)
+                                gpu_time_left = max(0, est_total - elapsed)
+
+                # Fetch audio jobs that fit within available time
+                bandwidth_secs = max(gpu_time_left, 30)  # at least 30s of fetching
+                for _, item in audio_candidates:
                     if self._shutdown:
                         break
-                    time.sleep(5)
+                    fetch_time = self._estimate_fetch_secs(item)
+                    if fetch_time > bandwidth_secs and fetched_any:
+                        break  # don't overshoot, we've already fetched something
+
+                    # Re-check limits
+                    current_fetched = len(self.state.get_files_by_status(FileStatus.FETCHED))
+                    if current_fetched >= MAX_PREFETCH_FILES:
+                        break
+
+                    result = stage_fetch(item, self.staging_dir, self.config, self.state)
+                    if result is not None:
+                        fetched_any = True
+                        bandwidth_secs -= fetch_time
+                        logging.debug(f"Prefetch [audio]: {item['filename']}")
+                    if bandwidth_secs <= 0:
+                        break
+
+            elif video_candidates and len(video_fetched) < 3:
+                # Audio is fed, pre-fetch next video job for GPU lookahead
+                _, item = video_candidates[0]
+                result = stage_fetch(item, self.staging_dir, self.config, self.state)
+                if result is not None:
+                    fetched_any = True
+                    logging.debug(f"Prefetch [GPU ahead]: {item['filename']}")
+
+            if not fetched_any:
+                self._sleep_or_shutdown(10)
+
+    def _sleep_or_shutdown(self, secs: int):
+        """Sleep in 2s increments, checking shutdown flag."""
+        for _ in range(secs // 2):
+            if self._shutdown:
+                return
+            time.sleep(2)
 
         logging.info("Prefetch thread finished")
 
