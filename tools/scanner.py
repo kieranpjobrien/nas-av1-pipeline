@@ -234,16 +234,12 @@ def scan_directory(directory: str, library_type: str) -> list[str]:
     return files
 
 
-_report_update_lock = threading.Lock()
-
-
 def update_report_entry(filepath: str, report_path: str, library_type: str) -> bool:
     """Re-probe a single NAS file and patch its entry in media_report.json in-place.
 
     Called after stage_replace so the library tab immediately reflects the new
-    codec, size, and bitrate without waiting for a full rescan.  Thread-safe via
-    a module-level lock — concurrent replacements (upload worker + audio threads)
-    queue safely.
+    codec, size, and bitrate without waiting for a full rescan. Uses the shared
+    file lock for safe concurrent access.
 
     Args:
         filepath:     Absolute path to the now-replaced file on the NAS.
@@ -257,26 +253,34 @@ def update_report_entry(filepath: str, report_path: str, library_type: str) -> b
         return False
     entry = extract_info(filepath, probe, library_type)
 
-    with _report_update_lock:
-        try:
-            with open(report_path, "r", encoding="utf-8") as f:
-                report = json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError):
-            return False
+    from tools.report_lock import patch_report
 
+    def _patch(report: dict) -> None:
         files = report.get("files", [])
 
-        # Replace existing entry (match on filepath — handles .mp4→.mkv renames too)
+        # Replace existing entry (match on filepath)
         updated = False
         for i, e in enumerate(files):
             if e.get("filepath") == filepath:
+                # Preserve TMDb and language detection data from old entry
+                old = files[i]
+                if old.get("tmdb") and not entry.get("tmdb"):
+                    entry["tmdb"] = old["tmdb"]
+                for stream_key in ("audio_streams", "subtitle_streams"):
+                    for j, s in enumerate(entry.get(stream_key, [])):
+                        if j < len(old.get(stream_key, [])):
+                            old_s = old[stream_key][j]
+                            if old_s.get("detected_language") and not s.get("detected_language"):
+                                s["detected_language"] = old_s["detected_language"]
+                                s["detection_confidence"] = old_s.get("detection_confidence")
+                                s["detection_method"] = old_s.get("detection_method")
                 files[i] = entry
                 updated = True
                 break
         if not updated:
             files.append(entry)
 
-        # Patch summary counts/sizes in-place
+        # Patch summary
         total_size = sum(e.get("file_size_bytes", 0) for e in files)
         movie_files = [e for e in files if e.get("library_type") == "movie"]
         series_files = [e for e in files if e.get("library_type") == "series"]
@@ -293,12 +297,11 @@ def update_report_entry(filepath: str, report_path: str, library_type: str) -> b
             sum(e.get("file_size_bytes", 0) for e in series_files) / 1024**3, 2
         )
 
-        tmp_path = report_path + ".tmp"
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(report, f, indent=2, ensure_ascii=False)
-        os.replace(tmp_path, report_path)
-
-    return True
+    try:
+        patch_report(_patch)
+        return True
+    except Exception:
+        return False
 
 
 EN_TOKENS = {"eng", "en", "english"}
@@ -394,10 +397,7 @@ def main():
                         help="After scan, write CSV of files missing English audio")
     parser.add_argument("--missing-subs-csv", type=str, default=None, metavar="PATH",
                         help="After scan, write CSV of files missing subtitles or English subs")
-    parser.add_argument("--skip-lang-detect", action="store_true",
-                        help="Skip language detection post-processing (fast probe-only scan)")
-    parser.add_argument("--whisper", action="store_true",
-                        help="Use faster-whisper (GPU) for audio language detection during scan")
+    # Legacy flags kept for backwards compat but no longer used — lang detect and TMDb are separate processes now
     parser.add_argument("--skip-tmdb", action="store_true",
                         help="Skip TMDb metadata enrichment")
     args = parser.parse_args()
@@ -506,28 +506,10 @@ def main():
         "files": results,
     }
 
-    # Post-processing: language detection on undetermined tracks
-    if not args.skip_lang_detect:
-        print(f"\nRunning language detection on undetermined tracks...")
-        from tools.detect_languages import enrich_report
-        report = enrich_report(
-            report,
-            use_whisper=args.whisper,
-            whisper_all=args.whisper,
-            workers=args.workers,
-        )
-
-    # Post-processing: TMDb metadata enrichment
-    if not args.skip_tmdb:
-        print(f"\nRunning TMDb metadata enrichment...")
-        from tools.tmdb import enrich_report as tmdb_enrich
-        report = tmdb_enrich(report, workers=args.workers)
-
+    # Write report atomically using the shared lock
+    from tools.report_lock import write_report
+    write_report(report)
     output_path = args.output
-    tmp_path = output_path + ".tmp"
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(report, f, indent=2, ensure_ascii=False)
-    os.replace(tmp_path, output_path)
 
     print(f"\n{'='*60}")
     print(f"Scan complete!")

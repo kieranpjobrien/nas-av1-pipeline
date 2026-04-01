@@ -960,10 +960,11 @@ def main():
             except Exception:
                 pass
 
-    # Load media report
+    # Load media report under lock, enrich, write back
+    from tools.report_lock import read_report, write_report
+
     try:
-        with open(MEDIA_REPORT, encoding="utf-8") as f:
-            report = json.load(f)
+        report = read_report()
     except FileNotFoundError:
         logging.error(f"media_report.json not found at {MEDIA_REPORT}")
         sys.exit(1)
@@ -977,11 +978,7 @@ def main():
         min_confidence=args.min_confidence,
     )
 
-    # Write enriched report back to media_report.json
-    tmp_path = str(MEDIA_REPORT) + ".tmp"
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(report, f, indent=2, ensure_ascii=False)
-    os.replace(tmp_path, str(MEDIA_REPORT))
+    write_report(report)
     logging.info(f"Updated {MEDIA_REPORT}")
 
     # Apply if requested — write detected languages to actual MKV file metadata

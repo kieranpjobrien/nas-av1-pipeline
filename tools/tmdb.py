@@ -700,13 +700,13 @@ def main() -> None:
     parser.add_argument("--workers", type=int, default=4, help="Number of parallel workers")
     args = parser.parse_args()
 
-    report_path = args.report
-    if not os.path.exists(report_path):
-        print(f"Report not found: {report_path}", file=sys.stderr)
-        sys.exit(1)
+    from tools.report_lock import read_report, write_report
 
-    with open(report_path, "r", encoding="utf-8") as f:
-        report = json.load(f)
+    try:
+        report = read_report()
+    except FileNotFoundError:
+        print(f"media_report.json not found", file=sys.stderr)
+        sys.exit(1)
 
     if args.file:
         # Single-file mode
@@ -730,12 +730,8 @@ def main() -> None:
     else:
         report = enrich_report(report, workers=args.workers, force=args.force)
 
-    # Write atomically
-    tmp_path = report_path + ".tmp"
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(report, f, indent=2, ensure_ascii=False)
-    os.replace(tmp_path, report_path)
-    print(f"Saved: {report_path}")
+    write_report(report)
+    print(f"Saved: {MEDIA_REPORT}")
 
     # Apply to MKV files if requested
     if args.apply:

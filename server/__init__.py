@@ -169,6 +169,10 @@ PROCESS_CONFIGS = {
         "cmd": [sys.executable, "-m", "tools.strip_subs", "--execute"],
         "cwd": str(Path(__file__).parent.parent),
     },
+    "detect_languages": {
+        "cmd": [sys.executable, "-m", "tools.detect_languages", "--workers", "6"],
+        "cwd": str(Path(__file__).parent.parent),
+    },
     "detect_languages_whisper": {
         "cmd": [sys.executable, "-m", "tools.detect_languages", "--whisper-all"],
         "cwd": str(Path(__file__).parent.parent),
