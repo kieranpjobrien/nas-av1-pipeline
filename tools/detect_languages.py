@@ -385,11 +385,21 @@ def _extract_all_audio_samples(
     base = f"{os.getpid()}"
 
     total = max(duration_secs, 120)
-    offsets = [
-        int(min(60, total * 0.05)),
-        int(total * 0.3),
-        int(total * 0.6),
-    ]
+    if sample_duration >= 20:
+        # Aggressive mode (retry): 5 points, deeper into the file
+        offsets = [
+            int(min(60, total * 0.05)),
+            int(total * 0.2),
+            int(total * 0.4),
+            int(total * 0.6),
+            int(total * 0.8),
+        ]
+    else:
+        offsets = [
+            int(min(60, total * 0.05)),
+            int(total * 0.3),
+            int(total * 0.6),
+        ]
 
     result: dict[int, list[str]] = {}
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", filepath]
@@ -515,16 +525,19 @@ def detect_audio_languages_for_file(
     filepath: str,
     audio_indices: list[int],
     duration_secs: float = 0,
+    aggressive: bool = False,
 ) -> dict[int, tuple[Optional[str], float]]:
     """Detect languages for ALL audio tracks of a file efficiently.
 
     Batch-extracts all samples in one ffmpeg call, then runs whisper on each.
-    Uses tiny model first, escalates to small only when needed.
+    When aggressive=True, uses 5×30s samples instead of 3×10s (for retry on
+    previously failed tracks).
     Returns {audio_index: (lang, confidence), ...}.
     """
-    # Extract all tracks' samples in one file open
-    logging.info(f"    Extracting {len(audio_indices)} tracks × 3 samples...")
-    all_samples = _extract_all_audio_samples(filepath, audio_indices, duration_secs)
+    sample_dur = 30 if aggressive else 10
+    n_samples = 5 if aggressive else 3
+    logging.info(f"    Extracting {len(audio_indices)} tracks × {n_samples} samples ({sample_dur}s each)...")
+    all_samples = _extract_all_audio_samples(filepath, audio_indices, duration_secs, sample_duration=sample_dur)
     extracted = sum(len(v) for v in all_samples.values())
     logging.info(f"    Extracted {extracted} samples")
 
@@ -801,10 +814,19 @@ def process_file(
             whisper_candidates.append(audio_idx)
 
     # Batch whisper: extract all tracks' samples in one ffmpeg call
+    # Use aggressive mode (5×30s) for tracks that have been attempted before
+    # (they're still und with no detection — previous short samples failed)
     whisper_results: dict[int, tuple] = {}
     if whisper_candidates:
+        # Check if any candidate was previously attempted (has whisper_attempted marker)
+        audio_streams = file_entry.get("audio_streams", [])
+        previously_failed = any(
+            audio_streams[i].get("whisper_attempted") for i in whisper_candidates
+            if i < len(audio_streams)
+        )
         whisper_results = detect_audio_languages_for_file(
             filepath, whisper_candidates, file_entry.get("duration_seconds", 0),
+            aggressive=previously_failed,
         )
 
     # Merge heuristic + whisper results
@@ -817,6 +839,10 @@ def process_file(
                 conf = w_conf
                 method = "whisper"
                 reason = f"whisper detection (prob={w_conf:.2f})"
+
+        # Mark track as whisper-attempted so next run uses aggressive mode if still unresolved
+        if audio_idx in whisper_candidates and audio_idx < len(audio_streams):
+            audio_streams[audio_idx]["whisper_attempted"] = True
 
         audio_codec = audio_streams[audio_idx].get("codec", "") if audio_idx < len(audio_streams) else ""
         if detected:
@@ -981,7 +1007,7 @@ def _incremental_save(our_report: dict, processed_entries: list[dict]) -> None:
         # Patch audio streams
         for i, our_stream in enumerate(our_entry.get("audio_streams", [])):
             if i < len(disk_entry.get("audio_streams", [])):
-                for field in ("detected_language", "detection_confidence", "detection_method"):
+                for field in ("detected_language", "detection_confidence", "detection_method", "whisper_attempted"):
                     if our_stream.get(field):
                         disk_entry["audio_streams"][i][field] = our_stream[field]
 
