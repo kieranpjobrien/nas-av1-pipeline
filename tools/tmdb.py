@@ -676,18 +676,18 @@ def apply_tmdb_to_files(report: dict) -> tuple[int, int]:
     success = 0
     failed = 0
     files = [f for f in report.get("files", []) if f.get("tmdb")]
-    logging.info(f"Writing TMDb metadata to {len(files)} files...")
+    print(f"Writing TMDb metadata to {len(files)} files...", flush=True)
 
     for i, entry in enumerate(files):
         if (i + 1) % 100 == 0 or i + 1 == len(files):
-            logging.info(f"  Progress: {i + 1}/{len(files)}")
+            print(f"  Progress: {i + 1}/{len(files)} ({success} written, {failed} failed)", flush=True)
         ok = write_tmdb_to_mkv(entry["filepath"], entry["tmdb"])
         if ok:
             success += 1
         else:
             failed += 1
 
-    logging.info(f"  Done: {success} written, {failed} failed")
+    print(f"  Done: {success} written, {failed} failed", flush=True)
     return success, failed
 
 
