@@ -961,7 +961,7 @@ def main():
             except Exception:
                 pass
 
-    # Load media report under lock, enrich, write back
+    # Load media report under lock
     from tools.report_lock import read_report, write_report
 
     try:
@@ -970,21 +970,9 @@ def main():
         logging.error(f"media_report.json not found at {MEDIA_REPORT}")
         sys.exit(1)
 
-    # Enrich report in-place with language detections
-    report = enrich_report(
-        report,
-        use_whisper=use_whisper,
-        whisper_all=args.whisper_all,
-        workers=args.workers,
-        min_confidence=args.min_confidence,
-    )
-
-    write_report(report)
-    logging.info(f"Updated {MEDIA_REPORT}")
-
-    # Apply if requested — write detected languages to actual MKV file metadata
     if args.apply:
-        logging.info(f"\nApplying detections to files via mkvpropedit/ffmpeg...")
+        # Apply-only mode: write existing detections to MKV files, no re-detection
+        logging.info(f"Applying detections to files via mkvpropedit/ffmpeg...")
         if _find_mkvpropedit():
             logging.info(f"  mkvpropedit: {_find_mkvpropedit()}")
         else:
@@ -995,7 +983,6 @@ def main():
         file_count = 0
 
         for entry in report.get("files", []):
-            # Collect detections from inline fields
             detections = []
             for i, s in enumerate(entry.get("subtitle_streams", [])):
                 if s.get("detected_language"):
@@ -1020,14 +1007,26 @@ def main():
                 continue
 
             file_count += 1
-            logging.info(f"  [{file_count}] {entry['filename']} ({len(detections)} track(s))")
-            applied, failed = apply_detections_for_file(
+            if file_count % 50 == 0 or file_count == 1:
+                logging.info(f"  Progress: {file_count} files processed")
+            applied, failed_count = apply_detections_for_file(
                 entry["filepath"], detections, args.min_confidence,
             )
             total_applied += applied
-            total_failed += failed
+            total_failed += failed_count
 
         logging.info(f"Applied: {total_applied}  Failed: {total_failed}")
+    else:
+        # Detection mode: run language detection and save to report
+        report = enrich_report(
+            report,
+            use_whisper=use_whisper,
+            whisper_all=args.whisper_all,
+            workers=args.workers,
+            min_confidence=args.min_confidence,
+        )
+        write_report(report)
+        logging.info(f"Updated {MEDIA_REPORT}")
 
 
 if __name__ == "__main__":
