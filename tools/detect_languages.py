@@ -909,8 +909,12 @@ def enrich_report(
     total = len(to_process)
     detection_stats = {"detected": 0, "failed": 0}
 
+    # Save interval: write results to disk every N files to avoid losing work
+    # and to prevent overwriting concurrent changes (TMDb, scanner, etc.)
+    SAVE_INTERVAL = 25
+
     if use_whisper:
-        logging.info("  Whisper: enabled — processing sequentially (GPU)")
+        logging.info("  Whisper: enabled — processing sequentially")
         _get_whisper_model("tiny")
         for entry in to_process:
             completed += 1
@@ -920,6 +924,9 @@ def enrich_report(
                 _apply_detections_to_entry(entry, use_whisper, whisper_all, min_confidence, detection_stats)
             except Exception as e:
                 logging.warning(f"    Error: {e}")
+            # Incremental save — merge our changes into the current report on disk
+            if completed % SAVE_INTERVAL == 0:
+                _incremental_save(report, to_process[:completed])
     else:
         with ThreadPoolExecutor(max_workers=workers) as executor:
             futures = {executor.submit(process_file, entry): entry for entry in to_process}
@@ -937,12 +944,57 @@ def enrich_report(
     logging.info(f"  Language detection complete: {detection_stats['detected']} detected, "
                  f"{detection_stats['failed']} unresolved")
 
-    # Add scan metadata to summary
-    report.setdefault("summary", {})["language_scan_date"] = datetime.now().isoformat()
-    report["summary"]["language_detected_count"] = detection_stats["detected"]
-    report["summary"]["language_unresolved_count"] = detection_stats["failed"]
+    # Final save — merge all our changes into the current report on disk
+    _incremental_save(report, to_process)
 
     return report
+
+
+def _incremental_save(our_report: dict, processed_entries: list[dict]) -> None:
+    """Merge language detection results into the on-disk report without stomping other changes.
+
+    Reads the current report from disk (which may have been modified by TMDb, scanner, etc.),
+    patches in our detected_language/detection_confidence/detection_method fields, and writes back.
+    This preserves TMDb data and anything else that was added by other processes.
+    """
+    from tools.report_lock import read_report, write_report
+
+    try:
+        disk_report = read_report()
+    except Exception:
+        # Can't read — just write our version (better than losing everything)
+        write_report(our_report)
+        return
+
+    # Build a lookup of our processed entries by filepath
+    our_lookup: dict[str, dict] = {}
+    for entry in processed_entries:
+        our_lookup[entry.get("filepath", "")] = entry
+
+    # Patch disk entries with our detection fields
+    for disk_entry in disk_report.get("files", []):
+        fp = disk_entry.get("filepath", "")
+        if fp not in our_lookup:
+            continue
+        our_entry = our_lookup[fp]
+
+        # Patch audio streams
+        for i, our_stream in enumerate(our_entry.get("audio_streams", [])):
+            if i < len(disk_entry.get("audio_streams", [])):
+                for field in ("detected_language", "detection_confidence", "detection_method"):
+                    if our_stream.get(field):
+                        disk_entry["audio_streams"][i][field] = our_stream[field]
+
+        # Patch subtitle streams
+        for i, our_stream in enumerate(our_entry.get("subtitle_streams", [])):
+            if i < len(disk_entry.get("subtitle_streams", [])):
+                for field in ("detected_language", "detection_confidence", "detection_method"):
+                    if our_stream.get(field):
+                        disk_entry["subtitle_streams"][i][field] = our_stream[field]
+
+    # Update summary metadata
+    disk_report.setdefault("summary", {})["language_scan_date"] = datetime.now().isoformat()
+    write_report(disk_report)
 
 
 def _apply_detections_to_entry(
@@ -1253,15 +1305,14 @@ def main():
         logging.info(f"Applied: {total_applied}  Failed: {total_failed}")
         logging.info(f"Report updated")
     else:
-        # Detection mode: run language detection and save to report
-        report = enrich_report(
+        # Detection mode: run language detection (saves incrementally via _incremental_save)
+        enrich_report(
             report,
             use_whisper=use_whisper,
             whisper_all=args.whisper_all,
             workers=args.workers,
             min_confidence=args.min_confidence,
         )
-        write_report(report)
         logging.info(f"Updated {MEDIA_REPORT}")
 
 
