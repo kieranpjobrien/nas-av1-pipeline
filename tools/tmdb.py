@@ -709,7 +709,10 @@ def main() -> None:
         print(f"media_report.json not found", file=sys.stderr)
         sys.exit(1)
 
-    if args.file:
+    if args.apply:
+        # Apply-only mode: just write existing TMDb data to MKV files, no enrichment
+        apply_tmdb_to_files(report)
+    elif args.file:
         # Single-file mode
         target = None
         for entry in report.get("files", []):
@@ -728,15 +731,13 @@ def main() -> None:
         else:
             print(f"No TMDb match found for: {target['filename']}")
             sys.exit(0)
+        write_report(report)
+        print(f"Saved: {MEDIA_REPORT}")
     else:
+        # Enrichment mode
         report = enrich_report(report, workers=args.workers, force=args.force)
-
-    write_report(report)
-    print(f"Saved: {MEDIA_REPORT}")
-
-    # Apply to MKV files if requested
-    if args.apply:
-        apply_tmdb_to_files(report)
+        write_report(report)
+        print(f"Saved: {MEDIA_REPORT}")
 
 
 if __name__ == "__main__":
