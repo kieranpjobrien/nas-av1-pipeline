@@ -10,6 +10,7 @@ import signal
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 from pipeline.config import get_res_key, resolve_encode_params
 from pipeline.control import PipelineControl
