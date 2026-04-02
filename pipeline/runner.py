@@ -221,9 +221,12 @@ class Pipeline:
                 else:
                     video_candidates.append(entry)
 
-            # Sort: priority first, then by size (small first for audio, large for video doesn't matter)
+            # Sort: priority first, then by size
             video_candidates.sort(key=lambda x: (x[0], x[1].get("file_size_bytes", 0)))
             audio_candidates.sort(key=lambda x: (x[0], x[1].get("file_size_bytes", 0)))
+
+            if video_candidates or audio_candidates:
+                logging.info(f"Prefetch candidates: {len(video_candidates)} video, {len(audio_candidates)} audio")
 
             # Decision: what to fetch next?
             #
