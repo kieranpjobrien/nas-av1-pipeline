@@ -505,19 +505,16 @@ export function PipelinePage({ wsData, onFileClick }) {
         ))}
       </div>
 
-      {/* Tier progress */}
-      {tierProgress.length > 0 && (
+      {/* Remaining Work (from media report, not pipeline state) */}
+      {completion?.tiers?.length > 0 && (
         <>
-          <SectionTitle>Tier Progress</SectionTitle>
+          <SectionTitle>Remaining Work</SectionTitle>
           <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 24 }}>
-            {tierProgress.map(([tier, { total: t, done }]) => (
-              <div key={tier} style={{ background: PALETTE.surface, border: `1px solid ${PALETTE.border}`, borderRadius: 8, padding: "12px 16px" }}>
+            {completion.tiers.filter(t => t.name !== "Done").map((t) => (
+              <div key={t.name} style={{ background: PALETTE.surface, border: `1px solid ${PALETTE.border}`, borderRadius: 8, padding: "12px 16px" }}>
                 <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
-                  <span style={{ color: PALETTE.text, fontSize: 13, fontWeight: 500 }}>{tier}</span>
-                  <span style={{ color: PALETTE.textMuted, fontSize: 12, fontFamily: "'JetBrains Mono', monospace" }}>{done}/{t}</span>
-                </div>
-                <div style={{ height: 6, background: PALETTE.surfaceLight, borderRadius: 3, overflow: "hidden" }}>
-                  <div style={{ height: "100%", width: `${t > 0 ? (done / t) * 100 : 0}%`, background: PALETTE.green, borderRadius: 3, transition: "width 0.5s ease" }} />
+                  <span style={{ color: PALETTE.text, fontSize: 13, fontWeight: 500 }}>{t.name}</span>
+                  <span style={{ color: PALETTE.textMuted, fontSize: 12, fontFamily: "'JetBrains Mono', monospace" }}>{t.total.toLocaleString()} files</span>
                 </div>
               </div>
             ))}

@@ -436,9 +436,50 @@ def get_library_completion():
     counts["pct_done"] = round(100 * counts["fully_done"] / total, 1) if total else 0
     counts["quick_wins_audio_count"] = len(counts["quick_wins_audio"])
     counts["quick_wins_subs_count"] = len(counts["quick_wins_subs"])
-    # Don't send full path lists in the summary — just counts
     del counts["quick_wins_audio"]
     del counts["quick_wins_subs"]
+
+    # Tier breakdown from media report (persistent, doesn't reset on pipeline restart)
+    tiers: dict[str, dict] = {}
+    for f in files:
+        codec = f.get("video", {}).get("codec_raw", "?")
+        codec_name = f.get("video", {}).get("codec", codec)
+        res = f.get("video", {}).get("resolution_class", "?")
+        is_av1 = codec == "av1"
+
+        a_streams = f.get("audio_streams", [])
+        a_ok = all(
+            (a.get("codec_raw") or a.get("codec", "")).lower() in ("eac3", "e-ac-3")
+            for a in a_streams
+        ) if a_streams else True
+        a_clean = all(
+            i == 0 or (a.get("language") or a.get("detected_language") or "und").lower().strip() in keep_langs
+            for i, a in enumerate(a_streams)
+        ) if a_streams else True
+        s_ok = all(
+            (s.get("language") or s.get("detected_language") or "und").lower().strip() in keep_langs
+            for s in f.get("subtitle_streams", [])
+        )
+
+        if is_av1 and a_ok and a_clean and s_ok:
+            tier = "Done"
+        elif not is_av1:
+            tier = f"{codec_name} {res}"
+        elif not a_ok:
+            tier = "Audio remux (AV1)"
+        else:
+            tier = "Cleanup remux (AV1)"
+
+        if tier not in tiers:
+            tiers[tier] = {"total": 0, "done": 0}
+        tiers[tier]["total"] += 1
+        if tier == "Done":
+            tiers[tier]["done"] += 1
+
+    counts["tiers"] = [
+        {"name": name, "total": t["total"], "done": t["done"]}
+        for name, t in sorted(tiers.items(), key=lambda x: (-x[1]["total"]))
+    ]
 
     return counts
 
