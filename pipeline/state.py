@@ -55,12 +55,14 @@ class PipelineState:
 
     def save(self):
         with self._lock:
+            # Merge external changes (e.g. server's reset-errors endpoint)
+            # before saving. If the file on disk has entries we modified
+            # externally (error→pending), adopt those changes.
+            self._merge_external_resets()
             self.data["last_updated"] = datetime.now().isoformat()
-            # Write to temp file then rename for atomicity
             tmp = self.state_file + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(self.data, f, indent=2, ensure_ascii=False)
-            # Retry os.replace — Windows antivirus/indexer can hold transient locks
             for attempt in range(5):
                 try:
                     os.replace(tmp, self.state_file)
@@ -70,6 +72,30 @@ class PipelineState:
                         time.sleep(0.1 * (attempt + 1))
                     else:
                         raise
+
+    def _merge_external_resets(self):
+        """Check if the state file on disk has items reset from error→pending
+        by the server's reset-errors endpoint, and adopt those changes."""
+        if not os.path.exists(self.state_file):
+            return
+        try:
+            mtime = os.path.getmtime(self.state_file)
+            # Only check if file was modified externally (not by us)
+            if not hasattr(self, '_last_save_mtime') or mtime <= self._last_save_mtime:
+                return
+            with open(self.state_file, "r", encoding="utf-8") as f:
+                disk_data = json.load(f)
+            for fp, disk_info in disk_data.get("files", {}).items():
+                mem_info = self.data["files"].get(fp)
+                if mem_info and mem_info.get("status") == "error" and disk_info.get("status") == "pending":
+                    mem_info["status"] = "pending"
+                    mem_info.pop("error", None)
+                    mem_info.pop("stage", None)
+                    mem_info["last_updated"] = disk_info.get("last_updated", "")
+        except Exception:
+            pass  # don't break saves if merge fails
+        finally:
+            self._last_save_mtime = time.time()
 
     def get_file(self, filepath: str) -> Optional[dict]:
         with self._lock:
