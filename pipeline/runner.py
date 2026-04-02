@@ -231,69 +231,49 @@ class Pipeline:
             # Rule 2: While GPU is busy encoding, fill bandwidth with audio jobs.
             # Rule 3: If GPU has a job queued and audio threads are fed, fetch next video job.
 
-            need_video = len(video_fetched) == 0 and video_candidates
-            audio_hungry = len(audio_fetched) < MAX_AUDIO_QUEUED and audio_candidates
+            # Greedy fetch: fill the buffer with both video and audio in one pass.
+            # Priority: video first (GPU must never starve), then audio to fill gaps.
 
-            if need_video:
-                # GPU has nothing ready — top priority
-                _, item = video_candidates[0]
+            def _check_budget() -> bool:
+                """Return True if we still have room in the fetch buffer."""
+                current = sum(
+                    (self.state.get_file(fp) or {}).get("input_size_bytes", 0) or 0
+                    for fp in self.state.get_files_by_status(FileStatus.FETCHED)
+                )
+                return current < MAX_PREFETCH_BYTES
+
+            # Fetch video jobs (keep GPU lookahead deep)
+            video_fetched_this_round = 0
+            for _, item in video_candidates:
+                if self._shutdown or not _check_budget():
+                    break
+                if len(video_fetched) + video_fetched_this_round >= 10:
+                    break
                 result = stage_fetch(item, self.staging_dir, self.config, self.state)
                 if result is not None:
                     fetched_any = True
-                    logging.debug(f"Prefetch [GPU]: {item['filename']}")
+                    video_fetched_this_round += 1
 
-            elif audio_hungry:
-                # GPU is fed — fill audio queue with small jobs
-                # Estimate how much time we have (based on current GPU encode)
-                encoding_files = self.state.get_files_by_status(FileStatus.ENCODING)
-                gpu_time_left = 0
-                for fp in encoding_files:
-                    fi = self.state.get_file(fp)
-                    if fi and not fi.get("audio_only"):
-                        start = fi.get("encode_start", 0)
-                        if start:
-                            elapsed = time.time() - start
-                            # Find the queue item to estimate total time
-                            qi = next((q for q in queue if q["filepath"] == fp), None)
-                            if qi:
-                                est_total = self._estimate_encode_secs(qi)
-                                gpu_time_left = max(0, est_total - elapsed)
-
-                # Fetch audio jobs that fit within available time
-                bandwidth_secs = max(gpu_time_left, 30)  # at least 30s of fetching
-                for _, item in audio_candidates:
-                    if self._shutdown:
-                        break
-                    fetch_time = self._estimate_fetch_secs(item)
-                    if fetch_time > bandwidth_secs and fetched_any:
-                        break  # don't overshoot, we've already fetched something
-
-                    # Re-check byte budget
-                    current_bytes = sum(
-                        (self.state.get_file(fp) or {}).get("input_size_bytes", 0) or 0
-                        for fp in self.state.get_files_by_status(FileStatus.FETCHED)
-                    )
-                    if current_bytes >= MAX_PREFETCH_BYTES:
-                        break
-
-                    result = stage_fetch(item, self.staging_dir, self.config, self.state)
-                    if result is not None:
-                        fetched_any = True
-                        bandwidth_secs -= fetch_time
-                        logging.debug(f"Prefetch [audio]: {item['filename']}")
-                    if bandwidth_secs <= 0:
-                        break
-
-            elif video_candidates and len(video_fetched) < 10:
-                # Audio is fed, keep GPU lookahead deep
-                _, item = video_candidates[0]
+            # Fetch audio jobs (keep audio threads fed)
+            audio_fetched_this_round = 0
+            for _, item in audio_candidates:
+                if self._shutdown or not _check_budget():
+                    break
+                if len(audio_fetched) + audio_fetched_this_round >= MAX_AUDIO_QUEUED:
+                    break
                 result = stage_fetch(item, self.staging_dir, self.config, self.state)
                 if result is not None:
                     fetched_any = True
-                    logging.debug(f"Prefetch [GPU ahead]: {item['filename']}")
+                    audio_fetched_this_round += 1
+
+            if fetched_any:
+                total_fetched = video_fetched_this_round + audio_fetched_this_round
+                logging.info(f"Prefetch: {video_fetched_this_round} video + {audio_fetched_this_round} audio fetched this round")
 
             if not fetched_any:
                 self._sleep_or_shutdown(10)
+
+        logging.info("Prefetch thread finished")
 
     def _sleep_or_shutdown(self, secs: int):
         """Sleep in 2s increments, checking shutdown flag."""
@@ -301,8 +281,6 @@ class Pipeline:
             if self._shutdown:
                 return
             time.sleep(2)
-
-        logging.info("Prefetch thread finished")
 
     def _upload_worker(self):
         """Background thread: upload encoded files to NAS while GPU encodes the next file.
