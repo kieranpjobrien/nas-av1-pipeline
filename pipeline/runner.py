@@ -242,19 +242,7 @@ class Pipeline:
                 )
                 return current < MAX_PREFETCH_BYTES
 
-            # Fetch video jobs (keep GPU lookahead deep)
-            video_fetched_this_round = 0
-            for _, item in video_candidates:
-                if self._shutdown or not _check_budget():
-                    break
-                if len(video_fetched) + video_fetched_this_round >= 10:
-                    break
-                result = stage_fetch(item, self.staging_dir, self.config, self.state)
-                if result is not None:
-                    fetched_any = True
-                    video_fetched_this_round += 1
-
-            # Fetch audio jobs (keep audio threads fed)
+            # Fetch audio/cleanup jobs FIRST (small files, keep threads fed)
             audio_fetched_this_round = 0
             for _, item in audio_candidates:
                 if self._shutdown or not _check_budget():
@@ -265,6 +253,18 @@ class Pipeline:
                 if result is not None:
                     fetched_any = True
                     audio_fetched_this_round += 1
+
+            # Then fill remaining budget with video jobs (GPU lookahead)
+            video_fetched_this_round = 0
+            for _, item in video_candidates:
+                if self._shutdown or not _check_budget():
+                    break
+                if len(video_fetched) + video_fetched_this_round >= 10:
+                    break
+                result = stage_fetch(item, self.staging_dir, self.config, self.state)
+                if result is not None:
+                    fetched_any = True
+                    video_fetched_this_round += 1
 
             if fetched_any:
                 total_fetched = video_fetched_this_round + audio_fetched_this_round
