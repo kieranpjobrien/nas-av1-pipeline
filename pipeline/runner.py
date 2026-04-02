@@ -962,30 +962,51 @@ class Pipeline:
                 time.sleep(5)
                 continue
 
-            # Dispatch audio item to background thread (independent of GPU)
-            if ready_audio:
-                filepath_a = ready_audio["filepath"]
-                if not self.control.should_skip(filepath_a):
-                    processed += 1
-                    logging.info(f"\n[{processed}/{len(queue)}] {ready_audio['tier_name']} | "
-                                 f"{ready_audio['filename']} ({format_bytes(ready_audio['file_size_bytes'])})")
-                    existing_a = self.state.get_file(filepath_a) or {}
-                    if not existing_a.get("tier"):
-                        self.state.set_file(filepath_a,
-                            FileStatus(existing_a.get("status", FileStatus.PENDING.value)),
-                            tier=ready_audio.get("tier_name", "Unknown"),
-                            res_key=get_res_key(ready_audio))
-                    effective_config = self._apply_gentle_overrides(ready_audio)
-                    t = threading.Thread(
-                        target=self._audio_remux_async,
-                        args=(ready_audio, effective_config),
-                        daemon=True,
-                        name=f"audio-remux-{ready_audio['filename'][:30]}",
-                    )
-                    t.start()
-                    audio_threads.append(t)
-                    dispatched.add(filepath_a)
-                    logging.info(f"  Dispatched audio remux to background thread")
+            # Dispatch ALL available audio items before starting GPU encode.
+            # process_item() blocks for the entire encode (could be 15+ min for 4K),
+            # so we need to fill all audio thread slots NOW, not one per loop.
+            audio_threads = [t for t in audio_threads if t.is_alive()]
+            audio_dispatched_this_loop = 0
+            for item_a in queue:
+                if len(audio_threads) >= MAX_AUDIO_THREADS:
+                    break
+                if not item_a.get("audio_only"):
+                    continue
+                fp_a = item_a["filepath"]
+                if fp_a in dispatched:
+                    continue
+                existing_a = self.state.get_file(fp_a)
+                status_a = existing_a["status"] if existing_a else None
+                if status_a not in (FileStatus.FETCHED.value, None, FileStatus.PENDING.value):
+                    continue
+                if status_a == FileStatus.ENCODING.value:
+                    continue
+                if self.control.should_skip(fp_a):
+                    continue
+
+                processed += 1
+                logging.info(f"\n[{processed}/{len(queue)}] {item_a['tier_name']} | "
+                             f"{item_a['filename']} ({format_bytes(item_a['file_size_bytes'])})")
+                if not (existing_a or {}).get("tier"):
+                    self.state.set_file(fp_a,
+                        FileStatus(status_a or FileStatus.PENDING.value),
+                        tier=item_a.get("tier_name", "Unknown"),
+                        res_key=get_res_key(item_a))
+                effective_config = self._apply_gentle_overrides(item_a)
+                t = threading.Thread(
+                    target=self._audio_remux_async,
+                    args=(item_a, effective_config),
+                    daemon=True,
+                    name=f"audio-remux-{item_a['filename'][:30]}",
+                )
+                t.start()
+                audio_threads.append(t)
+                dispatched.add(fp_a)
+                audio_dispatched_this_loop += 1
+                logging.info(f"  Dispatched audio remux to background thread")
+
+            if audio_dispatched_this_loop > 0:
+                logging.info(f"  Dispatched {audio_dispatched_this_loop} audio jobs to {len(audio_threads)} threads")
 
             # Pick video item for GPU encode
             ready_item = (ready_video
