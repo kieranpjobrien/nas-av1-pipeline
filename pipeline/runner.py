@@ -231,44 +231,61 @@ class Pipeline:
             # Rule 2: While GPU is busy encoding, fill bandwidth with audio jobs.
             # Rule 3: If GPU has a job queued and audio threads are fed, fetch next video job.
 
-            # Greedy fetch: fill the buffer with both video and audio in one pass.
-            # Priority: video first (GPU must never starve), then audio to fill gaps.
+            # Fill the buffer aggressively — interleave video and audio to keep
+            # both GPU and CPU threads fed. GPU is the bottleneck; everything
+            # else (network, CPU) exists to serve it. 1 TB+ buffer means we can
+            # pre-stage hundreds of files.
 
-            def _check_budget() -> bool:
-                """Return True if we still have room in the fetch buffer."""
-                current = sum(
+            def _get_budget_used() -> int:
+                return sum(
                     (self.state.get_file(fp) or {}).get("input_size_bytes", 0) or 0
                     for fp in self.state.get_files_by_status(FileStatus.FETCHED)
                 )
-                return current < MAX_PREFETCH_BYTES
 
-            # Fetch audio/cleanup jobs FIRST (small files, keep threads fed)
-            audio_fetched_this_round = 0
-            for _, item in audio_candidates:
-                if self._shutdown or not _check_budget():
-                    break
-                if len(audio_fetched) + audio_fetched_this_round >= MAX_AUDIO_QUEUED:
-                    break
-                result = stage_fetch(item, self.staging_dir, self.config, self.state)
-                if result is not None:
-                    fetched_any = True
-                    audio_fetched_this_round += 1
-
-            # Then fill remaining budget with video jobs (GPU lookahead)
+            # Merge both lists into one fetch queue: interleave video and audio
+            # so neither starves. Pattern: 1 video, then enough audio to keep
+            # threads busy, repeat.
             video_fetched_this_round = 0
-            for _, item in video_candidates:
-                if self._shutdown or not _check_budget():
+            audio_fetched_this_round = 0
+            vi, ai = 0, 0  # cursors into candidates
+
+            while not self._shutdown:
+                budget_used = _get_budget_used()
+                if budget_used >= MAX_PREFETCH_BYTES:
                     break
-                if len(video_fetched) + video_fetched_this_round >= 10:
+
+                fetched_one = False
+
+                # Grab a video job if available
+                while vi < len(video_candidates):
+                    _, item = video_candidates[vi]
+                    vi += 1
+                    result = stage_fetch(item, self.staging_dir, self.config, self.state)
+                    if result is not None:
+                        video_fetched_this_round += 1
+                        fetched_any = True
+                        fetched_one = True
+                        break
+
+                # Grab up to 4 audio jobs per video job (they're smaller/faster)
+                audio_batch = 0
+                while ai < len(audio_candidates) and audio_batch < 4:
+                    _, item = audio_candidates[ai]
+                    ai += 1
+                    result = stage_fetch(item, self.staging_dir, self.config, self.state)
+                    if result is not None:
+                        audio_fetched_this_round += 1
+                        fetched_any = True
+                        fetched_one = True
+                        audio_batch += 1
+
+                # Nothing left to fetch
+                if not fetched_one:
                     break
-                result = stage_fetch(item, self.staging_dir, self.config, self.state)
-                if result is not None:
-                    fetched_any = True
-                    video_fetched_this_round += 1
 
             if fetched_any:
-                total_fetched = video_fetched_this_round + audio_fetched_this_round
-                logging.info(f"Prefetch: {video_fetched_this_round} video + {audio_fetched_this_round} audio fetched this round")
+                logging.info(f"Prefetch: {video_fetched_this_round} video + "
+                             f"{audio_fetched_this_round} audio ({format_bytes(_get_budget_used())} buffered)")
 
             if not fetched_any:
                 self._sleep_or_shutdown(10)
