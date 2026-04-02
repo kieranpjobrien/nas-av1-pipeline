@@ -234,10 +234,11 @@ class Pipeline:
             # Rule 2: While GPU is busy encoding, fill bandwidth with audio jobs.
             # Rule 3: If GPU has a job queued and audio threads are fed, fetch next video job.
 
-            # Fill the buffer aggressively — interleave video and audio to keep
-            # both GPU and CPU threads fed. GPU is the bottleneck; everything
-            # else (network, CPU) exists to serve it. 1 TB+ buffer means we can
-            # pre-stage hundreds of files.
+            # Concurrent fetch: run video and audio fetches in parallel threads.
+            # stage_fetch blocks for the entire file copy (10 GB = 100 seconds),
+            # so sequential fetching means audio never gets fetched while a big
+            # video file is downloading. Two concurrent streams saturate the NAS
+            # link better than one.
 
             def _get_budget_used() -> int:
                 return sum(
@@ -245,50 +246,51 @@ class Pipeline:
                     for fp in self.state.get_files_by_status(FileStatus.FETCHED)
                 )
 
-            # Merge both lists into one fetch queue: interleave video and audio
-            # so neither starves. Pattern: 1 video, then enough audio to keep
-            # threads busy, repeat.
-            video_fetched_this_round = 0
-            audio_fetched_this_round = 0
-            vi, ai = 0, 0  # cursors into candidates
+            budget_used = _get_budget_used()
+            if budget_used >= MAX_PREFETCH_BYTES:
+                self._sleep_or_shutdown(10)
+                continue
 
-            while not self._shutdown:
-                budget_used = _get_budget_used()
-                if budget_used >= MAX_PREFETCH_BYTES:
-                    break
-
-                fetched_one = False
-
-                # Grab a video job if available
-                while vi < len(video_candidates):
-                    _, item = video_candidates[vi]
+            # Build a combined fetch list: video and audio interleaved
+            fetch_items = []
+            vi, ai = 0, 0
+            while vi < len(video_candidates) or ai < len(audio_candidates):
+                if vi < len(video_candidates):
+                    fetch_items.append(video_candidates[vi][1])
                     vi += 1
-                    result = stage_fetch(item, self.staging_dir, self.config, self.state)
-                    if result is not None:
-                        video_fetched_this_round += 1
-                        fetched_any = True
-                        fetched_one = True
+                # 2 audio per video to keep threads fed
+                for _ in range(2):
+                    if ai < len(audio_candidates):
+                        fetch_items.append(audio_candidates[ai][1])
+                        ai += 1
+
+            # Fetch concurrently with a small thread pool (2 = saturate 1 Gbps NAS link)
+            MAX_FETCH_THREADS = 2
+            fetch_count = 0
+
+            with ThreadPoolExecutor(max_workers=MAX_FETCH_THREADS) as fetch_pool:
+                futures = []
+                for item in fetch_items:
+                    if self._shutdown:
                         break
+                    if _get_budget_used() >= MAX_PREFETCH_BYTES:
+                        break
+                    f = fetch_pool.submit(stage_fetch, item, self.staging_dir, self.config, self.state)
+                    futures.append((f, item))
 
-                # Grab up to 4 audio jobs per video job (they're smaller/faster)
-                audio_batch = 0
-                while ai < len(audio_candidates) and audio_batch < 4:
-                    _, item = audio_candidates[ai]
-                    ai += 1
-                    result = stage_fetch(item, self.staging_dir, self.config, self.state)
-                    if result is not None:
-                        audio_fetched_this_round += 1
-                        fetched_any = True
-                        fetched_one = True
-                        audio_batch += 1
-
-                # Nothing left to fetch
-                if not fetched_one:
-                    break
+                for f, item in futures:
+                    if self._shutdown:
+                        break
+                    try:
+                        result = f.result(timeout=600)
+                        if result is not None:
+                            fetch_count += 1
+                            fetched_any = True
+                    except Exception:
+                        pass
 
             if fetched_any:
-                logging.info(f"Prefetch: {video_fetched_this_round} video + "
-                             f"{audio_fetched_this_round} audio ({format_bytes(_get_budget_used())} buffered)")
+                logging.info(f"Prefetch: {fetch_count} files fetched ({format_bytes(_get_budget_used())} buffered)")
 
             if not fetched_any:
                 self._sleep_or_shutdown(10)
