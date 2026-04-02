@@ -83,8 +83,18 @@ Examples:
                         help="Only process specific tier (e.g. 'H.264 1080p')")
     args = parser.parse_args()
 
-    # Config — deep copy nested dicts
-    config = copy.deepcopy(DEFAULT_CONFIG)
+    # Config — load defaults + config_overrides.json + CLI args
+    from pipeline.config import build_config
+    overrides_path = os.path.join(args.staging, "control", "config_overrides.json")
+    file_overrides = {}
+    if os.path.exists(overrides_path):
+        try:
+            import json as _json
+            with open(overrides_path, encoding="utf-8") as _f:
+                file_overrides = _json.load(_f)
+        except Exception:
+            pass
+    config = build_config(file_overrides)
 
     if args.no_replace:
         config["replace_original"] = False
