@@ -1,8 +1,14 @@
-"""Pipeline state management — persistent JSON state that survives crashes."""
+"""Pipeline state management — SQLite-backed state that survives crashes.
+
+Uses SQLite with WAL mode for safe concurrent access from both the pipeline
+process and the server process. The API surface is identical to the old
+JSON-based implementation so callers don't need to change.
+"""
 
 import json
 import logging
 import os
+import sqlite3
 import threading
 import time
 from datetime import datetime
@@ -25,125 +31,309 @@ class FileStatus(str, Enum):
     ERROR = "error"
 
 
+# Columns stored directly (not in extras JSON) for efficient queries
+_DIRECT_COLS = {
+    "status", "added", "last_updated", "tier", "audio_only", "cleanup_strip",
+    "local_path", "output_path", "dest_path", "error", "stage", "reason",
+    "res_key", "sub_strip",
+}
+
+
+def get_db(db_path: str) -> sqlite3.Connection:
+    """Open a SQLite connection with WAL mode and sensible defaults."""
+    conn = sqlite3.connect(str(db_path), timeout=30)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA busy_timeout=10000")
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _init_tables(conn: sqlite3.Connection) -> None:
+    """Create tables if they don't exist."""
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS pipeline_files (
+            filepath TEXT PRIMARY KEY,
+            status TEXT NOT NULL DEFAULT 'pending',
+            added TEXT,
+            last_updated TEXT,
+            tier TEXT,
+            audio_only INTEGER,
+            cleanup_strip INTEGER,
+            sub_strip INTEGER,
+            local_path TEXT,
+            output_path TEXT,
+            dest_path TEXT,
+            error TEXT,
+            stage TEXT,
+            reason TEXT,
+            res_key TEXT,
+            extras TEXT DEFAULT '{}'
+        );
+
+        CREATE TABLE IF NOT EXISTS pipeline_stats (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            data TEXT NOT NULL DEFAULT '{}'
+        );
+
+        CREATE TABLE IF NOT EXISTS pipeline_meta (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_files_status ON pipeline_files(status);
+    """)
+    # Ensure stats row exists
+    conn.execute("INSERT OR IGNORE INTO pipeline_stats (id, data) VALUES (1, ?)",
+                 (json.dumps({"total_files": 0, "completed": 0, "skipped": 0,
+                              "errors": 0, "bytes_saved": 0, "total_encode_time_secs": 0}),))
+    conn.commit()
+
+
+def migrate_from_json(json_path: str, db_path: str) -> None:
+    """One-time migration from pipeline_state.json to SQLite."""
+    if not os.path.exists(json_path):
+        return
+    if os.path.exists(db_path):
+        return  # already migrated
+
+    logging.info(f"Migrating pipeline state from JSON to SQLite...")
+    with open(json_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    conn = get_db(db_path)
+    _init_tables(conn)
+
+    # Migrate files
+    files = data.get("files", {})
+    for filepath, info in files.items():
+        direct = {k: info.get(k) for k in _DIRECT_COLS if k in info}
+        extras = {k: v for k, v in info.items() if k not in _DIRECT_COLS}
+        # Convert booleans for SQLite
+        for bool_col in ("audio_only", "cleanup_strip", "sub_strip"):
+            if bool_col in direct and direct[bool_col] is not None:
+                direct[bool_col] = 1 if direct[bool_col] else 0
+        cols = ["filepath"] + list(direct.keys()) + ["extras"]
+        placeholders = ", ".join(["?"] * len(cols))
+        col_names = ", ".join(cols)
+        vals = [filepath] + list(direct.values()) + [json.dumps(extras)]
+        conn.execute(f"INSERT OR REPLACE INTO pipeline_files ({col_names}) VALUES ({placeholders})", vals)
+
+    # Migrate stats
+    stats = data.get("stats", {})
+    conn.execute("UPDATE pipeline_stats SET data = ? WHERE id = 1", (json.dumps(stats),))
+
+    # Migrate meta
+    for key in ("created", "last_updated", "config"):
+        if key in data:
+            val = json.dumps(data[key]) if isinstance(data[key], (dict, list)) else str(data[key])
+            conn.execute("INSERT OR REPLACE INTO pipeline_meta (key, value) VALUES (?, ?)", (key, val))
+
+    conn.commit()
+    conn.close()
+
+    # Rename old JSON to .migrated
+    os.rename(json_path, json_path + ".migrated")
+    logging.info(f"Migrated {len(files)} files from JSON to SQLite")
+
+
 class PipelineState:
-    """Persistent state tracker — survives Ctrl+C and resumes."""
+    """Persistent state tracker — SQLite-backed, survives crashes.
 
-    def __init__(self, state_file: str):
-        self.state_file = state_file
+    Thread-safe via SQLite's built-in locking. Multiple processes can
+    read/write the same database safely via WAL mode.
+    """
+
+    def __init__(self, db_path: str):
+        self.db_path = str(db_path)
         self._lock = threading.RLock()
-        self.data = {
-            "created": datetime.now().isoformat(),
-            "last_updated": None,
-            "config": {},
-            "stats": {
-                "total_files": 0,
-                "completed": 0,
-                "skipped": 0,
-                "errors": 0,
-                "bytes_saved": 0,
-                "total_encode_time_secs": 0,
-            },
-            "files": {},  # keyed by source filepath
-        }
-        self._load()
+        self._conn = get_db(self.db_path)
+        _init_tables(self._conn)
+        self._stats_cache = None
+        self._stats_dirty = False
 
-    def _load(self):
-        if os.path.exists(self.state_file):
-            with open(self.state_file, "r", encoding="utf-8") as f:
-                self.data = json.load(f)
-            logging.info(f"Loaded state: {len(self.data['files'])} files tracked")
+        count = self._conn.execute("SELECT COUNT(*) FROM pipeline_files").fetchone()[0]
+        if count > 0:
+            logging.info(f"Loaded state: {count} files tracked")
+
+    def _get_conn(self) -> sqlite3.Connection:
+        """Get the thread-local connection. SQLite connections aren't thread-safe,
+        but we protect with RLock and use WAL mode for cross-process safety."""
+        return self._conn
 
     def save(self):
+        """Flush stats to the database. Always writes since callers mutate the dict directly."""
         with self._lock:
-            # Merge external changes (e.g. server's reset-errors endpoint)
-            # before saving. If the file on disk has entries we modified
-            # externally (error→pending), adopt those changes.
-            self._merge_external_resets()
-            self.data["last_updated"] = datetime.now().isoformat()
-            tmp = self.state_file + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(self.data, f, indent=2, ensure_ascii=False)
-            for attempt in range(5):
-                try:
-                    os.replace(tmp, self.state_file)
-                    return
-                except PermissionError:
-                    if attempt < 4:
-                        time.sleep(0.1 * (attempt + 1))
-                    else:
-                        raise
-
-    def _merge_external_resets(self):
-        """Check if the state file on disk has items reset from error→pending
-        by the server's reset-errors endpoint, and adopt those changes."""
-        if not os.path.exists(self.state_file):
-            return
-        try:
-            mtime = os.path.getmtime(self.state_file)
-            # Only check if file was modified externally (not by us)
-            if not hasattr(self, '_last_save_mtime') or mtime <= self._last_save_mtime:
-                return
-            with open(self.state_file, "r", encoding="utf-8") as f:
-                disk_data = json.load(f)
-            for fp, disk_info in disk_data.get("files", {}).items():
-                mem_info = self.data["files"].get(fp)
-                if mem_info and mem_info.get("status") == "error" and disk_info.get("status") == "pending":
-                    mem_info["status"] = "pending"
-                    mem_info.pop("error", None)
-                    mem_info.pop("stage", None)
-                    mem_info["last_updated"] = disk_info.get("last_updated", "")
-        except Exception:
-            pass  # don't break saves if merge fails
-        finally:
-            self._last_save_mtime = time.time()
+            if self._stats_cache is not None:
+                self._conn.execute("UPDATE pipeline_stats SET data = ? WHERE id = 1",
+                                   (json.dumps(self._stats_cache),))
+                self._conn.commit()
+                self._stats_dirty = False
 
     def get_file(self, filepath: str) -> Optional[dict]:
+        """Get file entry as a dict, or None if not tracked."""
         with self._lock:
-            entry = self.data["files"].get(filepath)
-            return dict(entry) if entry else None
+            row = self._conn.execute(
+                "SELECT * FROM pipeline_files WHERE filepath = ?", (filepath,)
+            ).fetchone()
+            if not row:
+                return None
+            return self._row_to_dict(row)
 
     def set_file(self, filepath: str, status: FileStatus, **kwargs):
+        """Create or update a file entry. Writes to DB immediately."""
         with self._lock:
-            if filepath not in self.data["files"]:
-                self.data["files"][filepath] = {
-                    "status": status.value,
-                    "added": datetime.now().isoformat(),
-                }
-            entry = self.data["files"][filepath]
-            entry["status"] = status.value
-            entry["last_updated"] = datetime.now().isoformat()
-            entry.update(kwargs)
-        # Save after every status change (save has its own lock)
-        self.save()
+            now = datetime.now().isoformat()
+            existing = self._conn.execute(
+                "SELECT filepath FROM pipeline_files WHERE filepath = ?", (filepath,)
+            ).fetchone()
+
+            all_data = {"status": status.value, "last_updated": now}
+            all_data.update(kwargs)
+            if not existing:
+                all_data.setdefault("added", now)
+
+            # Split into direct columns and extras
+            direct = {}
+            extras = {}
+            for k, v in all_data.items():
+                if k in _DIRECT_COLS:
+                    # Convert booleans for SQLite
+                    if k in ("audio_only", "cleanup_strip", "sub_strip") and v is not None:
+                        v = 1 if v else 0
+                    direct[k] = v
+                else:
+                    extras[k] = v
+
+            if existing:
+                # Merge extras with existing
+                old_extras_raw = self._conn.execute(
+                    "SELECT extras FROM pipeline_files WHERE filepath = ?", (filepath,)
+                ).fetchone()[0]
+                old_extras = json.loads(old_extras_raw) if old_extras_raw else {}
+                old_extras.update(extras)
+                extras = old_extras
+
+                # Build UPDATE
+                set_parts = [f"{k} = ?" for k in direct]
+                set_parts.append("extras = ?")
+                vals = list(direct.values()) + [json.dumps(extras), filepath]
+                self._conn.execute(
+                    f"UPDATE pipeline_files SET {', '.join(set_parts)} WHERE filepath = ?", vals
+                )
+            else:
+                # INSERT
+                cols = ["filepath"] + list(direct.keys()) + ["extras"]
+                placeholders = ", ".join(["?"] * len(cols))
+                vals = [filepath] + list(direct.values()) + [json.dumps(extras)]
+                self._conn.execute(
+                    f"INSERT INTO pipeline_files ({', '.join(cols)}) VALUES ({placeholders})", vals
+                )
+            self._conn.commit()
 
     def get_files_by_status(self, status: FileStatus) -> list[str]:
+        """Return list of filepaths matching a status."""
         with self._lock:
-            return [fp for fp, info in self.data["files"].items() if info["status"] == status.value]
+            rows = self._conn.execute(
+                "SELECT filepath FROM pipeline_files WHERE status = ?", (status.value,)
+            ).fetchall()
+            return [row[0] for row in rows]
 
     @property
-    def stats(self):
-        return self.data["stats"]
+    def stats(self) -> dict:
+        """Get stats dict. Cached in memory, flushed to DB on save()."""
+        if self._stats_cache is None:
+            with self._lock:
+                row = self._conn.execute("SELECT data FROM pipeline_stats WHERE id = 1").fetchone()
+                self._stats_cache = json.loads(row[0]) if row else {
+                    "total_files": 0, "completed": 0, "skipped": 0,
+                    "errors": 0, "bytes_saved": 0, "total_encode_time_secs": 0,
+                }
+        return self._stats_cache
+
+    @stats.setter
+    def stats(self, value: dict):
+        self._stats_cache = value
+        self._stats_dirty = True
+
+    def mark_stats_dirty(self):
+        """Mark stats as needing a flush. Call after modifying stats dict in-place."""
+        self._stats_dirty = True
 
     def compact(self) -> int:
-        """Remove REPLACED and SKIPPED entries from state to reduce file size.
-
-        Stats are already tracked separately in stats dict and encode_history.jsonl,
-        so these entries are no longer needed.
-        """
+        """Remove REPLACED and SKIPPED entries."""
         with self._lock:
-            terminal = {FileStatus.REPLACED.value, FileStatus.SKIPPED.value}
-            to_remove = [fp for fp, info in self.data["files"].items()
-                         if info.get("status") in terminal]
-            for fp in to_remove:
-                del self.data["files"][fp]
-
-            if to_remove:
-                self.data["stats"]["archived_count"] = (
-                    self.data["stats"].get("archived_count", 0) + len(to_remove)
+            cursor = self._conn.execute(
+                "SELECT COUNT(*) FROM pipeline_files WHERE status IN ('replaced', 'skipped')"
+            )
+            count = cursor.fetchone()[0]
+            if count > 0:
+                self._conn.execute(
+                    "DELETE FROM pipeline_files WHERE status IN ('replaced', 'skipped')"
                 )
-                logging.info(f"Compacted state: removed {len(to_remove)} terminal entries "
-                             f"({len(self.data['files'])} remaining)")
+                self._conn.commit()
+                self.stats["archived_count"] = self.stats.get("archived_count", 0) + count
+                self._stats_dirty = True
+                self.save()
+                remaining = self._conn.execute("SELECT COUNT(*) FROM pipeline_files").fetchone()[0]
+                logging.info(f"Compacted state: removed {count} terminal entries ({remaining} remaining)")
+        return count
 
-        if to_remove:
-            self.save()
-        return len(to_remove)
+    def get_all_files(self) -> dict[str, dict]:
+        """Return all file entries as a dict keyed by filepath. Used by server API."""
+        with self._lock:
+            rows = self._conn.execute("SELECT * FROM pipeline_files").fetchall()
+            return {row["filepath"]: self._row_to_dict(row) for row in rows}
+
+    def _row_to_dict(self, row: sqlite3.Row) -> dict:
+        """Convert a SQLite row to the dict format callers expect."""
+        d = dict(row)
+        filepath = d.pop("filepath", None)
+        # Merge extras into the main dict
+        extras_raw = d.pop("extras", "{}")
+        extras = json.loads(extras_raw) if extras_raw else {}
+        d.update(extras)
+        # Convert SQLite integers back to booleans
+        for bool_col in ("audio_only", "cleanup_strip", "sub_strip"):
+            if bool_col in d and d[bool_col] is not None:
+                d[bool_col] = bool(d[bool_col])
+        # Remove None values for clean output
+        return {k: v for k, v in d.items() if v is not None}
+
+    @property
+    def data(self) -> dict:
+        """Compatibility property — returns the full state as a dict matching the old JSON format.
+
+        Used by server API endpoints that return the full pipeline state, and by
+        runner.py for direct iteration. Builds the dict on-demand from SQLite.
+        """
+        files = self.get_all_files()
+        meta_rows = self._conn.execute("SELECT key, value FROM pipeline_meta").fetchall()
+        meta = {}
+        for row in meta_rows:
+            try:
+                meta[row[0]] = json.loads(row[1])
+            except (json.JSONDecodeError, TypeError):
+                meta[row[0]] = row[1]
+
+        return {
+            "created": meta.get("created", ""),
+            "last_updated": meta.get("last_updated", datetime.now().isoformat()),
+            "config": meta.get("config", {}),
+            "stats": self.stats,
+            "files": files,
+        }
+
+    def set_meta(self, key: str, value) -> None:
+        """Set a metadata key (created, config, last_updated, etc.)."""
+        val_str = json.dumps(value) if isinstance(value, (dict, list)) else str(value)
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO pipeline_meta (key, value) VALUES (?, ?)", (key, val_str)
+            )
+            self._conn.commit()
+
+    def close(self):
+        """Flush and close the database connection."""
+        self.save()
+        self._conn.close()

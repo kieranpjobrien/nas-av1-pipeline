@@ -80,7 +80,7 @@ def stage_fetch(item: dict, staging_dir: str, config: dict, state: PipelineState
     # Atomically claim this file for fetching — prevents the prefetch thread
     # and main loop from copying the same file concurrently (WinError 32).
     with state._lock:
-        existing = state.data["files"].get(source)
+        existing = state.get_file(source)
         current = existing["status"] if existing else None
         if current == FileStatus.FETCHING.value:
             return None  # Another thread is already fetching this file

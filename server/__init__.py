@@ -24,13 +24,38 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from paths import STAGING_DIR, MEDIA_REPORT
+from paths import STAGING_DIR, MEDIA_REPORT, PIPELINE_STATE_DB
 
 # Derived paths
 CONTROL_DIR = STAGING_DIR / "control"
-STATE_FILE = STAGING_DIR / "pipeline_state.json"
+STATE_FILE = STAGING_DIR / "pipeline_state.json"  # legacy, kept for migration detection
 HISTORY_FILE = STAGING_DIR / "encode_history.jsonl"
 FRONTEND_DIST = Path(__file__).parent.parent / "frontend" / "dist"
+
+
+def _get_pipeline_state() -> dict | None:
+    """Read pipeline state from SQLite, returning the same dict shape as the old JSON.
+
+    Falls back to the JSON file if the DB doesn't exist yet (pre-migration).
+    """
+    db_path = str(PIPELINE_STATE_DB)
+    if os.path.exists(db_path):
+        try:
+            from pipeline.state import get_db, PipelineState
+            state = PipelineState(db_path)
+            data = state.data
+            state.close()
+            return data
+        except Exception:
+            pass
+    # Fallback to JSON
+    return read_json_safe(STATE_FILE)
+
+
+def _get_state_db():
+    """Get a raw SQLite connection for direct queries (reset-errors, compact, etc.)."""
+    from pipeline.state import get_db
+    return get_db(str(PIPELINE_STATE_DB))
 
 
 # --- Models ---
@@ -351,7 +376,7 @@ app = FastAPI(title="AV1 Pipeline Dashboard")
 
 @app.get("/api/pipeline")
 def get_pipeline():
-    data = read_json_safe(STATE_FILE)
+    data = _get_pipeline_state()
     if data is None:
         return {"status": "no_state", "message": "Pipeline hasn't run yet"}
     return data
@@ -747,24 +772,28 @@ def set_gentle(req: GentleRequest):
 
 @app.post("/api/pipeline/reset-errors")
 def reset_errors():
-    data = read_json_safe(STATE_FILE)
-    if data is None:
-        raise HTTPException(404, "Pipeline state not found")
-    files = data.get("files", {})
-    reset_count = 0
-    for path, info in files.items():
-        if (info.get("status") or "").lower() in ("error", "failed"):
-            info["status"] = "pending"
-            info["last_updated"] = datetime.now().isoformat()
-            info.pop("error", None)
-            info.pop("stage", None)
-            reset_count += 1
-    if reset_count > 0:
-        stats = data.get("stats", {})
-        stats["errors"] = max(0, stats.get("errors", 0) - reset_count)
-        data["last_updated"] = datetime.now().isoformat()
-        STATE_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    return {"ok": True, "reset": reset_count}
+    """Reset all error entries to pending. Writes directly to SQLite —
+    the pipeline process sees the changes immediately, no restart needed."""
+    try:
+        conn = _get_state_db()
+        now = datetime.now().isoformat()
+        cursor = conn.execute(
+            "UPDATE pipeline_files SET status = 'pending', error = NULL, stage = NULL, "
+            "last_updated = ? WHERE status IN ('error', 'failed')", (now,)
+        )
+        reset_count = cursor.rowcount
+        if reset_count > 0:
+            # Update stats
+            row = conn.execute("SELECT data FROM pipeline_stats WHERE id = 1").fetchone()
+            if row:
+                stats = json.loads(row[0])
+                stats["errors"] = max(0, stats.get("errors", 0) - reset_count)
+                conn.execute("UPDATE pipeline_stats SET data = ? WHERE id = 1", (json.dumps(stats),))
+        conn.commit()
+        conn.close()
+        return {"ok": True, "reset": reset_count}
+    except Exception as e:
+        raise HTTPException(500, f"Failed to reset errors: {e}")
 
 
 @app.post("/api/pipeline/force-accept")
@@ -778,45 +807,53 @@ def force_accept(req: dict):
     path = req.get("path")
     if not path:
         raise HTTPException(400, "path required")
-    data = read_json_safe(STATE_FILE)
-    if data is None:
-        raise HTTPException(404, "Pipeline state not found")
-    files = data.get("files", {})
-    entry = files.get(path)
-    if not entry:
-        raise HTTPException(404, f"No state entry for {path}")
-    if entry.get("status") != "error":
-        raise HTTPException(400, f"File is not in error state (status={entry.get('status')})")
-    entry["skip_duration_check"] = True
-    entry["status"] = "uploaded"
-    entry.pop("error", None)
-    entry.pop("stage", None)
-    entry["last_updated"] = datetime.now().isoformat()
-    data["last_updated"] = datetime.now().isoformat()
-    STATE_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    return {"ok": True, "path": path}
+    try:
+        conn = _get_state_db()
+        row = conn.execute("SELECT status, extras FROM pipeline_files WHERE filepath = ?", (path,)).fetchone()
+        if not row:
+            conn.close()
+            raise HTTPException(404, f"No state entry for {path}")
+        if row["status"] != "error":
+            conn.close()
+            raise HTTPException(400, f"File is not in error state (status={row['status']})")
+        now = datetime.now().isoformat()
+        extras = json.loads(row["extras"]) if row["extras"] else {}
+        extras["skip_duration_check"] = True
+        conn.execute(
+            "UPDATE pipeline_files SET status = 'uploaded', error = NULL, stage = NULL, "
+            "last_updated = ?, extras = ? WHERE filepath = ?",
+            (now, json.dumps(extras), path)
+        )
+        conn.commit()
+        conn.close()
+        return {"ok": True, "path": path}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"Failed to force-accept: {e}")
 
 
 @app.post("/api/pipeline/compact")
 def compact_state():
     """Remove REPLACED and SKIPPED entries from pipeline state."""
-    data = read_json_safe(STATE_FILE)
-    if data is None:
-        raise HTTPException(404, "Pipeline state not found")
-    terminal = {"replaced", "skipped"}
-    removed = 0
-    files = data.get("files", {})
-    to_remove = [fp for fp, info in files.items()
-                 if (info.get("status") or "").lower() in terminal]
-    for fp in to_remove:
-        del files[fp]
-        removed += 1
-    if removed > 0:
-        stats = data.get("stats", {})
-        stats["archived_count"] = stats.get("archived_count", 0) + removed
-        data["last_updated"] = datetime.now().isoformat()
-        STATE_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    return {"ok": True, "removed": removed, "remaining": len(files)}
+    try:
+        conn = _get_state_db()
+        cursor = conn.execute(
+            "DELETE FROM pipeline_files WHERE status IN ('replaced', 'skipped')"
+        )
+        removed = cursor.rowcount
+        remaining = conn.execute("SELECT COUNT(*) FROM pipeline_files").fetchone()[0]
+        if removed > 0:
+            row = conn.execute("SELECT data FROM pipeline_stats WHERE id = 1").fetchone()
+            if row:
+                stats = json.loads(row[0])
+                stats["archived_count"] = stats.get("archived_count", 0) + removed
+                conn.execute("UPDATE pipeline_stats SET data = ? WHERE id = 1", (json.dumps(stats),))
+        conn.commit()
+        conn.close()
+        return {"ok": True, "removed": removed, "remaining": remaining}
+    except Exception as e:
+        raise HTTPException(500, f"Failed to compact: {e}")
 
 
 # -- Process management endpoints --
@@ -1029,7 +1066,7 @@ def get_file_detail(path: str):
                 break
 
     # Look up in pipeline state
-    state_data = read_json_safe(STATE_FILE)
+    state_data = _get_pipeline_state()
     if state_data and "files" in state_data:
         result["pipeline"] = state_data["files"].get(path)
 
@@ -1065,7 +1102,7 @@ class VmafRequest(BaseModel):
 def vmaf_check(req: VmafRequest):
     """Run VMAF quality check on a completed encode."""
     # Look up the file in pipeline state to find source/encoded paths
-    state_data = read_json_safe(STATE_FILE)
+    state_data = _get_pipeline_state()
     if not state_data or "files" not in state_data:
         raise HTTPException(404, "Pipeline state not found")
 
@@ -1220,7 +1257,7 @@ def get_history_summary():
         avg_saved_per_day = sum(d["saved_bytes"] for _, d in recent) / len(recent)
 
         # Load pipeline state to get remaining count
-        state_data = read_json_safe(STATE_FILE)
+        state_data = _get_pipeline_state()
         if state_data and "files" in state_data:
             remaining = sum(
                 1 for f in state_data["files"].values()
@@ -1288,7 +1325,7 @@ async def websocket_endpoint(ws: WebSocket):
     await ws_manager.connect(ws)
     try:
         # Send initial state
-        state_data = read_json_safe(STATE_FILE)
+        state_data = _get_pipeline_state()
         if state_data:
             await ws.send_json({"type": "pipeline", "data": state_data})
 
@@ -1315,14 +1352,15 @@ async def websocket_endpoint(ws: WebSocket):
             except WebSocketDisconnect:
                 break
 
-            # Pipeline state — check mtime
+            # Pipeline state — check DB mtime
             try:
-                mtime = STATE_FILE.stat().st_mtime if STATE_FILE.exists() else 0
+                db_path = str(PIPELINE_STATE_DB)
+                mtime = os.path.getmtime(db_path) if os.path.exists(db_path) else 0
             except OSError:
                 mtime = 0
             if mtime != _ws_state_mtime:
                 _ws_state_mtime = mtime
-                data = read_json_safe(STATE_FILE)
+                data = _get_pipeline_state()
                 if data:
                     await ws.send_json({"type": "pipeline", "data": data})
 

@@ -813,7 +813,7 @@ class Pipeline:
         queue_fps = {item["filepath"] for item in queue}
         orphan_count = 0
         orphan_bytes = 0
-        for filepath, info in list(self.state.data["files"].items()):
+        for filepath, info in list(self.state.get_all_files().items()):
             if filepath in queue_fps:
                 continue
             if info["status"] not in (FileStatus.FETCHED.value, FileStatus.FETCHING.value):

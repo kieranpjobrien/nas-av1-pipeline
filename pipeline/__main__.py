@@ -109,14 +109,17 @@ Examples:
     os.makedirs(args.staging, exist_ok=True)
     setup_logging(args.staging)
 
-    # State
-    state_file = args.state_file or os.path.join(args.staging, "pipeline_state.json")
-    state = PipelineState(state_file)
-    # Store config (convert sets to lists for JSON serialization)
+    # State — SQLite backed. Migrate from JSON on first run.
+    from pipeline.state import migrate_from_json
+    json_state = os.path.join(args.staging, "pipeline_state.json")
+    db_path = args.state_file or os.path.join(args.staging, "pipeline_state.db")
+    migrate_from_json(json_state, db_path)
+    state = PipelineState(db_path)
+    # Store config snapshot
     serializable_config = copy.deepcopy(config)
     if isinstance(serializable_config.get("lossless_audio_codecs"), set):
         serializable_config["lossless_audio_codecs"] = sorted(serializable_config["lossless_audio_codecs"])
-    state.data["config"] = serializable_config
+    state.set_meta("config", serializable_config)
     state.save()
 
     # Build queue

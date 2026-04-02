@@ -18,6 +18,7 @@ NAS_SERIES = Path(os.environ.get("NAS_SERIES", r"\\KieranNAS\Media\Series"))
 
 MEDIA_REPORT = STAGING_DIR / "media_report.json"
 MEDIA_REPORT_LOCK = STAGING_DIR / "media_report.lock"
+PIPELINE_STATE_DB = STAGING_DIR / "pipeline_state.db"
 
 # Plex server config (for triggering library scans after renames/encodes)
 PLEX_URL = os.environ.get("PLEX_URL", "http://192.168.4.43:32400")
