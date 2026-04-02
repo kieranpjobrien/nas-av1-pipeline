@@ -68,8 +68,7 @@ def stage_fetch(item: dict, staging_dir: str, config: dict, state: PipelineState
             except OSError:
                 pass
     if fetch_usage + file_size > config["max_fetch_buffer_bytes"]:
-        logging.info(f"Fetch buffer full ({format_bytes(fetch_usage)}). Waiting for encodes to complete...")
-        return None
+        return None  # buffer full — caller handles the wait
 
     # Check source still exists on NAS (may have been renamed/deleted since scan)
     if not os.path.exists(source):
