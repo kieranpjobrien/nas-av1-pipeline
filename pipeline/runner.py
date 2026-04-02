@@ -900,9 +900,8 @@ class Pipeline:
                               FileStatus.UPLOADING.value, FileStatus.UPLOADED.value,
                               FileStatus.REPLACING.value)
 
-            ready_force = None
-            ready_priority = None
-            ready_any = None
+            ready_video = None       # next video item for GPU
+            ready_audio = None       # next audio item for background thread
             first_pending = None
             first_priority_pending = None
             first_force_pending = None
@@ -920,34 +919,27 @@ class Pipeline:
                 # Skip terminal states
                 if status in (FileStatus.VERIFIED.value, FileStatus.REPLACED.value,
                                FileStatus.SKIPPED.value, FileStatus.ERROR.value):
-                    dispatched.discard(filepath)  # clean up so future retries work
+                    dispatched.discard(filepath)
                     continue
 
-                # Skip items already handed off this run (state update may lag)
+                # Skip items already handed off this run
                 if filepath in dispatched:
                     all_done = False
                     continue
 
                 all_done = False
+                is_audio = item.get("audio_only", False)
 
                 if status in READY_STATUSES:
-                    # Skip audio-only items already in ENCODING — they're running
-                    # in a background thread; re-selecting them causes duplicate dispatch.
-                    if status == FileStatus.ENCODING.value and item.get("audio_only"):
+                    if status == FileStatus.ENCODING.value and is_audio:
                         continue
-                    is_audio = item.get("audio_only", False)
-                    audio_slots_full = len(audio_threads) >= MAX_AUDIO_THREADS
-
-                    if is_force and ready_force is None:
-                        ready_force = item
-                    elif is_priority and ready_priority is None:
-                        ready_priority = item
-                    elif not is_audio and ready_any is None:
-                        # Video items: always eligible for GPU encode
-                        ready_any = item
-                    elif is_audio and not audio_slots_full and ready_any is None:
-                        # Audio items: only when threads have capacity
-                        ready_any = item
+                    # Separate selection for video (GPU) and audio (background threads)
+                    if is_audio:
+                        if ready_audio is None and len(audio_threads) < MAX_AUDIO_THREADS:
+                            ready_audio = item
+                    else:
+                        if ready_video is None:
+                            ready_video = item
 
                 if status in (None, FileStatus.PENDING.value):
                     if first_pending is None:
@@ -957,6 +949,11 @@ class Pipeline:
                     elif is_priority and first_priority_pending is None:
                         first_priority_pending = item
 
+                # Stop scanning once we have both
+                if ready_video and ready_audio:
+                    all_done = False
+                    break
+
             # Also check upload queue — items there aren't done yet
             if all_done and self._upload_queue.empty():
                 break
@@ -965,19 +962,44 @@ class Pipeline:
                 time.sleep(5)
                 continue
 
-            # Pick best: force fetched > priority fetched > any fetched >
-            #            force pending > priority pending > any pending
-            ready_item = (ready_force or ready_priority or ready_any
+            # Dispatch audio item to background thread (independent of GPU)
+            if ready_audio:
+                filepath_a = ready_audio["filepath"]
+                if not self.control.should_skip(filepath_a):
+                    processed += 1
+                    logging.info(f"\n[{processed}/{len(queue)}] {ready_audio['tier_name']} | "
+                                 f"{ready_audio['filename']} ({format_bytes(ready_audio['file_size_bytes'])})")
+                    existing_a = self.state.get_file(filepath_a) or {}
+                    if not existing_a.get("tier"):
+                        self.state.set_file(filepath_a,
+                            FileStatus(existing_a.get("status", FileStatus.PENDING.value)),
+                            tier=ready_audio.get("tier_name", "Unknown"),
+                            res_key=get_res_key(ready_audio))
+                    effective_config = self._apply_gentle_overrides(ready_audio)
+                    t = threading.Thread(
+                        target=self._audio_remux_async,
+                        args=(ready_audio, effective_config),
+                        daemon=True,
+                        name=f"audio-remux-{ready_audio['filename'][:30]}",
+                    )
+                    t.start()
+                    audio_threads.append(t)
+                    dispatched.add(filepath_a)
+                    logging.info(f"  Dispatched audio remux to background thread")
+
+            # Pick video item for GPU encode
+            ready_item = (ready_video
                           or first_force_pending or first_priority_pending or first_pending)
             if ready_item is None:
+                if ready_audio:
+                    continue  # dispatched audio, loop back to find more
                 if not prefetch_thread.is_alive() and self._upload_queue.empty():
-                    break  # Everything is either done or errored
+                    break
                 time.sleep(5)
                 continue
 
             filepath = ready_item["filepath"]
 
-            # Skip if control system says so
             if self.control.should_skip(filepath):
                 logging.info(f"Skipped (control): {ready_item['filename']}")
                 self.state.set_file(filepath, FileStatus.SKIPPED, reason="control skip")
@@ -987,7 +1009,6 @@ class Pipeline:
             logging.info(f"\n[{processed}/{len(queue)}] {ready_item['tier_name']} | "
                          f"{ready_item['filename']} ({format_bytes(ready_item['file_size_bytes'])})")
 
-            # Store tier and res_key on file state for dashboard display
             existing = self.state.get_file(filepath) or {}
             if not existing.get("tier"):
                 self.state.set_file(
@@ -997,7 +1018,7 @@ class Pipeline:
                     res_key=get_res_key(ready_item),
                 )
 
-            # Audio-only items: dispatch to background thread (no GPU needed)
+            # Audio-only items that slipped through (force/priority)
             if ready_item.get("audio_only"):
                 effective_config = self._apply_gentle_overrides(ready_item)
                 t = threading.Thread(
