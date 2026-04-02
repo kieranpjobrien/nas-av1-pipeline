@@ -373,7 +373,7 @@ export function PipelinePage({ wsData, onFileClick }) {
           {(() => {
             const fetchedFiles = Object.values(files).filter(f => (f.status || "").toLowerCase() === "fetched");
             const fetchedCount = fetchedFiles.length;
-            const fetchedBytes = fetchedFiles.reduce((sum, f) => sum + (f.source_size_bytes || 0), 0);
+            const fetchedBytes = fetchedFiles.reduce((sum, f) => sum + (f.input_size_bytes || f.source_size_bytes || 0), 0);
             return fetchedCount > 0 ? (
               <StatCard label="Cached" value={fetchedCount} sub={fmt(fetchedBytes)} colour={PALETTE.accent} />
             ) : null;

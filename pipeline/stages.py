@@ -95,6 +95,7 @@ def stage_fetch(item: dict, staging_dir: str, config: dict, state: PipelineState
         speed = file_size / elapsed / (1024**2) if elapsed > 0 else 0
         logging.info(f"Fetched in {format_duration(elapsed)} ({speed:.0f} MB/s)")
         state.set_file(source, FileStatus.FETCHED, local_path=local_path,
+                       input_size_bytes=file_size,
                        fetch_start=start, fetch_end=time.time(),
                        fetch_time_secs=round(elapsed, 1))
         return local_path
