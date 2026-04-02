@@ -367,20 +367,55 @@ export function PipelinePage({ wsData, onFileClick }) {
           </div>
         )}
 
-        {/* Encoding speed stats */}
+        {/* Stats row */}
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 10, marginTop: 16, justifyContent: "center" }}>
+          {/* Cached */}
+          {(() => {
+            const fetchedFiles = Object.values(files).filter(f => (f.status || "").toLowerCase() === "fetched");
+            const fetchedCount = fetchedFiles.length;
+            const fetchedBytes = fetchedFiles.reduce((sum, f) => sum + (f.source_size_bytes || 0), 0);
+            return fetchedCount > 0 ? (
+              <StatCard label="Cached" value={fetchedCount} sub={fmt(fetchedBytes)} colour={PALETTE.accent} />
+            ) : null;
+          })()}
+
+          {/* Encoding Speed */}
+          {completed > 0 && stats.total_encode_time_secs > 0 && (
+            <StatCard
+              label="Encoding Speed"
+              value={stats.total_content_duration_secs > 0
+                ? `${(stats.total_encode_time_secs / (stats.total_content_duration_secs / 3600)).toFixed(1)} min/hr`
+                : "—"}
+              sub={stats.total_source_size_bytes > 0
+                ? `${(stats.total_encode_time_secs / 60 / (stats.total_source_size_bytes / (1024 ** 3))).toFixed(1)} min/GB`
+                : undefined}
+              colour={PALETTE.accent}
+            />
+          )}
+
+          {/* Today */}
+          {(() => {
+            const todayStr = new Date().toISOString().slice(0, 10);
+            const todayCount = Object.values(files).filter(f => {
+              const s = (f.status || "").toLowerCase();
+              return ["replaced", "verified"].includes(s) && f.last_updated && f.last_updated.slice(0, 10) === todayStr;
+            }).length;
+            return <StatCard label="Today" value={todayCount} colour={todayCount > 0 ? PALETTE.green : PALETTE.textMuted} />;
+          })()}
+
+          {/* Errors */}
+          {(() => {
+            const errCount = Object.values(files).filter(f => ["error", "failed"].includes((f.status || "").toLowerCase())).length;
+            return errCount > 0
+              ? <StatCard label="Errors" value={errCount} colour={PALETTE.red} />
+              : <StatCard label="Errors" value={0} />;
+          })()}
+        </div>
+
+        {/* Encoding ETA */}
         {completed > 0 && overallETA != null && (
           <div style={{ color: PALETTE.accent, fontSize: 13, marginTop: 12, fontFamily: "'JetBrains Mono', monospace" }}>
             Encoding ETA: {formatETA(overallETA)} remaining
-          </div>
-        )}
-        {completed > 0 && stats.total_encode_time_secs > 0 && (
-          <div style={{ color: PALETTE.textMuted, fontSize: 11, marginTop: 4, display: "flex", justifyContent: "center", gap: 16 }}>
-            {stats.total_content_duration_secs > 0 && (
-              <span>{(stats.total_encode_time_secs / (stats.total_content_duration_secs / 3600)).toFixed(1)} min/hr of content</span>
-            )}
-            {stats.bytes_saved > 0 && (
-              <span>{(stats.total_encode_time_secs / 60 / (stats.total_source_size_bytes > 0 ? stats.total_source_size_bytes / (1024 ** 3) : completed)).toFixed(1)} min/GB</span>
-            )}
           </div>
         )}
         {data.last_updated && (

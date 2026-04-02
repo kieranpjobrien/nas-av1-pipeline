@@ -225,6 +225,7 @@ export function ControlPage({ wsControl }) {
       <div style={{ marginTop: 16, marginBottom: 4, color: PALETTE.textMuted, fontSize: 11, fontWeight: 600, textTransform: "uppercase", letterSpacing: 1 }}>Subtitles &amp; Audio</div>
       <ProcessRow name="subtitles" label="Subtitle Check" startLabel="Run Check" onFlash={showFlash} />
       <ProcessRow name="strip_subs" label="Strip Non-English Subs" startLabel="Strip Subs" onFlash={showFlash} />
+      <ProcessRow name="mux_subs" label="Mux External Subs" startLabel="Mux Subs" onFlash={showFlash} />
       <ProcessRow name="integrity" label="Integrity Check" startLabel="Run Check" onFlash={showFlash} />
 
       {/* Language Detection */}

@@ -169,6 +169,10 @@ PROCESS_CONFIGS = {
         "cmd": [sys.executable, "-m", "tools.strip_subs", "--execute"],
         "cwd": str(Path(__file__).parent.parent),
     },
+    "mux_subs": {
+        "cmd": [sys.executable, "-m", "tools.mux_external_subs", "--execute"],
+        "cwd": str(Path(__file__).parent.parent),
+    },
     "detect_languages": {
         "cmd": [sys.executable, "-m", "tools.detect_languages", "--workers", "6"],
         "cwd": str(Path(__file__).parent.parent),
