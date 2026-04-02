@@ -40,8 +40,12 @@ _DIRECT_COLS = {
 
 
 def get_db(db_path: str) -> sqlite3.Connection:
-    """Open a SQLite connection with WAL mode and sensible defaults."""
-    conn = sqlite3.connect(str(db_path), timeout=30)
+    """Open a SQLite connection with WAL mode and sensible defaults.
+
+    check_same_thread=False allows the connection to be used from multiple threads
+    (safe because we protect all access with an RLock).
+    """
+    conn = sqlite3.connect(str(db_path), timeout=30, check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA busy_timeout=10000")
