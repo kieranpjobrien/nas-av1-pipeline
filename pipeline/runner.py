@@ -977,7 +977,9 @@ class Pipeline:
                     continue
                 existing_a = self.state.get_file(fp_a)
                 status_a = existing_a["status"] if existing_a else None
-                if status_a not in (FileStatus.FETCHED.value, None, FileStatus.PENDING.value):
+                # Only dispatch audio items that are already fetched to local disk.
+                # PENDING items haven't been fetched yet — let the prefetch thread handle them.
+                if status_a != FileStatus.FETCHED.value:
                     continue
                 if status_a == FileStatus.ENCODING.value:
                     continue
