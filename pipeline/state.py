@@ -45,10 +45,10 @@ def get_db(db_path: str) -> sqlite3.Connection:
     check_same_thread=False allows the connection to be used from multiple threads
     (safe because we protect all access with an RLock).
     """
-    conn = sqlite3.connect(str(db_path), timeout=30, check_same_thread=False)
+    conn = sqlite3.connect(str(db_path), timeout=60, check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
-    conn.execute("PRAGMA busy_timeout=10000")
+    conn.execute("PRAGMA busy_timeout=30000")  # 30s wait on lock contention
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -185,55 +185,62 @@ class PipelineState:
             return self._row_to_dict(row)
 
     def set_file(self, filepath: str, status: FileStatus, **kwargs):
-        """Create or update a file entry. Writes to DB immediately."""
+        """Create or update a file entry. Writes to DB immediately.
+
+        Uses INSERT OR REPLACE for simplicity and atomicity — single statement,
+        no SELECT+UPDATE race under concurrent thread access.
+        """
         with self._lock:
             now = datetime.now().isoformat()
-            existing = self._conn.execute(
-                "SELECT filepath FROM pipeline_files WHERE filepath = ?", (filepath,)
+
+            # Read existing entry to preserve fields not being updated
+            existing_row = self._conn.execute(
+                "SELECT * FROM pipeline_files WHERE filepath = ?", (filepath,)
             ).fetchone()
 
             all_data = {"status": status.value, "last_updated": now}
+            if not existing_row:
+                all_data["added"] = now
             all_data.update(kwargs)
-            if not existing:
-                all_data.setdefault("added", now)
 
-            # Split into direct columns and extras
+            # Build the full row from existing + new data
             direct = {}
             extras = {}
+            if existing_row:
+                old = dict(existing_row)
+                old.pop("filepath", None)
+                old_extras = json.loads(old.pop("extras", "{}") or "{}")
+                # Start with existing direct cols
+                for k in _DIRECT_COLS:
+                    if k in old and old[k] is not None:
+                        direct[k] = old[k]
+                extras = old_extras
+
+            # Apply new values
             for k, v in all_data.items():
                 if k in _DIRECT_COLS:
-                    # Convert booleans for SQLite
                     if k in ("audio_only", "cleanup_strip", "sub_strip") and v is not None:
                         v = 1 if v else 0
                     direct[k] = v
                 else:
                     extras[k] = v
 
-            if existing:
-                # Merge extras with existing
-                old_extras_raw = self._conn.execute(
-                    "SELECT extras FROM pipeline_files WHERE filepath = ?", (filepath,)
-                ).fetchone()[0]
-                old_extras = json.loads(old_extras_raw) if old_extras_raw else {}
-                old_extras.update(extras)
-                extras = old_extras
-
-                # Build UPDATE
-                set_parts = [f"{k} = ?" for k in direct]
-                set_parts.append("extras = ?")
-                vals = list(direct.values()) + [json.dumps(extras), filepath]
+            # Single INSERT OR REPLACE — atomic, no race
+            cols = ["filepath"] + list(direct.keys()) + ["extras"]
+            placeholders = ", ".join(["?"] * len(cols))
+            vals = [filepath] + list(direct.values()) + [json.dumps(extras)]
+            try:
                 self._conn.execute(
-                    f"UPDATE pipeline_files SET {', '.join(set_parts)} WHERE filepath = ?", vals
+                    f"INSERT OR REPLACE INTO pipeline_files ({', '.join(cols)}) VALUES ({placeholders})", vals
                 )
-            else:
-                # INSERT
-                cols = ["filepath"] + list(direct.keys()) + ["extras"]
-                placeholders = ", ".join(["?"] * len(cols))
-                vals = [filepath] + list(direct.values()) + [json.dumps(extras)]
+                self._conn.commit()
+            except sqlite3.OperationalError as e:
+                logging.warning(f"SQLite write retry for {filepath}: {e}")
+                time.sleep(0.5)
                 self._conn.execute(
-                    f"INSERT INTO pipeline_files ({', '.join(cols)}) VALUES ({placeholders})", vals
+                    f"INSERT OR REPLACE INTO pipeline_files ({', '.join(cols)}) VALUES ({placeholders})", vals
                 )
-            self._conn.commit()
+                self._conn.commit()
 
     def get_files_by_status(self, status: FileStatus) -> list[str]:
         """Return list of filepaths matching a status."""
