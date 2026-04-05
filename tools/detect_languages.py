@@ -163,7 +163,8 @@ def extract_bitmap_subtitle_text(
     if not tesseract:
         return None
 
-    tmp_dir = os.path.join(str(STAGING_DIR), "ocr_tmp", f"{os.getpid()}_{sub_stream_index}")
+    import uuid
+    tmp_dir = os.path.join(str(STAGING_DIR), "ocr_tmp", f"{uuid.uuid4().hex[:8]}_{sub_stream_index}")
     os.makedirs(tmp_dir, exist_ok=True)
 
     try:

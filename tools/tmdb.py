@@ -590,6 +590,9 @@ def write_tmdb_to_mkv(filepath: str, tmdb: dict) -> bool:
         return False
 
     if not filepath.lower().endswith(".mkv"):
+        return False  # skip non-MKV (mp4 etc) — mkvpropedit only works on MKV
+
+    if not os.path.exists(filepath):
         return False
 
     # Build MKV XML tags
@@ -652,8 +655,11 @@ def write_tmdb_to_mkv(filepath: str, tmdb: dict) -> bool:
             [mkvprop, filepath, "--tags", f"global:{tmp_xml}"],
             capture_output=True, text=True, timeout=30,
         )
+        if result.returncode != 0:
+            logging.debug(f"mkvpropedit failed for {os.path.basename(filepath)}: {result.stderr[:200]}")
         return result.returncode == 0
-    except Exception:
+    except Exception as e:
+        logging.debug(f"TMDb write failed for {os.path.basename(filepath)}: {e}")
         return False
     finally:
         if os.path.exists(tmp_xml):
