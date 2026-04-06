@@ -916,11 +916,16 @@ class Pipeline:
                     fnmatch.fnmatch(norm, pat.lower()) for pat in priority_patterns
                 )
 
-                # Skip terminal states
+                # Skip terminal states — unless force-prioritised (user override)
                 if status in (FileStatus.VERIFIED.value, FileStatus.REPLACED.value,
                                FileStatus.SKIPPED.value, FileStatus.ERROR.value):
-                    dispatched.discard(filepath)
-                    continue
+                    if is_force and status in (FileStatus.SKIPPED.value, FileStatus.ERROR.value):
+                        # Force override: reset to pending so it gets reprocessed
+                        self.state.set_file(filepath, FileStatus.PENDING, reason="force override")
+                        status = FileStatus.PENDING.value
+                    else:
+                        dispatched.discard(filepath)
+                        continue
 
                 # Skip items already handed off this run
                 if filepath in dispatched:
