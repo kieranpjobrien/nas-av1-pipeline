@@ -249,18 +249,26 @@ class Pipeline:
 
             budget_used = _get_budget_used()
 
-            # Force items ALWAYS get fetched, even if buffer is full
+            # Force items get a dedicated budget (200 GB) on top of the main buffer.
+            # This prevents disk exhaustion while ensuring force items always get processed.
+            FORCE_BUDGET = 200 * 1024**3  # 200 GB reserved for force items
             force_items_to_fetch = [item for _, item in video_candidates + audio_candidates
                                     if os.path.normpath(item["filepath"]).lower() in force_set]
             if force_items_to_fetch and budget_used >= MAX_PREFETCH_BYTES:
-                for fi in force_items_to_fetch[:8]:
-                    if self._shutdown:
-                        break
-                    result = stage_fetch(fi, self.staging_dir, self.config, self.state, force=True)
-                    if result is not None:
-                        fetched_any = True
-                if fetched_any:
-                    logging.info(f"Prefetch: {len(force_items_to_fetch)} force items fetched (buffer override)")
+                # Check free space — never go below min_free_space
+                free = get_free_space(self.staging_dir)
+                force_headroom = min(FORCE_BUDGET, free - self.config.get("min_free_space_bytes", 50 * 1024**3))
+                if force_headroom > 0:
+                    fetched_force = 0
+                    for fi in force_items_to_fetch[:8]:
+                        if self._shutdown:
+                            break
+                        result = stage_fetch(fi, self.staging_dir, self.config, self.state, force=True)
+                        if result is not None:
+                            fetched_any = True
+                            fetched_force += 1
+                    if fetched_force:
+                        logging.info(f"Prefetch: {fetched_force} force items fetched (200 GB force budget)")
                 self._sleep_or_shutdown(5)
                 continue
 
