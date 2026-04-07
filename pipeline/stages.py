@@ -36,7 +36,7 @@ def get_free_space(path: str) -> int:
     return shutil.disk_usage(path).free
 
 
-def stage_fetch(item: dict, staging_dir: str, config: dict, state: PipelineState) -> Optional[str]:
+def stage_fetch(item: dict, staging_dir: str, config: dict, state: PipelineState, force: bool = False) -> Optional[str]:
     """Copy file from NAS to local staging. Returns local path or None on failure."""
     source = item["filepath"]
     # Mirror directory structure under staging/fetch/
@@ -67,7 +67,7 @@ def stage_fetch(item: dict, staging_dir: str, config: dict, state: PipelineState
                 fetch_usage += os.path.getsize(os.path.join(fetch_dir, f))
             except OSError:
                 pass
-    if fetch_usage + file_size > config["max_fetch_buffer_bytes"]:
+    if fetch_usage + file_size > config["max_fetch_buffer_bytes"] and not force:
         return None  # buffer full — caller handles the wait
 
     # Check source still exists on NAS (may have been renamed/deleted since scan)

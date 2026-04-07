@@ -248,6 +248,22 @@ class Pipeline:
                 )
 
             budget_used = _get_budget_used()
+
+            # Force items ALWAYS get fetched, even if buffer is full
+            force_items_to_fetch = [item for _, item in video_candidates + audio_candidates
+                                    if os.path.normpath(item["filepath"]).lower() in force_set]
+            if force_items_to_fetch and budget_used >= MAX_PREFETCH_BYTES:
+                for fi in force_items_to_fetch[:8]:
+                    if self._shutdown:
+                        break
+                    result = stage_fetch(fi, self.staging_dir, self.config, self.state, force=True)
+                    if result is not None:
+                        fetched_any = True
+                if fetched_any:
+                    logging.info(f"Prefetch: {len(force_items_to_fetch)} force items fetched (buffer override)")
+                self._sleep_or_shutdown(5)
+                continue
+
             if budget_used >= MAX_PREFETCH_BYTES:
                 self._sleep_or_shutdown(10)
                 continue
@@ -900,6 +916,7 @@ class Pipeline:
                               FileStatus.UPLOADING.value, FileStatus.UPLOADED.value,
                               FileStatus.REPLACING.value)
 
+            ready_video_force = None  # force-priority video item
             ready_video = None       # next video item for GPU
             ready_audio = None       # next audio item for background thread
             first_pending = None
@@ -943,7 +960,9 @@ class Pipeline:
                         if ready_audio is None and len(audio_threads) < MAX_AUDIO_THREADS:
                             ready_audio = item
                     else:
-                        if ready_video is None:
+                        if is_force and ready_video_force is None:
+                            ready_video_force = item
+                        elif ready_video is None:
                             ready_video = item
 
                 if status in (None, FileStatus.PENDING.value):
@@ -1015,8 +1034,8 @@ class Pipeline:
             if audio_dispatched_this_loop > 0:
                 logging.info(f"  Dispatched {audio_dispatched_this_loop} audio jobs to {len(audio_threads)} threads")
 
-            # Pick video item for GPU encode
-            ready_item = (ready_video
+            # Pick video item for GPU encode — force items always win
+            ready_item = (ready_video_force or ready_video
                           or first_force_pending or first_priority_pending or first_pending)
             if ready_item is None:
                 if ready_audio:
