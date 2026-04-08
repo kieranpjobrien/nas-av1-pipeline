@@ -401,7 +401,7 @@ class Pipeline:
 
         logging.info("Upload worker finished")
 
-    def _audio_remux_async(self, item: dict, effective_config: dict):
+    def _audio_remux_async(self, item: dict, effective_config: dict, force: bool = False):
         """Run audio-only remux in a background thread (no GPU needed).
 
         After remux completes, enqueues the item for the upload worker.
@@ -412,13 +412,13 @@ class Pipeline:
             existing = self.state.get_file(filepath)
             current_status = existing["status"] if existing else None
 
-            if current_status in (None, FileStatus.PENDING.value):
+            if current_status in (None, FileStatus.PENDING.value, FileStatus.SKIPPED.value, FileStatus.ERROR.value):
                 # Retry fetch up to 10 times with 30s backoff if buffer is full.
                 local_path = None
                 for _attempt in range(10):
                     if self._shutdown:
                         return
-                    local_path = stage_fetch(item, self.staging_dir, effective_config, self.state)
+                    local_path = stage_fetch(item, self.staging_dir, effective_config, self.state, force=force)
                     if local_path is not None:
                         break
                     # stage_fetch returns None when buffer full — wait for space
@@ -1018,11 +1018,10 @@ class Pipeline:
                 is_force_a = norm_a in force_set
                 if status_a != FileStatus.FETCHED.value:
                     if is_force_a and status_a in (None, FileStatus.PENDING.value, FileStatus.SKIPPED.value, FileStatus.ERROR.value):
-                        logging.info(f"  Force-fetching audio item: {item_a['filename']}")
-                        effective_cfg = self._apply_gentle_overrides(item_a)
-                        local = stage_fetch(item_a, self.staging_dir, effective_cfg, self.state, force=True)
-                        if local is None:
-                            continue
+                        # Force audio: dispatch to thread which handles its own fetch
+                        # Don't block the main loop — _audio_remux_async already
+                        # fetches if needed, we just need to let it through
+                        pass  # fall through to dispatch below
                     else:
                         continue
                     continue
@@ -1038,7 +1037,7 @@ class Pipeline:
                 effective_config = self._apply_gentle_overrides(item_a)
                 t = threading.Thread(
                     target=self._audio_remux_async,
-                    args=(item_a, effective_config),
+                    args=(item_a, effective_config, is_force_a),
                     daemon=True,
                     name=f"audio-remux-{item_a['filename'][:30]}",
                 )
@@ -1046,7 +1045,7 @@ class Pipeline:
                 audio_threads.append(t)
                 dispatched.add(fp_a)
                 audio_dispatched_this_loop += 1
-                logging.info(f"  Dispatched audio remux to background thread")
+                logging.info(f"  Dispatched audio remux to background thread{' (force)' if is_force_a else ''}")
 
             if audio_dispatched_this_loop > 0:
                 logging.info(f"  Dispatched {audio_dispatched_this_loop} audio jobs to {len(audio_threads)} threads")
