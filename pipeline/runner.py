@@ -1009,13 +1009,22 @@ class Pipeline:
                     continue
                 existing_a = self.state.get_file(fp_a)
                 status_a = existing_a["status"] if existing_a else None
-                # Only dispatch audio items that are already fetched to local disk.
-                # PENDING items haven't been fetched yet — let the prefetch thread handle them.
-                if status_a != FileStatus.FETCHED.value:
-                    continue
                 if status_a == FileStatus.ENCODING.value:
                     continue
                 if self.control.should_skip(fp_a):
+                    continue
+                # Force audio items: fetch inline if not yet fetched (don't wait for prefetch)
+                norm_a = os.path.normpath(fp_a).lower()
+                is_force_a = norm_a in force_set
+                if status_a != FileStatus.FETCHED.value:
+                    if is_force_a and status_a in (None, FileStatus.PENDING.value, FileStatus.SKIPPED.value, FileStatus.ERROR.value):
+                        logging.info(f"  Force-fetching audio item: {item_a['filename']}")
+                        effective_cfg = self._apply_gentle_overrides(item_a)
+                        local = stage_fetch(item_a, self.staging_dir, effective_cfg, self.state, force=True)
+                        if local is None:
+                            continue
+                    else:
+                        continue
                     continue
 
                 processed += 1
