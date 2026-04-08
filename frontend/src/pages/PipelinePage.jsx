@@ -356,7 +356,7 @@ export function PipelinePage({ wsData, onFileClick }) {
                     fontSize: 12, fontWeight: 600, cursor: quickWinsBusy ? "default" : "pointer",
                   }}
                 >
-                  {quickWinsBusy ? "Queuing..." : `Quick Wins: Force ${completion.quick_wins_audio_count} audio remuxes to front`}
+                  {quickWinsBusy ? "Queuing..." : `Quick Wins: Force ${completion.quick_wins_audio_count} cleanups to front`}
                 </button>
               </div>
             )}

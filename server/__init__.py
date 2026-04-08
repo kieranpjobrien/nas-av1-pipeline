@@ -724,21 +724,31 @@ def toggle_force(req: ForceRequest):
 
 @app.post("/api/quick-wins")
 def quick_wins():
-    """Bulk-force AV1 files needing audio remux to the front of the pipeline queue."""
+    """Bulk-force AV1 files needing audio or cleanup work to the front of the pipeline queue."""
     data = read_json_safe(MEDIA_REPORT)
     if data is None:
         raise HTTPException(404, "media_report.json not found")
 
+    keep_langs = {"eng", "en", "english", "und", ""}
     files = data.get("files", [])
     paths = []
     for f in files:
         if f.get("video", {}).get("codec_raw") != "av1":
             continue
-        audio_ok = all(
+        audio_streams = f.get("audio_streams", [])
+        audio_codec_ok = all(
             (a.get("codec_raw") or a.get("codec", "")).lower() in ("eac3", "e-ac-3")
-            for a in f.get("audio_streams", [])
-        ) if f.get("audio_streams") else True
-        if not audio_ok:
+            for a in audio_streams
+        ) if audio_streams else True
+        audio_clean = all(
+            i == 0 or (a.get("language") or a.get("detected_language") or "und").lower().strip() in keep_langs
+            for i, a in enumerate(audio_streams)
+        ) if audio_streams else True
+        subs_ok = all(
+            (s.get("language") or s.get("detected_language") or "und").lower().strip() in keep_langs
+            for s in f.get("subtitle_streams", [])
+        )
+        if not (audio_codec_ok and audio_clean and subs_ok):
             paths.append(f["filepath"])
 
     if not paths:
