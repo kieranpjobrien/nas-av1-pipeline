@@ -139,6 +139,14 @@ def clean_series_name(stem: str, tag_re: re.Pattern = _TAG_BOUNDARY_RE) -> str |
     # Normalize separators before tag search so concatenated blobs get boundaries
     after = _dots_to_spaces(after)
 
+    # Strip trailing resolution+service junk concatenated to episode title:
+    # "ArrivalspNOWAtmosHLG" -> "Arrivals", "RecenteringpNOWAtmos" -> "Recentering"
+    after = re.sub(
+        r"p(?:NOW|AMZN|DSNP|HULU|HBO|ATVP|PCOK|PMTP|MAX)"
+        r"(?:Atmos|HLG|HDR|DDP|DD|AC3|H264|H265|HEVC|AVC|WEB)*\s*$",
+        "", after, flags=re.IGNORECASE,
+    )
+
     # Find where tags begin
     tag_match = tag_re.search(after)
     if tag_match:
