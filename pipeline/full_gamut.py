@@ -157,144 +157,150 @@ def full_gamut(
         # Cleanup local fetch file (free staging space)
         _cleanup(local_path, remuxed_path)
 
-        # === STEP 7: Upload to NAS ===
-        state.set_file(filepath, FileStatus.UPLOADING, stage="upload",
-                       output_path=output_path, encode_time_secs=round(encode_elapsed, 1))
-
-        # Determine final name on NAS
+        # === HAND OFF TO NETWORK WORKER ===
+        # GPU is done. Set UPLOADING with all the info the network worker needs.
+        # Network worker will: upload, verify, replace, TMDb, report, Plex.
         final_name = (clean_name if clean_name else Path(filename).stem + ".mkv")
         if not final_name.endswith(".mkv"):
             final_name = Path(final_name).stem + ".mkv"
-        source_dir = os.path.dirname(filepath)
-        dest_path = os.path.join(source_dir, final_name + ".av1.tmp")
-        final_path = os.path.join(source_dir, final_name)
 
-        logging.info(f"  Uploading to NAS...")
-        upload_start = time.time()
-        try:
-            shutil.copy2(output_path, dest_path)
-        except Exception as e:
-            state.set_file(filepath, FileStatus.ERROR, error=f"upload failed: {e}", stage="upload")
-            return False
-        upload_elapsed = time.time() - upload_start
-        upload_speed = output_size / upload_elapsed / (1024**2) if upload_elapsed > 0 else 0
-        logging.info(f"  Uploaded in {format_duration(upload_elapsed)} ({upload_speed:.0f} MB/s)")
-
-        # Cleanup local encoded file
-        try:
-            os.remove(output_path)
-        except OSError:
-            pass
-
-        # === STEP 8: Verify ===
-        state.set_file(filepath, FileStatus.UPLOADING, stage="verify")
-        duration_tolerance = config.get("verify_duration_tolerance_secs", 2.0)
-        input_duration = item.get("duration_seconds", 0)
-        output_duration = get_duration(dest_path) or 0
-
-        if input_duration > 0 and abs(input_duration - output_duration) > duration_tolerance:
-            logging.error(f"  Duration mismatch: input={input_duration:.1f}s, output={output_duration:.1f}s")
-            state.set_file(filepath, FileStatus.ERROR,
-                           error=f"duration mismatch ({input_duration:.0f}s vs {output_duration:.0f}s)",
-                           stage="verify")
-            # Clean up the uploaded temp file
-            try:
-                os.remove(dest_path)
-            except OSError:
-                pass
-            return False
-
-        # === STEP 9: Replace original (crash-safe) ===
-        state.set_file(filepath, FileStatus.UPLOADING, stage="replace")
-        backup_path = filepath + ".original.bak"
-
-        try:
-            # Rename original -> .bak
-            if os.path.exists(filepath) and not os.path.exists(backup_path):
-                os.rename(filepath, backup_path)
-                logging.info(f"  Backed up original")
-
-            # Rename temp -> final name
-            if os.path.exists(dest_path):
-                os.rename(dest_path, final_path)
-                logging.info(f"  Renamed to {final_name}")
-
-            # Delete backup
-            if os.path.exists(backup_path):
-                os.remove(backup_path)
-                logging.info(f"  Deleted backup")
-
-            # Also delete any external sub files that were muxed in
-            for sub_path in external_subs:
-                try:
-                    os.remove(sub_path)
-                    logging.info(f"  Removed external sub: {os.path.basename(sub_path)}")
-                except OSError:
-                    pass
-
-        except Exception as e:
-            state.set_file(filepath, FileStatus.ERROR, error=f"replace failed: {e}", stage="replace")
-            return False
-
-        # === STEP 10: Write TMDb tags ===
-        try:
-            from pipeline.metadata import enrich_and_tag
-            tmdb_data = enrich_and_tag(final_path, final_name, library_type)
-            if tmdb_data:
-                logging.info(f"  TMDb: {tmdb_data.get('director', tmdb_data.get('created_by', ['?']))}")
-        except (ImportError, Exception) as e:
-            logging.debug(f"  TMDb tagging skipped: {e}")
-
-        # === STEP 11: Update media report ===
-        try:
-            update_entry(final_path, library_type)
-            logging.info(f"  Report updated")
-        except Exception as e:
-            logging.warning(f"  Report update failed (non-fatal): {e}")
-
-        # === STEP 12: Trigger Plex scan ===
-        _trigger_plex_scan(final_path)
-
-        # === DONE ===
-        state.set_file(filepath, FileStatus.DONE,
-                       final_path=final_path,
+        state.set_file(filepath, FileStatus.UPLOADING, stage="pending_upload",
+                       output_path=output_path,
+                       encode_time_secs=round(encode_elapsed, 1),
                        output_size_bytes=output_size,
                        input_size_bytes=input_size,
                        bytes_saved=saved,
                        compression_ratio=round(ratio, 1),
-                       encode_time_secs=round(encode_elapsed, 1),
-                       upload_time_secs=round(upload_elapsed, 1),
-                       mode="full_gamut")
+                       final_name=final_name,
+                       library_type=library_type,
+                       duration_seconds=item.get("duration_seconds", 0))
 
-        # Update global stats
-        state.stats["completed"] = state.stats.get("completed", 0) + 1
-        state.stats["bytes_saved"] = state.stats.get("bytes_saved", 0) + saved
-        state.stats["total_encode_time_secs"] = state.stats.get("total_encode_time_secs", 0) + encode_elapsed
-        state.stats["total_source_size_bytes"] = state.stats.get("total_source_size_bytes", 0) + input_size
-        state.stats["total_content_duration_secs"] = (
-            state.stats.get("total_content_duration_secs", 0) + item.get("duration_seconds", 0)
-        )
-        # Per-tier stats
-        tier_stats = state.stats.setdefault("tier_stats", {})
-        tier = tier_stats.setdefault(res_key, {
-            "completed": 0, "bytes_saved": 0,
-            "total_input_bytes": 0, "total_output_bytes": 0,
-            "total_encode_time_secs": 0,
-        })
-        tier["completed"] += 1
-        tier["bytes_saved"] += saved
-        tier["total_input_bytes"] += input_size
-        tier["total_output_bytes"] += output_size
-        tier["total_encode_time_secs"] += encode_elapsed
-        state.save()
-
-        logging.info(f"  DONE: DONE: {final_name}")
+        logging.info(f"  Encoded, queued for upload: {final_name}")
         return True
 
     except Exception as e:
         logging.error(f"Full gamut failed for {filename}: {e}")
         state.set_file(filepath, FileStatus.ERROR, error=str(e), stage="full_gamut")
         return False
+
+
+def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
+    """Upload encoded file to NAS, verify, replace original, tag, report, Plex.
+
+    Called by the network worker after the GPU worker sets status=UPLOADING.
+    This runs on the network thread — one at a time, full bandwidth.
+    """
+    entry = state.get_file(filepath)
+    if not entry:
+        return False
+
+    output_path = entry.get("output_path")
+    final_name = entry.get("final_name", os.path.basename(filepath))
+    library_type = entry.get("library_type", "")
+    input_size = entry.get("input_size_bytes", 0)
+    output_size = entry.get("output_size_bytes", 0)
+    saved = entry.get("bytes_saved", 0)
+    encode_time = entry.get("encode_time_secs", 0)
+    input_duration = entry.get("duration_seconds", 0)
+    ratio = entry.get("compression_ratio", 0)
+
+    if not output_path or not os.path.exists(output_path):
+        logging.error(f"  Upload: encoded file missing: {final_name}")
+        state.set_file(filepath, FileStatus.ERROR, error="encoded file missing", stage="upload")
+        return False
+
+    source_dir = os.path.dirname(filepath)
+    dest_path = os.path.join(source_dir, final_name + ".av1.tmp")
+    final_path = os.path.join(source_dir, final_name)
+
+    # === Upload ===
+    state.set_file(filepath, FileStatus.UPLOADING, stage="upload")
+    logging.info(f"  Uploading: {final_name} ({format_bytes(output_size)})")
+    upload_start = time.time()
+    try:
+        shutil.copy2(output_path, dest_path)
+    except Exception as e:
+        state.set_file(filepath, FileStatus.ERROR, error=f"upload failed: {e}", stage="upload")
+        return False
+    upload_elapsed = time.time() - upload_start
+    upload_speed = output_size / upload_elapsed / (1024**2) if upload_elapsed > 0 else 0
+    logging.info(f"  Uploaded in {format_duration(upload_elapsed)} ({upload_speed:.0f} MB/s)")
+
+    # Cleanup local encoded file
+    try:
+        os.remove(output_path)
+    except OSError:
+        pass
+
+    # === Verify ===
+    duration_tolerance = config.get("verify_duration_tolerance_secs", 2.0)
+    output_duration = get_duration(dest_path) or 0
+    if input_duration > 0 and abs(input_duration - output_duration) > duration_tolerance:
+        logging.error(f"  Duration mismatch: input={input_duration:.1f}s, output={output_duration:.1f}s")
+        state.set_file(filepath, FileStatus.ERROR,
+                       error=f"duration mismatch ({input_duration:.0f}s vs {output_duration:.0f}s)",
+                       stage="verify")
+        try:
+            os.remove(dest_path)
+        except OSError:
+            pass
+        return False
+
+    # === Replace original (crash-safe) ===
+    backup_path = filepath + ".original.bak"
+    try:
+        if os.path.exists(filepath) and not os.path.exists(backup_path):
+            os.rename(filepath, backup_path)
+        if os.path.exists(dest_path):
+            os.rename(dest_path, final_path)
+            logging.info(f"  Replaced: {final_name}")
+        if os.path.exists(backup_path):
+            os.remove(backup_path)
+    except Exception as e:
+        state.set_file(filepath, FileStatus.ERROR, error=f"replace failed: {e}", stage="replace")
+        return False
+
+    # === TMDb tags ===
+    try:
+        from pipeline.metadata import enrich_and_tag
+        tmdb_data = enrich_and_tag(final_path, final_name, library_type)
+        if tmdb_data:
+            logging.info(f"  TMDb: {tmdb_data.get('director', tmdb_data.get('created_by', ['?']))}")
+    except Exception:
+        pass
+
+    # === Update media report ===
+    try:
+        update_entry(final_path, library_type)
+    except Exception:
+        pass
+
+    # === Plex scan ===
+    _trigger_plex_scan(final_path)
+
+    # === DONE ===
+    state.set_file(filepath, FileStatus.DONE,
+                   final_path=final_path,
+                   output_size_bytes=output_size,
+                   input_size_bytes=input_size,
+                   bytes_saved=saved,
+                   compression_ratio=ratio,
+                   encode_time_secs=encode_time,
+                   upload_time_secs=round(upload_elapsed, 1),
+                   mode="full_gamut")
+
+    # Update global stats
+    state.stats["completed"] = state.stats.get("completed", 0) + 1
+    state.stats["bytes_saved"] = state.stats.get("bytes_saved", 0) + saved
+    state.stats["total_encode_time_secs"] = state.stats.get("total_encode_time_secs", 0) + encode_time
+    state.stats["total_source_size_bytes"] = state.stats.get("total_source_size_bytes", 0) + input_size
+    state.stats["total_content_duration_secs"] = (
+        state.stats.get("total_content_duration_secs", 0) + input_duration
+    )
+    state.save()
+
+    logging.info(f"  DONE: {final_name}")
+    return True
 
 
 def _run_encode(

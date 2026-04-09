@@ -1,13 +1,9 @@
-"""Pipeline orchestrator: 4 threads with GPU coordination.
+"""Pipeline orchestrator: 3 threads with clean separation.
 
-GPU is a shared resource with priority: Force Next > Gap Filler > Full Gamut
-
-Thread 1 (GPU/Encode): full_gamut encodes — holds GPU lock during NVENC encode
-Thread 2 (Network): pre-fetches next files, saturates NAS link
-Thread 3 (Gap Filler): CPU work while GPU encodes, grabs GPU between encodes for whisper
-Thread 4 (Force Monitor): watches force stack, preempts GPU for immediate processing
-
-Each file is owned by ONE thread from start to finish. No handoffs.
+Thread 1 (GPU): encodes only — no network I/O, blocks until file is fetched
+Thread 2 (Network): bidirectional — uploads first (frees space), then fetches.
+         One operation at a time, full NAS bandwidth in one direction.
+Thread 3 (Gap Filler): CPU work on AV1 files, grabs GPU for whisper between encodes
 """
 
 import json
@@ -20,7 +16,7 @@ import time
 
 from pipeline.config import get_res_key
 from pipeline.ffmpeg import format_bytes, format_duration
-from pipeline.full_gamut import full_gamut
+from pipeline.full_gamut import full_gamut, finalize_upload
 from pipeline.gap_filler import gap_fill, analyse_gaps
 from pipeline.state import FileStatus, PipelineState
 from pipeline.transfer import fetch_file, get_free_space, get_staging_usage
@@ -184,22 +180,37 @@ class Orchestrator:
     # =========================================================================
 
     def _network_worker(self, queue: list[dict]):
-        """Continuous pre-fetch. Saturates NAS link — always fetching something."""
+        """Bidirectional network worker. One operation at a time, full bandwidth.
+
+        Priority order:
+        1. Upload encoded files (frees local space, completes pipeline for that file)
+        2. Fetch force items (user priority)
+        3. Fetch next from queue (keep GPU fed)
+        """
         logging.info("Network worker started")
         max_buffer = self.config.get("max_fetch_buffer_bytes", 2000 * 1024**3)
 
         while not self._shutdown.is_set():
+            did_work = False
+
+            # === Priority 1: Upload any encoded files waiting ===
+            upload_entry = self._find_pending_upload()
+            if upload_entry:
+                fp = upload_entry["filepath"]
+                logging.info(f"[NET] Upload: {os.path.basename(fp)}")
+                finalize_upload(fp, self.state, self.config)
+                did_work = True
+                continue  # check for more uploads before fetching
+
             if self.control.is_fetch_paused():
                 self._shutdown.wait(timeout=5)
                 continue
 
             if self._get_fetch_buffer_used() >= max_buffer:
-                self._shutdown.wait(timeout=10)
+                self._shutdown.wait(timeout=5)
                 continue
 
-            fetched_any = False
-
-            # Priority 1: Pre-fetch force items so GPU worker doesn't wait
+            # === Priority 2: Fetch force items ===
             force_items = self.control.get_force_items()
             for fp in force_items:
                 if self._shutdown.is_set():
@@ -214,11 +225,11 @@ class Orchestrator:
                              "file_size_bytes": 0, "library_type": "movie" if "Movies" in fp else "series"}
                 result = fetch_file(entry, self.staging_dir, self.config, self.state)
                 if result is not None:
-                    fetched_any = True
+                    did_work = True
                     break
 
-            # Priority 2: Regular queue
-            if not fetched_any:
+            # === Priority 3: Fetch next from queue ===
+            if not did_work:
                 for item in queue:
                     if self._shutdown.is_set():
                         break
@@ -231,13 +242,23 @@ class Orchestrator:
                         continue
                     result = fetch_file(item, self.staging_dir, self.config, self.state)
                     if result is not None:
-                        fetched_any = True
+                        did_work = True
                         break
 
-            if not fetched_any:
-                self._shutdown.wait(timeout=10)
+            if not did_work:
+                self._shutdown.wait(timeout=5)
 
         logging.info("Network worker finished")
+
+    def _find_pending_upload(self) -> dict | None:
+        """Find a file with status=UPLOADING and stage=pending_upload."""
+        rows = self.state._conn.execute(
+            "SELECT filepath FROM pipeline_files WHERE status = ? AND stage = ?",
+            (FileStatus.UPLOADING.value, "pending_upload")
+        ).fetchall()
+        if rows:
+            return {"filepath": rows[0][0]}
+        return None
 
     # =========================================================================
     # Gap Filler Worker — CPU work always, GPU (whisper) between encodes
