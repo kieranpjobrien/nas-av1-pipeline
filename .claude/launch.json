@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "dashboard",
+      "runtimeExecutable": "C:\\Users\\kiera\\.local\\bin\\uv.exe",
+      "runtimeArgs": ["run", "uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8002"],
+      "port": 8002
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "command": "bash -c 'FILE=\"$TOOL_INPUT_file_path\"; if [[ \"$FILE\" == *.py ]]; then uv run ruff check --fix \"$FILE\" && uv run ruff format \"$FILE\" && uv run mypy \"$FILE\" --ignore-missing-imports; fi'",
+        "description": "Lint and typecheck edited Python files"
+      }
+    ]
+  }
+}
