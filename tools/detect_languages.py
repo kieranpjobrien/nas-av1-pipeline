@@ -1201,15 +1201,19 @@ def main():
 
     # Check pipeline isn't encoding (whisper competes for GPU)
     if use_whisper:
-        pipeline_state_path = STAGING_DIR / "pipeline_state.json"
-        if pipeline_state_path.exists():
+        from paths import PIPELINE_STATE_DB
+        db_path = str(PIPELINE_STATE_DB)
+        if os.path.exists(db_path):
             try:
-                with open(pipeline_state_path, encoding="utf-8") as f:
-                    pstate = json.load(f)
-                encoding = [fp for fp, info in pstate.get("files", {}).items()
-                            if info.get("status") == "encoding" and not info.get("audio_only")]
+                import sqlite3
+                conn = sqlite3.connect(db_path, timeout=5)
+                conn.execute("PRAGMA journal_mode=WAL")
+                encoding = conn.execute(
+                    "SELECT COUNT(*) FROM pipeline_files WHERE status = 'processing' AND stage = 'encoding'"
+                ).fetchone()[0]
+                conn.close()
                 if encoding:
-                    logging.error(f"Pipeline is actively encoding {len(encoding)} file(s) on GPU.")
+                    logging.error(f"Pipeline is actively encoding {encoding} file(s) on GPU.")
                     logging.error("Whisper would compete for VRAM. Stop the pipeline first, or run without --whisper.")
                     sys.exit(1)
             except Exception:
