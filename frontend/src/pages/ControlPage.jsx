@@ -217,23 +217,13 @@ export function ControlPage({ wsControl }) {
       {/* Process Management */}
       <SectionTitle>Process Management</SectionTitle>
 
-      {/* Core */}
+      {/* Core — the pipeline does everything */}
       <ProcessRow name="scanner" label="Media Scanner" startLabel="Rescan Library" onFlash={showFlash} />
       <ProcessRow name="pipeline" label="AV1 Pipeline" startLabel="Start Pipeline" onFlash={showFlash} />
 
-      {/* Subtitle & Audio Tools */}
-      <div style={{ marginTop: 16, marginBottom: 4, color: PALETTE.textMuted, fontSize: 11, fontWeight: 600, textTransform: "uppercase", letterSpacing: 1 }}>Subtitles &amp; Audio</div>
-      <ProcessRow name="subtitles" label="Subtitle Check" startLabel="Run Check" onFlash={showFlash} />
-      <ProcessRow name="strip_subs" label="Strip Non-English Subs" startLabel="Strip Subs" onFlash={showFlash} />
-      <ProcessRow name="mux_subs" label="Mux External Subs" startLabel="Mux Subs" onFlash={showFlash} />
+      {/* Diagnostics */}
+      <div style={{ marginTop: 16, marginBottom: 4, color: PALETTE.textMuted, fontSize: 11, fontWeight: 600, textTransform: "uppercase", letterSpacing: 1 }}>Diagnostics</div>
       <ProcessRow name="integrity" label="Integrity Check" startLabel="Run Check" onFlash={showFlash} />
-
-      {/* Language Detection */}
-      <div style={{ marginTop: 16, marginBottom: 4, color: PALETTE.textMuted, fontSize: 11, fontWeight: 600, textTransform: "uppercase", letterSpacing: 1 }}>Language Detection</div>
-      <ProcessRow name="detect_languages" label="Detect Languages (Text + OCR)" startLabel="Run Scan" onFlash={showFlash} />
-      <ProcessRow name="detect_languages_whisper" label="Deep Scan (Whisper)" startLabel="Run Once" onFlash={showFlash} badge="GPU — stop pipeline first" />
-      <ProcessRow name="detect_languages_spotcheck" label="Spot-Check Tags (200 samples)" startLabel="Spot-Check" onFlash={showFlash} />
-      <ProcessRow name="apply_languages" label="Apply Language Tags" startLabel="Apply Tags" onFlash={showFlash} />
 
       {/* Plex */}
       <div style={{ marginTop: 16, marginBottom: 4, color: PALETTE.textMuted, fontSize: 11, fontWeight: 600, textTransform: "uppercase", letterSpacing: 1 }}>Plex</div>
@@ -244,11 +234,6 @@ export function ControlPage({ wsControl }) {
       {/* Collections */}
       <div style={{ marginTop: 16, marginBottom: 4, color: PALETTE.textMuted, fontSize: 11, fontWeight: 600, textTransform: "uppercase", letterSpacing: 1 }}>Collections</div>
       <ProcessRow name="rewatchables" label="The Rewatchables" startLabel="Sync Collection" onFlash={showFlash} />
-
-      {/* Metadata */}
-      <div style={{ marginTop: 16, marginBottom: 4, color: PALETTE.textMuted, fontSize: 11, fontWeight: 600, textTransform: "uppercase", letterSpacing: 1 }}>Metadata</div>
-      <ProcessRow name="tmdb_enrich" label="TMDb Enrichment" startLabel="Enrich" onFlash={showFlash} />
-      <ProcessRow name="tmdb_apply" label="Write TMDb to Files" startLabel="Write Tags" onFlash={showFlash} />
 
       <div style={{ marginBottom: 32 }} />
 
