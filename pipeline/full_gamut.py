@@ -59,7 +59,7 @@ def full_gamut(
 
     try:
         # === STEP 1: Fetch ===
-        state.set_file(filepath, FileStatus.FETCHING, stage="fetch", mode="full_gamut")
+        # Don't set FETCHING here — fetch_file sets it atomically to prevent races
         logging.info(f"Fetching: {filename} ({format_bytes(item['file_size_bytes'])})")
 
         local_path = fetch_file(item, staging_dir, config, state)
