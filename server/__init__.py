@@ -576,6 +576,62 @@ def get_library_completion():
     return counts
 
 
+@app.get("/api/completion-missing")
+def get_completion_missing(category: str):
+    """Return files missing a specific completion category.
+
+    Categories: video, audio, subs, tmdb, langs, filename
+    """
+    data = read_json_safe(MEDIA_REPORT)
+    if data is None:
+        raise HTTPException(404, "media_report.json not found")
+    files = data.get("files", [])
+    keep_langs = {"eng", "en", "english", "und", ""}
+    und_langs = {"und", "unk", ""}
+    missing = []
+    try:
+        from pipeline.filename import clean_filename as _cf
+    except ImportError:
+        _cf = None
+
+    for f in files:
+        fp = f.get("filepath", "")
+        fn = f.get("filename", "")
+        cr = f.get("video", {}).get("codec_raw", "")
+        hit = False
+        if category == "video":
+            hit = cr != "av1"
+        elif category == "audio":
+            if cr == "av1":
+                a_ok = all((a.get("codec_raw") or a.get("codec", "")).lower() in ("eac3", "e-ac-3")
+                           for a in f.get("audio_streams", [])) if f.get("audio_streams") else True
+                a_clean = all(i == 0 or (a.get("language") or a.get("detected_language") or "und").lower().strip() in keep_langs
+                              for i, a in enumerate(f.get("audio_streams", []))) if f.get("audio_streams") else True
+                hit = not (a_ok and a_clean)
+        elif category == "subs":
+            hit = not all((s.get("language") or s.get("detected_language") or "und").lower().strip() in keep_langs
+                          for s in f.get("subtitle_streams", []))
+        elif category == "tmdb":
+            hit = not f.get("tmdb")
+        elif category == "langs":
+            hit = any((a.get("language") or "und").lower().strip() in und_langs and not a.get("detected_language")
+                      for a in f.get("audio_streams", []))
+            if not hit:
+                hit = any((s.get("language") or "und").lower().strip() in und_langs and not s.get("detected_language")
+                          for s in f.get("subtitle_streams", []))
+        elif category == "filename":
+            if _cf:
+                try:
+                    clean = _cf(fp, f.get("library_type", ""))
+                    hit = clean is not None and clean != fn
+                except Exception:
+                    pass
+        if hit:
+            missing.append({"filepath": fp, "filename": fn, "library_type": f.get("library_type", "")})
+
+    return {"category": category, "count": len(missing), "files": missing[:500]}
+
+
 @app.get("/api/duplicates")
 def get_duplicates():
     """Find duplicate files using title+duration matching with quality scoring."""

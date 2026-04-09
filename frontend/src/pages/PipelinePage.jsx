@@ -220,6 +220,22 @@ export function PipelinePage({ wsData, onFileClick }) {
   const [quickWinsBusy, setQuickWinsBusy] = useState(false);
   const [forceList, setForceList] = useState(null);
   const [showForce, setShowForce] = useState(false);
+  const [missingCategory, setMissingCategory] = useState(null);
+  const [missingFiles, setMissingFiles] = useState(null);
+
+  const handleBarClick = async (catKey) => {
+    if (missingCategory === catKey) {
+      setMissingCategory(null);
+      setMissingFiles(null);
+      return;
+    }
+    setMissingCategory(catKey);
+    setMissingFiles(null);
+    try {
+      const data = await api.getCompletionMissing(catKey);
+      setMissingFiles(data);
+    } catch { setMissingFiles(null); }
+  };
 
   useEffect(() => {
     const load = () => api.getPriority().then((p) => setPriorityPaths(p?.paths || [])).catch(() => {});
@@ -338,14 +354,15 @@ export function PipelinePage({ wsData, onFileClick }) {
             {/* Breakdown bars */}
             <div style={{ display: "flex", justifyContent: "center", gap: 16, marginTop: 16, flexWrap: "wrap" }}>
               {[
-                { label: "AV1 Video", pct: completion.pct_video, count: completion.av1, colour: PALETTE.accent },
-                { label: "EAC-3 Audio", pct: completion.pct_audio, count: completion.eac3_done, colour: PALETTE.cyan || "#22d3ee" },
-                { label: "English Subs", pct: completion.pct_subs, count: completion.subs_done, colour: "#a78bfa" },
-                { label: "TMDb Metadata", pct: completion.pct_tmdb || 0, count: completion.has_tmdb || 0, colour: "#f59e0b" },
-                { label: "Langs Known", pct: completion.pct_langs_known || 0, count: completion.total - (completion.und_audio_files || 0) - (completion.und_sub_files || 0), colour: "#10b981" },
-                { label: "Clean Filenames", pct: completion.pct_filename || 0, count: completion.has_clean_filename || 0, colour: "#6366f1" },
-              ].map(({ label, pct: p, count, colour }) => (
-                <div key={label} style={{ minWidth: 100, textAlign: "center" }}>
+                { key: "video", label: "AV1 Video", pct: completion.pct_video, count: completion.av1, colour: PALETTE.accent },
+                { key: "audio", label: "EAC-3 Audio", pct: completion.pct_audio, count: completion.eac3_done, colour: PALETTE.cyan || "#22d3ee" },
+                { key: "subs", label: "English Subs", pct: completion.pct_subs, count: completion.subs_done, colour: "#a78bfa" },
+                { key: "tmdb", label: "TMDb Metadata", pct: completion.pct_tmdb || 0, count: completion.has_tmdb || 0, colour: "#f59e0b" },
+                { key: "langs", label: "Langs Known", pct: completion.pct_langs_known || 0, count: completion.total - (completion.und_audio_files || 0) - (completion.und_sub_files || 0), colour: "#10b981" },
+                { key: "filename", label: "Clean Filenames", pct: completion.pct_filename || 0, count: completion.has_clean_filename || 0, colour: "#6366f1" },
+              ].map(({ key, label, pct: p, count, colour }) => (
+                <div key={key} onClick={() => handleBarClick(key)}
+                  style={{ minWidth: 100, textAlign: "center", cursor: "pointer", opacity: missingCategory && missingCategory !== key ? 0.5 : 1 }}>
                   <div style={{ fontSize: 16, fontWeight: 700, fontFamily: "'JetBrains Mono', monospace", color: colour }}>
                     {p.toFixed(1)}%
                   </div>
@@ -356,6 +373,31 @@ export function PipelinePage({ wsData, onFileClick }) {
                 </div>
               ))}
             </div>
+
+            {/* Missing files drill-down */}
+            {missingCategory && (
+              <div style={{ marginTop: 16, background: PALETTE.surfaceLight, borderRadius: 8, padding: 12, maxHeight: 300, overflow: "auto", textAlign: "left" }}>
+                {missingFiles ? (
+                  <>
+                    <div style={{ color: PALETTE.text, fontSize: 12, fontWeight: 600, marginBottom: 8 }}>
+                      {missingFiles.count} files missing — {missingCategory}
+                      <button onClick={() => { setMissingCategory(null); setMissingFiles(null); }}
+                        style={{ float: "right", background: "transparent", border: "none", color: PALETTE.textMuted, cursor: "pointer", fontSize: 11 }}>close</button>
+                    </div>
+                    {missingFiles.files.map((f, i) => (
+                      <div key={i} style={{ fontSize: 11, padding: "3px 0", borderBottom: `1px solid ${PALETTE.border}22`, color: PALETTE.text }}>
+                        {f.filename}
+                      </div>
+                    ))}
+                    {missingFiles.count > 500 && (
+                      <div style={{ color: PALETTE.textMuted, fontSize: 10, marginTop: 8 }}>Showing first 500 of {missingFiles.count}</div>
+                    )}
+                  </>
+                ) : (
+                  <div style={{ color: PALETTE.textMuted, fontSize: 11 }}>Loading...</div>
+                )}
+              </div>
+            )}
 
             {/* Quick Wins */}
             {(completion.gap_fill_count > 0) && (

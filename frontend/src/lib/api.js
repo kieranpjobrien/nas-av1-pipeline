@@ -69,5 +69,6 @@ export const api = {
   getLibraryCompletion: () => fetchJSON("/library-completion"),
   quickWins: () => postJSON("/quick-wins", {}),
   getForceList: () => fetchJSON("/control/force-list"),
+  getCompletionMissing: (category) => fetchJSON(`/completion-missing?category=${category}`),
   removeForce: (path) => postJSON("/control/priority/force", { path, action: "remove" }),
 };
