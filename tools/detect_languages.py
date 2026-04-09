@@ -1089,7 +1089,8 @@ def _apply_file_mkvpropedit(filepath: str, detections: list[dict]) -> tuple[int,
                 )
             return len(detections), 0
         else:
-            logging.error(f"  mkvpropedit failed for {Path(filepath).name}: {proc.stderr.strip()}")
+            err = proc.stderr.strip() or proc.stdout.strip()
+            logging.error(f"  mkvpropedit failed for {Path(filepath).name}: {err}")
             return 0, len(detections)
     except subprocess.TimeoutExpired:
         logging.error(f"  mkvpropedit timed out for {Path(filepath).name}")
@@ -1172,7 +1173,12 @@ def apply_detections_for_file(
         return 0, 0
 
     if use_mkvpropedit:
-        return _apply_file_mkvpropedit(filepath, actionable)
+        applied, failed = _apply_file_mkvpropedit(filepath, actionable)
+        if failed and applied == 0:
+            # mkvpropedit rejected the file — likely not a real Matroska container
+            logging.warning(f"  Skipping (not a valid MKV): {Path(filepath).name}")
+            return 0, 0
+        return applied, failed
     else:
         logging.info(f"  mkvpropedit not found — falling back to ffmpeg: {Path(filepath).name}")
         return _apply_file_ffmpeg(filepath, actionable)
