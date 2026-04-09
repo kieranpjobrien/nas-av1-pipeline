@@ -62,7 +62,7 @@ def full_gamut(
         state.set_file(filepath, FileStatus.FETCHING, stage="fetch", mode="full_gamut")
         logging.info(f"Fetching: {filename} ({format_bytes(item['file_size_bytes'])})")
 
-        local_path = fetch_file(filepath, item, staging_dir, config, state)
+        local_path = fetch_file(item, staging_dir, config, state)
         if local_path is None:
             state.set_file(filepath, FileStatus.ERROR, error="fetch failed", stage="fetch")
             return False
