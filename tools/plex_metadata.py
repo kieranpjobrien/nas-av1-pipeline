@@ -114,6 +114,23 @@ def _plex_put(endpoint: str) -> None:
         pass
 
 
+def _plex_post(endpoint: str) -> None:
+    """Make an authenticated POST request to the Plex API (e.g. scan refresh)."""
+    url = f"{PLEX_URL}{endpoint}"
+    req = Request(url, headers={"X-Plex-Token": PLEX_TOKEN}, method="POST")
+    with urlopen(req, timeout=30) as resp:
+        pass
+
+
+def scan_all_libraries() -> None:
+    """Trigger a library scan (refresh) on all sections."""
+    sections = _get_library_sections()
+    for sec in sections:
+        print(f"Scanning {sec['title']} (section {sec['key']})...")
+        _plex_post(f"/library/sections/{sec['key']}/refresh")
+    print(f"Scan triggered for {len(sections)} libraries")
+
+
 def _get_library_sections() -> list[dict]:
     """Get all library sections."""
     root = _plex_get("/library/sections")
@@ -655,6 +672,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Plex metadata manager — collections, genres, ratings, labels")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    subparsers.add_parser("scan", help="Trigger library scan (refresh) on all sections")
     audit_parser = subparsers.add_parser("audit", help="Show full metadata statistics")
     audit_parser.add_argument("--json", type=str, default=None, metavar="PATH",
                               help="Write structured JSON audit output to file")
@@ -669,7 +687,9 @@ def main() -> None:
     rules = load_rules()
 
     try:
-        if args.command == "audit":
+        if args.command == "scan":
+            scan_all_libraries()
+        elif args.command == "audit":
             cmd_audit(json_path=args.json)
         elif args.command == "report":
             cmd_report(rules)
