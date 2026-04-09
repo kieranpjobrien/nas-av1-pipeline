@@ -419,6 +419,7 @@ def main():
     # A file is "unchanged" if its filepath, size, and mtime all match.
     cached = {}
     old_by_path: dict[str, dict] = {}  # filepath -> entry for TMDb/language preservation
+    old_by_dir: dict[str, list[dict]] = {}  # directory -> entries (for rename matching)
     if not args.full and os.path.exists(args.output):
         try:
             with open(args.output, "r", encoding="utf-8") as f:
@@ -429,6 +430,8 @@ def main():
                 mt = entry.get("file_mtime", 0)
                 cached[(fp, sz, mt)] = entry
                 old_by_path[fp] = entry
+                parent = os.path.dirname(fp)
+                old_by_dir.setdefault(parent, []).append(entry)
             print(f"Loaded {len(cached)} cached entries from previous report")
         except Exception:
             pass
@@ -477,8 +480,17 @@ def main():
 
             result, error_path = future.result()
             if result:
-                # Preserve TMDb and language detection from previous report
-                old = old_by_path.get(result.get("filepath", ""))
+                # Preserve TMDb and language detection from previous report.
+                # Try exact filepath match first, then fall back to same-directory
+                # match (handles renames within the same folder).
+                fp = result.get("filepath", "")
+                old = old_by_path.get(fp)
+                if not old or not old.get("tmdb"):
+                    parent = os.path.dirname(fp)
+                    for candidate in old_by_dir.get(parent, []):
+                        if candidate.get("tmdb") and candidate.get("filepath") != fp:
+                            old = candidate
+                            break
                 if old:
                     if old.get("tmdb") and not result.get("tmdb"):
                         result["tmdb"] = old["tmdb"]
