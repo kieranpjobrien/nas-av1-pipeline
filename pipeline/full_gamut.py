@@ -59,18 +59,43 @@ def full_gamut(
 
     try:
         # === STEP 1: Fetch ===
-        # Check if already fetched by the network thread
+        # Wait for network worker to fetch this file (it should be pre-fetching ahead).
+        # Only fetch ourselves as a last resort if the file never appears.
         existing = state.get_file(filepath)
         local_path = existing.get("local_path") if existing else None
 
         if local_path and os.path.exists(local_path):
             logging.info(f"Already fetched: {filename}")
         else:
-            logging.info(f"Fetching: {filename} ({format_bytes(item['file_size_bytes'])})")
-            local_path = fetch_file(item, staging_dir, config, state)
-            if local_path is None:
-                state.set_file(filepath, FileStatus.ERROR, error="fetch failed", stage="fetch")
-                return False
+            # Wait for network worker (up to 10 min for large files)
+            import time
+            wait_start = time.time()
+            max_wait = 600  # 10 minutes
+            while time.time() - wait_start < max_wait:
+                existing = state.get_file(filepath)
+                status = existing.get("status") if existing else None
+                local_path = existing.get("local_path") if existing else None
+                if status == FileStatus.FETCHING.value:
+                    # Network worker is actively fetching — wait
+                    time.sleep(5)
+                    continue
+                if local_path and os.path.exists(local_path):
+                    logging.info(f"Pre-fetched by network worker: {filename}")
+                    break
+                if status == FileStatus.ERROR.value:
+                    logging.error(f"Fetch failed (network worker): {filename}")
+                    return False
+                # Not yet started by network worker — fetch ourselves
+                break
+
+            existing = state.get_file(filepath)
+            local_path = existing.get("local_path") if existing else None
+            if not (local_path and os.path.exists(local_path)):
+                logging.info(f"Fetching (GPU thread): {filename} ({format_bytes(item['file_size_bytes'])})")
+                local_path = fetch_file(item, staging_dir, config, state)
+                if local_path is None:
+                    state.set_file(filepath, FileStatus.ERROR, error="fetch failed", stage="fetch")
+                    return False
 
         # === STEP 2: Clean filename ===
         try:
