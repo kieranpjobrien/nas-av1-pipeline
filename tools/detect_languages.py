@@ -1285,6 +1285,19 @@ def main():
         return
 
     elif args.apply:
+        # Step 1: Run detection first (same as non-apply mode)
+        logging.info("Running language detection...")
+        enrich_report(
+            report,
+            use_whisper=use_whisper,
+            whisper_all=args.whisper_all,
+            workers=args.workers,
+            min_confidence=args.min_confidence,
+        )
+        # Reload report after detection (enrich_report saves incrementally)
+        report = read_report()
+
+        # Step 2: Apply detections to files
         logging.info(f"Applying detections to files via mkvpropedit/ffmpeg...")
         if _find_mkvpropedit():
             logging.info(f"  mkvpropedit: {_find_mkvpropedit()}")
