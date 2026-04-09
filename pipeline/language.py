@@ -263,11 +263,7 @@ _whisper_small = None
 
 
 def _get_whisper_model(size: str = "tiny"):
-    """Lazy-load a faster-whisper model. Tiny for fast screening, small for confirmation.
-
-    Uses CPU with int8 quantisation — tiny model runs at ~0.35s per 10s sample
-    on CPU which is fast enough (no CUDA cublas dependency needed).
-    """
+    """Lazy-load a faster-whisper model. GPU (CUDA) preferred, CPU fallback."""
     global _whisper_tiny, _whisper_small
     ref = _whisper_tiny if size == "tiny" else _whisper_small
     if ref is not None:
@@ -275,11 +271,17 @@ def _get_whisper_model(size: str = "tiny"):
 
     try:
         from faster_whisper import WhisperModel
-        model = WhisperModel(size, device="cpu", compute_type="int8")
-        logging.info(f"Loaded faster-whisper model ({size}, cpu/int8)")
+        model = WhisperModel(size, device="cuda", compute_type="float16")
+        logging.info(f"Loaded faster-whisper model ({size}, cuda/float16)")
     except Exception as e:
-        logging.error(f"Failed to load whisper model {size}: {e}")
-        return None
+        logging.warning(f"Whisper GPU failed, falling back to CPU: {e}")
+        try:
+            from faster_whisper import WhisperModel
+            model = WhisperModel(size, device="cpu", compute_type="int8")
+            logging.info(f"Loaded faster-whisper model ({size}, cpu/int8)")
+        except Exception as e2:
+            logging.error(f"Failed to load whisper model {size}: {e2}")
+            return None
 
     if size == "tiny":
         _whisper_tiny = model
