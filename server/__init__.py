@@ -765,6 +765,21 @@ class ForceRequest(BaseModel):
     action: str = "add"  # "add" | "remove"
 
 
+@app.get("/api/control/force-list")
+def get_force_list():
+    """Get the current force stack (LIFO order)."""
+    current = read_json_safe(CONTROL_DIR / "priority.json") or {}
+    force = current.get("force", [])
+    items = []
+    for fp in force:
+        items.append({
+            "filepath": fp,
+            "filename": os.path.basename(fp),
+            "exists": os.path.exists(fp),
+        })
+    return {"items": items, "count": len(items)}
+
+
 @app.post("/api/control/priority/force")
 def toggle_force(req: ForceRequest):
     """Add or remove a single file from the force-priority tier."""

@@ -68,4 +68,6 @@ export const api = {
   getMkvpropedAvailable: () => fetchJSON("/mkvpropedit-available"),
   getLibraryCompletion: () => fetchJSON("/library-completion"),
   quickWins: () => postJSON("/quick-wins", {}),
+  getForceList: () => fetchJSON("/control/force-list"),
+  removeForce: (path) => postJSON("/control/priority/force", { path, action: "remove" }),
 };

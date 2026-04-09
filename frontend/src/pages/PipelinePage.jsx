@@ -218,6 +218,8 @@ export function PipelinePage({ wsData, onFileClick }) {
   const [libraryTotal, setLibraryTotal] = useState(null);
   const [completion, setCompletion] = useState(null);
   const [quickWinsBusy, setQuickWinsBusy] = useState(false);
+  const [forceList, setForceList] = useState(null);
+  const [showForce, setShowForce] = useState(false);
 
   useEffect(() => {
     const load = () => api.getPriority().then((p) => setPriorityPaths(p?.paths || [])).catch(() => {});
@@ -238,6 +240,18 @@ export function PipelinePage({ wsData, onFileClick }) {
     const id = setInterval(load, 30000);
     return () => clearInterval(id);
   }, []);
+
+  useEffect(() => {
+    const load = () => api.getForceList().then(setForceList).catch(() => {});
+    load();
+    const id = setInterval(load, 10000);
+    return () => clearInterval(id);
+  }, []);
+
+  const handleRemoveForce = async (path) => {
+    await api.removeForce(path);
+    api.getForceList().then(setForceList).catch(() => {});
+  };
 
   const handleQuickWins = async () => {
     setQuickWinsBusy(true);
@@ -424,6 +438,33 @@ export function PipelinePage({ wsData, onFileClick }) {
           </div>
         )}
       </div>
+
+      {/* Force List */}
+      {forceList && forceList.count > 0 && (
+        <>
+          <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 8 }}>
+            <SectionTitle>Force Next ({forceList.count})</SectionTitle>
+            <button onClick={() => setShowForce(!showForce)} style={{
+              background: "transparent", border: `1px solid ${PALETTE.border}`, borderRadius: 6,
+              color: PALETTE.textMuted, padding: "2px 8px", fontSize: 10, cursor: "pointer",
+            }}>{showForce ? "Hide" : "Show"}</button>
+          </div>
+          {showForce && (
+            <div style={{ background: PALETTE.surface, border: `1px solid ${PALETTE.border}`, borderRadius: 8, padding: 12, marginBottom: 24, maxHeight: 250, overflow: "auto" }}>
+              {forceList.items.map((item, i) => (
+                <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "4px 0", borderBottom: `1px solid ${PALETTE.border}22`, fontSize: 12 }}>
+                  <span style={{ color: item.exists ? PALETTE.text : PALETTE.red, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {i === 0 ? ">> " : `${i + 1}. `}{item.filename}
+                  </span>
+                  <button onClick={() => handleRemoveForce(item.filepath)} style={{
+                    background: "transparent", border: "none", color: PALETTE.red, cursor: "pointer", fontSize: 10, padding: "2px 6px",
+                  }}>remove</button>
+                </div>
+              ))}
+            </div>
+          )}
+        </>
+      )}
 
       {/* Current activity */}
       {activeFiles.length > 0 && (
