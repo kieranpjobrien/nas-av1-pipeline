@@ -329,6 +329,94 @@ class Pipeline:
                 return
             time.sleep(2)
 
+    def _audio_dispatcher(self, queue: list[dict]):
+        """Continuous audio dispatch — fills audio thread slots independently of GPU.
+
+        The main loop blocks on process_item (GPU encode) for 15+ minutes.
+        This thread keeps dispatching audio/cleanup remux jobs to fill all
+        MAX_AUDIO_THREADS slots as they become free, without waiting for the GPU.
+        """
+        MAX_AUDIO_THREADS = 4
+        audio_threads: list[threading.Thread] = []
+        dispatched: set[str] = set()
+
+        # Build force set
+        force_set = {
+            os.path.normpath(p).lower()
+            for p in self.control.get_force_items()
+        }
+
+        logging.info(f"Audio dispatcher: {MAX_AUDIO_THREADS} threads, {len(force_set)} force items")
+
+        while not self._shutdown:
+            # Clean up finished threads
+            audio_threads = [t for t in audio_threads if t.is_alive()]
+
+            if len(audio_threads) >= MAX_AUDIO_THREADS:
+                time.sleep(2)
+                continue
+
+            # Refresh force set periodically
+            force_set = {
+                os.path.normpath(p).lower()
+                for p in self.control.get_force_items()
+            }
+
+            # Find next audio item to dispatch
+            dispatched_one = False
+            for item in queue:
+                if self._shutdown:
+                    break
+                if not item.get("audio_only"):
+                    continue
+                fp = item["filepath"]
+                if fp in dispatched:
+                    continue
+
+                existing = self.state.get_file(fp)
+                status = existing["status"] if existing else None
+
+                # Skip terminal states (unless force)
+                norm = os.path.normpath(fp).lower()
+                is_force = norm in force_set
+                if status in (FileStatus.VERIFIED.value, FileStatus.REPLACED.value,
+                              FileStatus.SKIPPED.value, FileStatus.ERROR.value):
+                    if is_force and status in (FileStatus.SKIPPED.value, FileStatus.ERROR.value):
+                        self.state.set_file(fp, FileStatus.PENDING, reason="force override")
+                        status = FileStatus.PENDING.value
+                    else:
+                        continue
+
+                if status == FileStatus.ENCODING.value:
+                    continue
+                if fp in dispatched:
+                    continue
+
+                # Dispatch: thread handles its own fetch if needed
+                effective_config = self._apply_gentle_overrides(item)
+                t = threading.Thread(
+                    target=self._audio_remux_async,
+                    args=(item, effective_config, is_force),
+                    daemon=True,
+                    name=f"audio-{item['filename'][:30]}",
+                )
+                t.start()
+                audio_threads.append(t)
+                dispatched.add(fp)
+                dispatched_one = True
+                logging.info(f"  Audio dispatch: {item['filename'][:50]} {'(force)' if is_force else ''}")
+
+                if len(audio_threads) >= MAX_AUDIO_THREADS:
+                    break
+
+            if not dispatched_one:
+                self._sleep_or_shutdown(10)
+
+        # Wait for audio threads to finish
+        for t in audio_threads:
+            t.join(timeout=30)
+        logging.info("Audio dispatcher finished")
+
     def _upload_worker(self):
         """Background thread: upload encoded files to NAS while GPU encodes the next file.
 
@@ -873,6 +961,13 @@ class Pipeline:
             target=self._upload_worker, daemon=True, name="upload"
         )
         upload_thread.start()
+
+        # Start audio dispatcher thread — continuously fills audio slots independent of GPU
+        audio_dispatcher = threading.Thread(
+            target=self._audio_dispatcher, args=(queue,), daemon=True, name="audio-dispatch"
+        )
+        audio_dispatcher.start()
+        logging.info("Audio dispatcher enabled — cleanup runs independently of GPU")
         logging.info("Parallel upload enabled — uploads overlap with encoding")
 
         # Track active audio remux threads
@@ -994,12 +1089,12 @@ class Pipeline:
                 time.sleep(5)
                 continue
 
-            # Dispatch ALL available audio items before starting GPU encode.
-            # process_item() blocks for the entire encode (could be 15+ min for 4K),
-            # so we need to fill all audio thread slots NOW, not one per loop.
+            # Audio dispatch is handled by the audio_dispatcher thread.
+            # Clean up the main loop's audio_threads list (for the old code paths).
             audio_threads = [t for t in audio_threads if t.is_alive()]
             audio_dispatched_this_loop = 0
-            for item_a in queue:
+            if False:  # disabled — audio_dispatcher thread handles this now
+              for item_a in queue:
                 if len(audio_threads) >= MAX_AUDIO_THREADS:
                     break
                 if not item_a.get("audio_only"):
