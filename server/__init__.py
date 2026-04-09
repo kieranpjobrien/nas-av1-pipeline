@@ -472,6 +472,21 @@ def get_library_completion():
     del counts["quick_wins_audio"]
     del counts["quick_wins_subs"]
 
+    # Real gap fill count — AV1 files needing ANY work (tracks, metadata, filename, language)
+    try:
+        from pipeline.gap_filler import analyse_gaps
+        from pipeline.config import build_config as _bc
+        _gap_config = _bc({})
+        gap_count = 0
+        for f in files:
+            if f.get("video", {}).get("codec_raw") == "av1":
+                gaps = analyse_gaps(f, _gap_config)
+                if gaps.needs_anything:
+                    gap_count += 1
+        counts["gap_fill_count"] = gap_count
+    except Exception:
+        counts["gap_fill_count"] = 0
+
     # Tier breakdown from media report (persistent, doesn't reset on pipeline restart)
     tiers: dict[str, dict] = {}
     for f in files:

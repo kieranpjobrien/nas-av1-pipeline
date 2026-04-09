@@ -341,7 +341,7 @@ export function PipelinePage({ wsData, onFileClick }) {
             </div>
 
             {/* Quick Wins */}
-            {(completion.quick_wins_audio_count > 0) && (
+            {(completion.gap_fill_count > 0) && (
               <div style={{ marginTop: 16 }}>
                 <button
                   onClick={handleQuickWins}
@@ -353,7 +353,7 @@ export function PipelinePage({ wsData, onFileClick }) {
                     fontSize: 12, fontWeight: 600, cursor: quickWinsBusy ? "default" : "pointer",
                   }}
                 >
-                  {quickWinsBusy ? "Starting..." : `Run Gap Filler (${completion.quick_wins_audio_count} cleanups)`}
+                  {quickWinsBusy ? "Starting..." : `Run Gap Filler (${completion.gap_fill_count.toLocaleString()} files need work)`}
                 </button>
               </div>
             )}
