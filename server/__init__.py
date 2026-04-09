@@ -180,18 +180,17 @@ PROCESS_CONFIGS = {
         "cmd": [sys.executable, "-m", "tools.integrity", "--from-state", "--workers", "1"],
         "cwd": str(Path(__file__).parent.parent),
     },
-    "plex_scan": {
+    "plex_sync": {
         "cmd": [sys.executable, "-c",
-                "from tools.strip_tags import _trigger_plex_scan; _trigger_plex_scan()"],
-        "cwd": str(Path(__file__).parent.parent),
-    },
-    "plex_metadata": {
-        "cmd": [sys.executable, "-m", "tools.plex_metadata", "audit",
-                "--json", str(STAGING_DIR / "plex_audit.json")],
-        "cwd": str(Path(__file__).parent.parent),
-    },
-    "plex_apply_rules": {
-        "cmd": [sys.executable, "-m", "tools.plex_metadata", "apply-rules", "--execute"],
+                "import subprocess, sys; "
+                "print('Triggering Plex library scan...', flush=True); "
+                "subprocess.run([sys.executable, '-m', 'tools.plex_metadata', 'scan']); "
+                "print('Running metadata audit...', flush=True); "
+                "subprocess.run([sys.executable, '-m', 'tools.plex_metadata', 'audit', '--json', "
+                f"r'{STAGING_DIR / 'plex_audit.json'}']); "
+                "print('Applying rules...', flush=True); "
+                "subprocess.run([sys.executable, '-m', 'tools.plex_metadata', 'apply-rules', '--execute']); "
+                "print('Plex sync complete.', flush=True)"],
         "cwd": str(Path(__file__).parent.parent),
     },
     "strip_subs": {

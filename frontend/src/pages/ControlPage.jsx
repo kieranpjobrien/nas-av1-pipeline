@@ -234,9 +234,7 @@ export function ControlPage({ wsControl }) {
 
       {/* Plex */}
       <div style={{ marginTop: 16, marginBottom: 4, color: PALETTE.textMuted, fontSize: 11, fontWeight: 600, textTransform: "uppercase", letterSpacing: 1 }}>Plex</div>
-      <ProcessRow name="plex_scan" label="Plex Library Scan" startLabel="Trigger Scan" onFlash={showFlash} />
-      <ProcessRow name="plex_metadata" label="Plex Metadata Audit" startLabel="Run Audit" onFlash={showFlash} />
-      <ProcessRow name="plex_apply_rules" label="Plex Apply Rules" startLabel="Apply Rules" onFlash={showFlash} />
+      <ProcessRow name="plex_sync" label="Plex Sync (Scan + Audit + Apply)" startLabel="Sync Plex" onFlash={showFlash} />
 
       {/* Collections */}
       <div style={{ marginTop: 16, marginBottom: 4, color: PALETTE.textMuted, fontSize: 11, fontWeight: 600, textTransform: "uppercase", letterSpacing: 1 }}>Collections</div>
