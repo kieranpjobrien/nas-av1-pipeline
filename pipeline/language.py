@@ -118,10 +118,12 @@ def extract_subtitle_text(filepath: str, sub_stream_index: int, max_chars: int =
 def extract_bitmap_subtitle_text(
     filepath: str,
     sub_stream_index: int,
-    sample_frames: int = 10,
-    max_chars: int = 4000,
+    sample_frames: int = 500,
+    max_chars: int = 8000,
 ) -> Optional[str]:
     """Extract text from a bitmap subtitle stream (PGS/DVD) via ffmpeg + Tesseract OCR.
+
+    Uses 500 frames by default for reliable language detection across varied content.
 
     Extracts the first N subtitle frames as PNG images, runs Tesseract on each,
     and aggregates the text for language detection.
@@ -294,11 +296,11 @@ def _extract_all_audio_samples(
     filepath: str,
     audio_indices: list[int],
     duration_secs: float,
-    sample_duration: int = 10,
+    sample_duration: int = 30,
 ) -> dict[int, list[str]]:
     """Extract audio samples for ALL tracks of a file in one ffmpeg call.
 
-    Returns {audio_index: [wav_path, wav_path, wav_path], ...}.
+    5 x 30s samples from different points for reliable language detection.
     Single file open over SMB regardless of how many tracks.
     """
     tmp_dir = os.path.join(str(STAGING_DIR), "whisper_tmp")
@@ -306,21 +308,13 @@ def _extract_all_audio_samples(
     base = f"{os.getpid()}"
 
     total = max(duration_secs, 120)
-    if sample_duration >= 20:
-        # Aggressive mode (retry): 5 points, deeper into the file
-        offsets = [
-            int(min(60, total * 0.05)),
-            int(total * 0.2),
-            int(total * 0.4),
-            int(total * 0.6),
-            int(total * 0.8),
-        ]
-    else:
-        offsets = [
-            int(min(60, total * 0.05)),
-            int(total * 0.3),
-            int(total * 0.6),
-        ]
+    offsets = [
+        int(min(60, total * 0.05)),
+        int(total * 0.2),
+        int(total * 0.4),
+        int(total * 0.6),
+        int(total * 0.8),
+    ]
 
     result: dict[int, list[str]] = {}
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", filepath]
@@ -417,14 +411,9 @@ def detect_audio_language_whisper(
         if not tiny:
             return None, 0.0
 
-        # First sample — if high confidence, done instantly
-        lang, prob = _whisper_detect_one(tiny, wav_paths[0])
-        if lang and prob >= 0.7:
-            return lang, prob
-
-        # Low confidence — check remaining samples for confirmation
-        detections = [(lang, prob)] if lang else []
-        for wav_path in wav_paths[1:]:
+        # Run all 5 samples for reliable majority vote
+        detections = []
+        for wav_path in wav_paths:
             l, p = _whisper_detect_one(tiny, wav_path)
             if l:
                 detections.append((l, p))
