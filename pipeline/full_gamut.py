@@ -65,60 +65,21 @@ def full_gamut(
         status = existing.get("status") if existing else None
         local_path = existing.get("local_path") if existing else None
 
-        # File is ready when status is PROCESSING (set after copy completes).
-        # Don't use os.path.exists alone — file exists during copy but is locked.
-        if status == FileStatus.PROCESSING.value and local_path and os.path.exists(local_path):
-            logging.info(f"Already fetched: {filename}")
-        else:
-            # Wait for network worker — scale timeout to file size (1 min/GB, min 10 min)
-            file_gb = item.get("file_size_bytes", 0) / (1024**3)
-            max_wait = max(600, int(file_gb * 60))
-            wait_start = time.time()
-            logged_wait = False
-            while time.time() - wait_start < max_wait:
+        # Wait for file to be ready (status=PROCESSING, set after copy completes).
+        # No timers — just block until the network worker signals completion.
+        if not (status == FileStatus.PROCESSING.value and local_path and os.path.exists(local_path)):
+            logging.info(f"Waiting for fetch: {filename}")
+            while True:
                 existing = state.get_file(filepath)
                 status = existing.get("status") if existing else None
                 local_path = existing.get("local_path") if existing else None
                 if status == FileStatus.PROCESSING.value and local_path and os.path.exists(local_path):
-                    logging.info(f"Pre-fetched by network worker: {filename}")
                     break
                 if status == FileStatus.ERROR.value:
-                    logging.error(f"Fetch failed (network worker): {filename}")
+                    logging.error(f"Fetch failed: {filename}")
                     return False
-                # Network worker is fetching, or hasn't started yet — wait
-                if not logged_wait:
-                    logging.info(f"Waiting for network worker to fetch: {filename} (timeout {max_wait//60}m)")
-                    logged_wait = True
-                time.sleep(5)
-
-            # After initial wait: check status before proceeding
-            existing = state.get_file(filepath)
-            status = existing.get("status") if existing else None
-            local_path = existing.get("local_path") if existing else None
-
-            if status == FileStatus.FETCHING.value:
-                # Network worker is still copying — never touch a file mid-copy.
-                # Wait indefinitely until it finishes.
-                logging.info(f"Network worker still fetching, waiting for completion: {filename}")
-                while status == FileStatus.FETCHING.value:
-                    time.sleep(10)
-                    existing = state.get_file(filepath)
-                    status = existing.get("status") if existing else None
-                    local_path = existing.get("local_path") if existing else None
-
-            if status == FileStatus.PROCESSING.value and local_path and os.path.exists(local_path):
-                if not logged_wait:
-                    logging.info(f"Pre-fetched by network worker: {filename}")
-            elif status == FileStatus.ERROR.value:
-                logging.error(f"Fetch failed (network worker): {filename}")
-                return False
-            else:
-                # Network worker never started — fetch ourselves
-                logging.info(f"Fetching (GPU thread): {filename} ({format_bytes(item['file_size_bytes'])})")
-                local_path = fetch_file(item, staging_dir, config, state)
-                if local_path is None:
-                    state.set_file(filepath, FileStatus.ERROR, error="fetch failed", stage="fetch")
-                    return False
+                time.sleep(2)
+            logging.info(f"Fetched: {filename}")
 
         # === STEP 2: Clean filename ===
         try:
