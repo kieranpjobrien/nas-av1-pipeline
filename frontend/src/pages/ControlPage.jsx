@@ -217,9 +217,17 @@ export function ControlPage({ wsControl }) {
       {/* Process Management */}
       <SectionTitle>Process Management</SectionTitle>
 
-      {/* Core — the pipeline does everything */}
+      {/* Core */}
       <ProcessRow name="scanner" label="Media Scanner" startLabel="Rescan Library" onFlash={showFlash} />
-      <ProcessRow name="pipeline" label="AV1 Pipeline" startLabel="Start Pipeline" onFlash={showFlash} />
+      <ProcessRow name="pipeline" label="AV1 Pipeline (Full Gamut)" startLabel="Start Pipeline" onFlash={showFlash} />
+      <ProcessRow name="gap_filler" label="Gap Filler (Cleanup)" startLabel="Run Gap Filler" onFlash={showFlash} />
+
+      {/* Backfill — run these before gap filler for best results */}
+      <div style={{ marginTop: 16, marginBottom: 4, color: PALETTE.textMuted, fontSize: 11, fontWeight: 600, textTransform: "uppercase", letterSpacing: 1 }}>Backfill</div>
+      <ProcessRow name="tmdb_enrich" label="TMDb Metadata (report + files)" startLabel="Enrich" onFlash={showFlash} />
+      <ProcessRow name="detect_languages" label="Language Detection (Text + OCR)" startLabel="Detect" onFlash={showFlash} />
+      <ProcessRow name="detect_languages_whisper" label="Language Detection (Whisper)" startLabel="Detect (GPU)" onFlash={showFlash} badge="uses GPU" />
+      <ProcessRow name="apply_languages" label="Apply Language Tags to Files" startLabel="Apply" onFlash={showFlash} />
 
       {/* Diagnostics */}
       <div style={{ marginTop: 16, marginBottom: 4, color: PALETTE.textMuted, fontSize: 11, fontWeight: 600, textTransform: "uppercase", letterSpacing: 1 }}>Diagnostics</div>

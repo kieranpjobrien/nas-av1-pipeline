@@ -702,7 +702,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Enrich media report with TMDb metadata")
     parser.add_argument("--report", type=str, default=str(MEDIA_REPORT), help="Path to media_report.json")
     parser.add_argument("--force", action="store_true", help="Re-enrich files that already have tmdb data")
-    parser.add_argument("--apply", action="store_true", help="Write TMDb metadata into MKV file tags")
+    parser.add_argument("--apply", action="store_true", help="Write TMDb metadata into MKV file tags only")
+    parser.add_argument("--enrich-and-apply", action="store_true", help="Enrich report AND write to MKV files")
     parser.add_argument("--file", type=str, default=None, help="Enrich a single file by path")
     parser.add_argument("--workers", type=int, default=4, help="Number of parallel workers")
     args = parser.parse_args()
@@ -717,6 +718,12 @@ def main() -> None:
 
     if args.apply:
         # Apply-only mode: just write existing TMDb data to MKV files, no enrichment
+        apply_tmdb_to_files(report)
+    elif args.enrich_and_apply:
+        # Enrich report AND write to files in one go
+        report = enrich_report(report, workers=args.workers, force=args.force)
+        write_report(report)
+        print(f"Saved: {MEDIA_REPORT}", flush=True)
         apply_tmdb_to_files(report)
     elif args.file:
         # Single-file mode
