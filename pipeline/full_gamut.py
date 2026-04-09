@@ -68,7 +68,6 @@ def full_gamut(
             logging.info(f"Already fetched: {filename}")
         else:
             # Wait for network worker (up to 10 min for large files)
-            import time
             wait_start = time.time()
             max_wait = 600  # 10 minutes
             while time.time() - wait_start < max_wait:
