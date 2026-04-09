@@ -59,13 +59,18 @@ def full_gamut(
 
     try:
         # === STEP 1: Fetch ===
-        # Don't set FETCHING here — fetch_file sets it atomically to prevent races
-        logging.info(f"Fetching: {filename} ({format_bytes(item['file_size_bytes'])})")
+        # Check if already fetched by the network thread
+        existing = state.get_file(filepath)
+        local_path = existing.get("local_path") if existing else None
 
-        local_path = fetch_file(item, staging_dir, config, state)
-        if local_path is None:
-            state.set_file(filepath, FileStatus.ERROR, error="fetch failed", stage="fetch")
-            return False
+        if local_path and os.path.exists(local_path):
+            logging.info(f"Already fetched: {filename}")
+        else:
+            logging.info(f"Fetching: {filename} ({format_bytes(item['file_size_bytes'])})")
+            local_path = fetch_file(item, staging_dir, config, state)
+            if local_path is None:
+                state.set_file(filepath, FileStatus.ERROR, error="fetch failed", stage="fetch")
+                return False
 
         # === STEP 2: Clean filename ===
         try:

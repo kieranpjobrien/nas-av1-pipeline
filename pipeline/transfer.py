@@ -70,7 +70,7 @@ def fetch_file(item: dict, staging_dir: str, config: dict, state: PipelineState,
     # Check source still exists on NAS (may have been renamed/deleted since scan)
     if not os.path.exists(source):
         logging.warning(f"Source file not found, skipping: {item['filename']}")
-        state.set_file(source, FileStatus.SKIPPED, reason="source file not found")
+        state.set_file(source, FileStatus.DONE, reason="source file not found")
         return None
 
     # Atomically claim this file for fetching — prevents the prefetch thread
@@ -90,7 +90,7 @@ def fetch_file(item: dict, staging_dir: str, config: dict, state: PipelineState,
         elapsed = time.time() - start
         speed = file_size / elapsed / (1024**2) if elapsed > 0 else 0
         logging.info(f"Fetched in {format_duration(elapsed)} ({speed:.0f} MB/s)")
-        state.set_file(source, FileStatus.FETCHED, local_path=local_path,
+        state.set_file(source, FileStatus.PROCESSING, local_path=local_path,
                        input_size_bytes=file_size,
                        fetch_start=start, fetch_end=time.time(),
                        fetch_time_secs=round(elapsed, 1))
@@ -128,7 +128,7 @@ def upload_file(source_filepath: str, item: dict, staging_dir: str,
 
     if os.path.exists(dest_path) and not config["overwrite_existing"]:
         logging.warning(f"Destination exists, skipping: {dest_path}")
-        state.set_file(source_filepath, FileStatus.SKIPPED,
+        state.set_file(source_filepath, FileStatus.DONE,
                        reason="destination exists", dest_path=dest_path)
         # Clean up local encoded file
         if os.path.exists(output_path):

@@ -194,7 +194,7 @@ class Orchestrator:
                     continue
 
                 # Fetch it
-                result = fetch_file(filepath, item, self.staging_dir, self.config, self.state)
+                result = fetch_file(item, self.staging_dir, self.config, self.state)
                 if result is not None:
                     fetched_any = True
                     break  # one fetch per loop, then re-check buffer
