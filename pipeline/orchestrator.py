@@ -184,7 +184,7 @@ class Orchestrator:
     # =========================================================================
 
     def _network_worker(self, queue: list[dict]):
-        """Continuous pre-fetch. Saturates NAS link."""
+        """Continuous pre-fetch. Saturates NAS link — always fetching something."""
         logging.info("Network worker started")
         max_buffer = self.config.get("max_fetch_buffer_bytes", 2000 * 1024**3)
 
@@ -198,20 +198,41 @@ class Orchestrator:
                 continue
 
             fetched_any = False
-            for item in queue:
+
+            # Priority 1: Pre-fetch force items so GPU worker doesn't wait
+            force_items = self.control.get_force_items()
+            for fp in force_items:
                 if self._shutdown.is_set():
                     break
-                fp = item["filepath"]
                 existing = self.state.get_file(fp)
                 status = existing["status"] if existing else None
                 if status and status != FileStatus.PENDING.value:
                     continue
-                if self.control.should_skip(fp):
-                    continue
-                result = fetch_file(item, self.staging_dir, self.config, self.state)
+                entry = self._lookup_file(fp)
+                if not entry:
+                    entry = {"filepath": fp, "filename": os.path.basename(fp),
+                             "file_size_bytes": 0, "library_type": "movie" if "Movies" in fp else "series"}
+                result = fetch_file(entry, self.staging_dir, self.config, self.state)
                 if result is not None:
                     fetched_any = True
                     break
+
+            # Priority 2: Regular queue
+            if not fetched_any:
+                for item in queue:
+                    if self._shutdown.is_set():
+                        break
+                    fp = item["filepath"]
+                    existing = self.state.get_file(fp)
+                    status = existing["status"] if existing else None
+                    if status and status != FileStatus.PENDING.value:
+                        continue
+                    if self.control.should_skip(fp):
+                        continue
+                    result = fetch_file(item, self.staging_dir, self.config, self.state)
+                    if result is not None:
+                        fetched_any = True
+                        break
 
             if not fetched_any:
                 self._shutdown.wait(timeout=10)
