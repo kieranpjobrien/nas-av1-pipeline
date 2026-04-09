@@ -311,11 +311,34 @@ class PipelineControl:
             json.dump(data, f, indent=4, ensure_ascii=False)
 
     def get_force_items(self) -> list[str]:
-        """Get list of filepaths in the force tier (absolute top priority)."""
+        """Get list of filepaths in the force tier (LIFO stack — most recent first)."""
         priority = self._read_control_file("priority.json")
         if not priority:
             return []
         return priority.get("force", [])
+
+    def push_force_item(self, filepath: str) -> None:
+        """Push a file to the top of the force stack (LIFO)."""
+        path = os.path.join(self.control_dir, "priority.json")
+        data = self._read_control_file("priority.json") or {"force": [], "paths": [], "patterns": []}
+        force = data.get("force", [])
+        norm = os.path.normpath(filepath)
+        force = [p for p in force if os.path.normpath(p) != norm]  # dedup
+        force.insert(0, filepath)  # LIFO: newest at front
+        data["force"] = force
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=4, ensure_ascii=False)
+        self._last_read.pop(path, None)
+
+    def remove_force_item(self, filepath: str) -> None:
+        """Remove a file from the force stack after processing."""
+        path = os.path.join(self.control_dir, "priority.json")
+        data = self._read_control_file("priority.json") or {"force": [], "paths": [], "patterns": []}
+        norm = os.path.normpath(filepath)
+        data["force"] = [p for p in data.get("force", []) if os.path.normpath(p) != norm]
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=4, ensure_ascii=False)
+        self._last_read.pop(path, None)
 
     def get_priority_bumps(self) -> list[str]:
         """Get list of filepaths that should be bumped to front of queue.

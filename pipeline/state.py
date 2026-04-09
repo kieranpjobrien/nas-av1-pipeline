@@ -17,23 +17,49 @@ from typing import Optional
 
 
 class FileStatus(str, Enum):
+    """Simplified pipeline state machine (6 states).
+
+    PENDING → FETCHING → PROCESSING → UPLOADING → DONE → ERROR
+
+    Each file is owned by one thread start to finish. No handoffs.
+    The 'stage' field in the DB tracks which substep is active.
+    """
     PENDING = "pending"
     FETCHING = "fetching"
+    PROCESSING = "processing"
+    UPLOADING = "uploading"
+    DONE = "done"
+    ERROR = "error"
+
+
+# Legacy status aliases for migration and backward compat during transition
+class LegacyStatus(str, Enum):
     FETCHED = "fetched"
     ENCODING = "encoding"
     ENCODED = "encoded"
-    UPLOADING = "uploading"
     UPLOADED = "uploaded"
     VERIFIED = "verified"
     REPLACING = "replacing"
     REPLACED = "replaced"
     SKIPPED = "skipped"
-    ERROR = "error"
+
+
+# Map old statuses to new ones
+_LEGACY_STATUS_MAP = {
+    "fetched": "processing",
+    "encoding": "processing",
+    "encoded": "uploading",
+    "uploaded": "uploading",
+    "verified": "uploading",
+    "replacing": "uploading",
+    "replaced": "done",
+    "skipped": "done",
+}
 
 
 # Columns stored directly (not in extras JSON) for efficient queries
 _DIRECT_COLS = {
-    "status", "added", "last_updated", "tier", "audio_only", "cleanup_strip",
+    "status", "mode", "added", "last_updated", "tier", "audio_only", "cleanup_strip",
     "local_path", "output_path", "dest_path", "error", "stage", "reason",
     "res_key", "sub_strip",
 }
@@ -59,6 +85,7 @@ def _init_tables(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS pipeline_files (
             filepath TEXT PRIMARY KEY,
             status TEXT NOT NULL DEFAULT 'pending',
+            mode TEXT DEFAULT 'full_gamut',
             added TEXT,
             last_updated TEXT,
             tier TEXT,
@@ -91,6 +118,17 @@ def _init_tables(conn: sqlite3.Connection) -> None:
     conn.execute("INSERT OR IGNORE INTO pipeline_stats (id, data) VALUES (1, ?)",
                  (json.dumps({"total_files": 0, "completed": 0, "skipped": 0,
                               "errors": 0, "bytes_saved": 0, "total_encode_time_secs": 0}),))
+
+    # Add mode column if missing (migration from pre-rewrite schema)
+    try:
+        conn.execute("ALTER TABLE pipeline_files ADD COLUMN mode TEXT DEFAULT 'full_gamut'")
+    except sqlite3.OperationalError:
+        pass  # column already exists
+
+    # Migrate legacy statuses to new simplified ones
+    for old_status, new_status in _LEGACY_STATUS_MAP.items():
+        conn.execute("UPDATE pipeline_files SET status = ? WHERE status = ?", (new_status, old_status))
+
     conn.commit()
 
 
