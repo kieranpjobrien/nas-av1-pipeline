@@ -88,6 +88,13 @@ def fetch_file(item: dict, staging_dir: str, config: dict, state: PipelineState,
         start = time.time()
         shutil.copy2(source, local_path)
         elapsed = time.time() - start
+        # Verify copy is complete (catch truncated fetches)
+        local_size = os.path.getsize(local_path)
+        if file_size > 0 and local_size < file_size * 0.99:
+            logging.error(f"Fetch incomplete: {format_bytes(local_size)} vs expected {format_bytes(file_size)}")
+            os.remove(local_path)
+            state.set_file(source, FileStatus.ERROR, error="fetch incomplete", stage="fetch")
+            return None
         speed = file_size / elapsed / (1024**2) if elapsed > 0 else 0
         logging.info(f"Fetched in {format_duration(elapsed)} ({speed:.0f} MB/s)")
         state.set_file(source, FileStatus.PROCESSING, local_path=local_path,

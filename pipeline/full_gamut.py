@@ -62,9 +62,12 @@ def full_gamut(
         # Wait for network worker to fetch this file (it should be pre-fetching ahead).
         # Only fetch ourselves as a last resort if the file never appears.
         existing = state.get_file(filepath)
+        status = existing.get("status") if existing else None
         local_path = existing.get("local_path") if existing else None
 
-        if local_path and os.path.exists(local_path):
+        # File is ready when status is PROCESSING (set after copy completes).
+        # Don't use os.path.exists alone — file exists during copy but is locked.
+        if status == FileStatus.PROCESSING.value and local_path and os.path.exists(local_path):
             logging.info(f"Already fetched: {filename}")
         else:
             # Wait for network worker (up to 10 min for large files)
@@ -75,7 +78,7 @@ def full_gamut(
                 existing = state.get_file(filepath)
                 status = existing.get("status") if existing else None
                 local_path = existing.get("local_path") if existing else None
-                if local_path and os.path.exists(local_path):
+                if status == FileStatus.PROCESSING.value and local_path and os.path.exists(local_path):
                     logging.info(f"Pre-fetched by network worker: {filename}")
                     break
                 if status == FileStatus.ERROR.value:
