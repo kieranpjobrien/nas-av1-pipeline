@@ -70,5 +70,6 @@ export const api = {
   quickWins: () => postJSON("/quick-wins", {}),
   getForceList: () => fetchJSON("/control/force-list"),
   getCompletionMissing: (category) => fetchJSON(`/completion-missing?category=${category}`),
+  renameFile: (path, newName) => postJSON("/file/rename", { path, new_name: newName }),
   removeForce: (path) => postJSON("/control/priority/force", { path, action: "remove" }),
 };

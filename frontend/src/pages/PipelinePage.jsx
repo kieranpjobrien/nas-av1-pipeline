@@ -208,6 +208,112 @@ function fmtETA(secs) {
   return rm > 0 ? `~${h}h ${rm}m` : `~${h}h`;
 }
 
+function MissingFilesDrillDown({ category, data, onClose, onRefresh }) {
+  const [renaming, setRenaming] = useState(null);
+  const [renameValue, setRenameValue] = useState("");
+
+  if (!data) return <div style={{ marginTop: 16, color: PALETTE.textMuted, fontSize: 11 }}>Loading...</div>;
+
+  const handleRename = async (filepath) => {
+    if (!renameValue.trim()) return;
+    try {
+      await api.renameFile(filepath, renameValue);
+      setRenaming(null);
+      onRefresh?.();
+    } catch (e) {
+      alert(`Rename failed: ${e.message}`);
+    }
+  };
+
+  const langLabel = (lang) => {
+    if (!lang || lang === "und") return "und";
+    return lang;
+  };
+
+  const trackBadge = (lang, isEnglish) => ({
+    background: isEnglish ? PALETTE.green + "22" : PALETTE.red + "22",
+    color: isEnglish ? PALETTE.green : PALETTE.red,
+    padding: "1px 4px", borderRadius: 3, fontSize: 9, fontWeight: 600,
+  });
+
+  const engLangs = new Set(["eng", "en", "english"]);
+
+  return (
+    <div style={{ marginTop: 16, background: PALETTE.surfaceLight, borderRadius: 8, padding: 12, maxHeight: 400, overflow: "auto", textAlign: "left" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
+        <span style={{ color: PALETTE.text, fontSize: 12, fontWeight: 600 }}>
+          {data.count} files — {category}
+        </span>
+        <button onClick={onClose} style={{ background: "transparent", border: "none", color: PALETTE.textMuted, cursor: "pointer", fontSize: 11 }}>close</button>
+      </div>
+
+      {data.files.map((f, i) => (
+        <div key={i} style={{ padding: "6px 0", borderBottom: `1px solid ${PALETTE.border}22` }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            {!f.has_english_audio && (
+              <span style={{ background: PALETTE.red + "33", color: PALETTE.red, padding: "1px 5px", borderRadius: 3, fontSize: 8, fontWeight: 700 }}>NO ENG AUDIO</span>
+            )}
+            <span style={{ color: PALETTE.text, fontSize: 11, flex: 1 }}>{f.filename}</span>
+            <span style={{ color: PALETTE.textMuted, fontSize: 9 }}>{f.video_codec}</span>
+
+            {/* Rename button */}
+            {category === "filename" && f.suggested_name && renaming !== i && (
+              <button onClick={() => { setRenaming(i); setRenameValue(f.suggested_name); }}
+                style={{ background: PALETTE.accent, color: "#fff", border: "none", borderRadius: 4, padding: "2px 6px", fontSize: 9, cursor: "pointer" }}>
+                rename
+              </button>
+            )}
+          </div>
+
+          {/* Rename input */}
+          {renaming === i && (
+            <div style={{ display: "flex", gap: 4, marginTop: 4 }}>
+              <input value={renameValue} onChange={e => setRenameValue(e.target.value)}
+                style={{ flex: 1, background: PALETTE.surface, border: `1px solid ${PALETTE.border}`, borderRadius: 4, padding: "3px 6px", color: PALETTE.text, fontSize: 10 }} />
+              <button onClick={() => handleRename(f.filepath)}
+                style={{ background: PALETTE.green, color: "#fff", border: "none", borderRadius: 4, padding: "3px 8px", fontSize: 9, cursor: "pointer" }}>save</button>
+              <button onClick={() => setRenaming(null)}
+                style={{ background: "transparent", border: `1px solid ${PALETTE.border}`, borderRadius: 4, padding: "3px 8px", fontSize: 9, cursor: "pointer", color: PALETTE.textMuted }}>cancel</button>
+            </div>
+          )}
+
+          {/* Audio tracks */}
+          {(category === "audio" || category === "langs") && f.audio_tracks && f.audio_tracks.length > 0 && (
+            <div style={{ marginTop: 3, display: "flex", gap: 4, flexWrap: "wrap" }}>
+              {f.audio_tracks.map((t, j) => (
+                <span key={j} style={trackBadge(t.language, engLangs.has(t.language?.toLowerCase()))}>
+                  {t.codec} {langLabel(t.language)} {t.channels}ch
+                </span>
+              ))}
+            </div>
+          )}
+
+          {/* Sub tracks */}
+          {category === "subs" && f.sub_tracks && f.sub_tracks.length > 0 && (
+            <div style={{ marginTop: 3, display: "flex", gap: 4, flexWrap: "wrap" }}>
+              {f.sub_tracks.map((t, j) => (
+                <span key={j} style={trackBadge(t.language, engLangs.has(t.language?.toLowerCase()) || t.language === "und")}>
+                  {t.codec} {langLabel(t.language)}
+                </span>
+              ))}
+            </div>
+          )}
+
+          {/* Suggested filename */}
+          {category === "filename" && f.suggested_name && renaming !== i && (
+            <div style={{ marginTop: 2, color: PALETTE.accent, fontSize: 9 }}>-> {f.suggested_name}</div>
+          )}
+        </div>
+      ))}
+
+      {data.count > 500 && (
+        <div style={{ color: PALETTE.textMuted, fontSize: 10, marginTop: 8 }}>Showing first 500 of {data.count}</div>
+      )}
+    </div>
+  );
+}
+
+
 export function PipelinePage({ wsData, onFileClick }) {
   // Use WebSocket data if available, fall back to polling
   const { data: polledData, error } = usePolling(api.getPipeline, 3000, { enabled: !wsData });
@@ -376,27 +482,12 @@ export function PipelinePage({ wsData, onFileClick }) {
 
             {/* Missing files drill-down */}
             {missingCategory && (
-              <div style={{ marginTop: 16, background: PALETTE.surfaceLight, borderRadius: 8, padding: 12, maxHeight: 300, overflow: "auto", textAlign: "left" }}>
-                {missingFiles ? (
-                  <>
-                    <div style={{ color: PALETTE.text, fontSize: 12, fontWeight: 600, marginBottom: 8 }}>
-                      {missingFiles.count} files missing — {missingCategory}
-                      <button onClick={() => { setMissingCategory(null); setMissingFiles(null); }}
-                        style={{ float: "right", background: "transparent", border: "none", color: PALETTE.textMuted, cursor: "pointer", fontSize: 11 }}>close</button>
-                    </div>
-                    {missingFiles.files.map((f, i) => (
-                      <div key={i} style={{ fontSize: 11, padding: "3px 0", borderBottom: `1px solid ${PALETTE.border}22`, color: PALETTE.text }}>
-                        {f.filename}
-                      </div>
-                    ))}
-                    {missingFiles.count > 500 && (
-                      <div style={{ color: PALETTE.textMuted, fontSize: 10, marginTop: 8 }}>Showing first 500 of {missingFiles.count}</div>
-                    )}
-                  </>
-                ) : (
-                  <div style={{ color: PALETTE.textMuted, fontSize: 11 }}>Loading...</div>
-                )}
-              </div>
+              <MissingFilesDrillDown
+                category={missingCategory}
+                data={missingFiles}
+                onClose={() => { setMissingCategory(null); setMissingFiles(null); }}
+                onRefresh={() => handleBarClick(missingCategory)}
+              />
             )}
 
             {/* Quick Wins */}

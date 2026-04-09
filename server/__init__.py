@@ -627,9 +627,78 @@ def get_completion_missing(category: str):
                 except Exception:
                     pass
         if hit:
-            missing.append({"filepath": fp, "filename": fn, "library_type": f.get("library_type", "")})
+            entry = {"filepath": fp, "filename": fn, "library_type": f.get("library_type", "")}
+            # Always include tracks for context
+            audio_tracks = []
+            for i, a in enumerate(f.get("audio_streams", [])):
+                lang = a.get("language") or a.get("detected_language") or "und"
+                audio_tracks.append({
+                    "index": i, "codec": a.get("codec", "?"), "language": lang,
+                    "channels": a.get("channels", 0), "title": a.get("title", ""),
+                })
+            entry["audio_tracks"] = audio_tracks
+
+            sub_tracks = []
+            for i, s in enumerate(f.get("subtitle_streams", [])):
+                lang = s.get("language") or s.get("detected_language") or "und"
+                sub_tracks.append({
+                    "index": i, "codec": s.get("codec", "?"), "language": lang,
+                    "title": s.get("title", ""),
+                })
+            entry["sub_tracks"] = sub_tracks
+
+            # Flag: no English audio at all (needs replacement, not just stripping)
+            eng_audio = {"eng", "en", "english"}
+            has_english_audio = any(
+                (a.get("language") or a.get("detected_language") or "").lower().strip() in eng_audio
+                for a in f.get("audio_streams", [])
+            )
+            entry["has_english_audio"] = has_english_audio
+            entry["video_codec"] = f.get("video", {}).get("codec", "?")
+
+            # For filename category: include suggested clean name
+            if category == "filename" and _cf:
+                try:
+                    entry["suggested_name"] = _cf(fp, f.get("library_type", ""))
+                except Exception:
+                    pass
+
+            # TMDb data if present
+            if f.get("tmdb"):
+                entry["tmdb_title"] = f["tmdb"].get("director") or ", ".join(f["tmdb"].get("created_by", []))
+
+            missing.append(entry)
 
     return {"category": category, "count": len(missing), "files": missing[:500]}
+
+
+@app.post("/api/file/rename")
+def rename_file(req: dict):
+    """Rename a file on the NAS. Body: {path, new_name}."""
+    path = req.get("path")
+    new_name = req.get("new_name")
+    if not path or not new_name:
+        raise HTTPException(400, "path and new_name required")
+    if not os.path.exists(path):
+        raise HTTPException(404, f"File not found: {path}")
+
+    source_dir = os.path.dirname(path)
+    new_path = os.path.join(source_dir, new_name)
+
+    if os.path.exists(new_path):
+        raise HTTPException(409, f"Target already exists: {new_name}")
+
+    try:
+        os.rename(path, new_path)
+        # Update media report
+        try:
+            from pipeline.report import update_entry
+            update_entry(new_path, "movie" if "Movies" in new_path else "series")
+        except Exception:
+            pass
+        return {"ok": True, "old": path, "new": new_path}
+    except Exception as e:
+        raise HTTPException(500, f"Rename failed: {e}")
 
 
 @app.get("/api/duplicates")
