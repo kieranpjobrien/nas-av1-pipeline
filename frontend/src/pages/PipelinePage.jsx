@@ -242,10 +242,7 @@ export function PipelinePage({ wsData, onFileClick }) {
   const handleQuickWins = async () => {
     setQuickWinsBusy(true);
     try {
-      const result = await api.quickWins();
-      if (result?.added > 0) {
-        api.getLibraryCompletion().then(setCompletion).catch(() => {});
-      }
+      await api.startProcess("gap_filler");
     } catch { /* ignore */ }
     setQuickWinsBusy(false);
   };
@@ -356,7 +353,7 @@ export function PipelinePage({ wsData, onFileClick }) {
                     fontSize: 12, fontWeight: 600, cursor: quickWinsBusy ? "default" : "pointer",
                   }}
                 >
-                  {quickWinsBusy ? "Queuing..." : `Quick Wins: Force ${completion.quick_wins_audio_count} cleanups to front`}
+                  {quickWinsBusy ? "Starting..." : `Run Gap Filler (${completion.quick_wins_audio_count} cleanups)`}
                 </button>
               </div>
             )}

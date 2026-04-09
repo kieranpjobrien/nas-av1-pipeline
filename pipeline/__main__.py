@@ -118,6 +118,10 @@ def main():
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--no-replace", action="store_true")
+    parser.add_argument("--no-gap-filler", action="store_true",
+                        help="Disable gap filler (GPU encodes only, no cleanup)")
+    parser.add_argument("--gap-filler-only", action="store_true",
+                        help="Run gap filler only (no GPU encodes)")
     parser.add_argument("--max-staging-gb", type=int, default=None)
     parser.add_argument("--max-fetch-gb", type=int, default=None)
     args = parser.parse_args()
@@ -190,7 +194,12 @@ def main():
     # Run orchestrator
     from pipeline.orchestrator import Orchestrator
     orchestrator = Orchestrator(config, state, args.staging, control)
-    orchestrator.run(full_gamut_queue, gap_filler_queue)
+
+    if args.gap_filler_only:
+        orchestrator.run([], gap_filler_queue, enable_gap_filler=True)
+    else:
+        orchestrator.run(full_gamut_queue, gap_filler_queue,
+                         enable_gap_filler=not args.no_gap_filler)
 
 
 if __name__ == "__main__":

@@ -53,11 +53,13 @@ class Orchestrator:
         logging.info(f"Received signal {signum}, shutting down gracefully...")
         self._shutdown.set()
 
-    def run(self, full_gamut_queue: list[dict], gap_filler_queue: list[dict]):
+    def run(self, full_gamut_queue: list[dict], gap_filler_queue: list[dict],
+            enable_gap_filler: bool = True):
         """Main entry point. Starts all threads and waits for completion."""
         logging.info(f"Orchestrator starting:")
         logging.info(f"  Full gamut queue: {len(full_gamut_queue)} files")
         logging.info(f"  Gap filler queue: {len(gap_filler_queue)} files")
+        logging.info(f"  Gap filler: {'enabled' if enable_gap_filler else 'disabled'}")
         logging.info(f"  Staging: {self.staging_dir}")
         logging.info(f"  Buffer: {format_bytes(self.config.get('max_fetch_buffer_bytes', 0))}")
 
@@ -83,10 +85,11 @@ class Orchestrator:
             target=self._network_worker, args=(full_gamut_queue,),
             daemon=True, name="network-transfer"
         )
-        threads["gap_filler"] = threading.Thread(
-            target=self._gap_filler_worker, args=(gap_filler_queue,),
-            daemon=True, name="gap-filler"
-        )
+        if enable_gap_filler:
+            threads["gap_filler"] = threading.Thread(
+                target=self._gap_filler_worker, args=(gap_filler_queue,),
+                daemon=True, name="gap-filler"
+            )
         threads["force_monitor"] = threading.Thread(
             target=self._force_monitor,
             daemon=True, name="force-monitor"
