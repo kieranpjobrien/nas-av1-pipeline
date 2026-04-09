@@ -418,6 +418,7 @@ def main():
     # Incremental scan: reuse results from existing report for unchanged files.
     # A file is "unchanged" if its filepath, size, and mtime all match.
     cached = {}
+    old_by_path: dict[str, dict] = {}  # filepath -> entry for TMDb/language preservation
     if not args.full and os.path.exists(args.output):
         try:
             with open(args.output, "r", encoding="utf-8") as f:
@@ -427,6 +428,7 @@ def main():
                 sz = entry.get("file_size_bytes", -1)
                 mt = entry.get("file_mtime", 0)
                 cached[(fp, sz, mt)] = entry
+                old_by_path[fp] = entry
             print(f"Loaded {len(cached)} cached entries from previous report")
         except Exception:
             pass
@@ -475,6 +477,19 @@ def main():
 
             result, error_path = future.result()
             if result:
+                # Preserve TMDb and language detection from previous report
+                old = old_by_path.get(result.get("filepath", ""))
+                if old:
+                    if old.get("tmdb") and not result.get("tmdb"):
+                        result["tmdb"] = old["tmdb"]
+                    for skey in ("audio_streams", "subtitle_streams"):
+                        for j, s in enumerate(result.get(skey, [])):
+                            if j < len(old.get(skey, [])):
+                                old_s = old[skey][j]
+                                if old_s.get("detected_language") and not s.get("detected_language"):
+                                    s["detected_language"] = old_s["detected_language"]
+                                    s["detection_confidence"] = old_s.get("detection_confidence")
+                                    s["detection_method"] = old_s.get("detection_method")
                 results.append(result)
             elif error_path:
                 errors.append(str(error_path))
