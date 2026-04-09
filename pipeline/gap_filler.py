@@ -232,7 +232,7 @@ def gap_fill(
             logging.warning(f"  Report update failed: {e}")
 
         state.set_file(filepath, FileStatus.DONE, mode="gap_filler")
-        logging.info(f"  ✓ Gap filled: {filename}")
+        logging.info(f"  DONE: Gap filled: {filename}")
         return True
 
     except Exception as e:
@@ -268,7 +268,7 @@ def _strip_tracks_on_nas(filepath: str, gaps: GapAnalysis) -> bool:
 
     try:
         src_size = os.path.getsize(filepath)
-        timeout = max(60, int(src_size / (10 * 1024 * 1024)))  # 1s per 10MB
+        timeout = max(300, int(src_size / (5 * 1024 * 1024)))  # 5 min minimum, 1s per 5MB
 
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         if result.returncode >= 2:
@@ -286,7 +286,7 @@ def _strip_tracks_on_nas(filepath: str, gaps: GapAnalysis) -> bool:
 
         os.replace(tmp_path, filepath)
         saved = src_size - dst_size
-        logging.info(f"  Stripped tracks: {format_bytes(src_size)} → {format_bytes(dst_size)} "
+        logging.info(f"  Stripped tracks: {format_bytes(src_size)} -> {format_bytes(dst_size)} "
                      f"({format_bytes(abs(saved))} {'saved' if saved > 0 else 'added'})")
         return True
 
@@ -355,7 +355,7 @@ def _audio_transcode(
         output_size = os.path.getsize(output_path)
         input_size = os.path.getsize(local_path)
         logging.info(f"  Audio transcode in {format_duration(elapsed)}: "
-                     f"{format_bytes(input_size)} → {format_bytes(output_size)}")
+                     f"{format_bytes(input_size)} -> {format_bytes(output_size)}")
 
         # Upload back to NAS (replace original)
         state.set_file(filepath, FileStatus.UPLOADING, stage="upload")
@@ -389,7 +389,7 @@ def _rename_file(filepath: str, clean_name: str) -> Optional[str]:
 
     try:
         os.rename(filepath, new_path)
-        logging.info(f"  Renamed: {os.path.basename(filepath)} → {clean_name}")
+        logging.info(f"  Renamed: {os.path.basename(filepath)} -> {clean_name}")
         return new_path
     except Exception as e:
         logging.warning(f"  Rename failed: {e}")

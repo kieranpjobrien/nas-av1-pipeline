@@ -136,7 +136,7 @@ def full_gamut(
         ratio = (1 - output_size / input_size) * 100 if input_size > 0 else 0
 
         logging.info(f"  Encoded in {format_duration(encode_elapsed)}: "
-                     f"{format_bytes(input_size)} → {format_bytes(output_size)} "
+                     f"{format_bytes(input_size)} -> {format_bytes(output_size)} "
                      f"({ratio:.1f}% reduction, {format_bytes(abs(saved))} {'saved' if saved > 0 else 'added'})")
 
         # Cleanup local fetch file (free staging space)
@@ -194,12 +194,12 @@ def full_gamut(
         backup_path = filepath + ".original.bak"
 
         try:
-            # Rename original → .bak
+            # Rename original -> .bak
             if os.path.exists(filepath) and not os.path.exists(backup_path):
                 os.rename(filepath, backup_path)
                 logging.info(f"  Backed up original")
 
-            # Rename temp → final name
+            # Rename temp -> final name
             if os.path.exists(dest_path):
                 os.rename(dest_path, final_path)
                 logging.info(f"  Renamed to {final_name}")
@@ -273,7 +273,7 @@ def full_gamut(
         tier["total_encode_time_secs"] += encode_elapsed
         state.save()
 
-        logging.info(f"  ✓ DONE: {final_name}")
+        logging.info(f"  DONE: DONE: {final_name}")
         return True
 
     except Exception as e:
