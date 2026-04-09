@@ -1558,10 +1558,17 @@ async def websocket_endpoint(ws: WebSocket):
             except WebSocketDisconnect:
                 break
 
-            # Pipeline state — check DB mtime
+            # Pipeline state — check DB mtime (use WAL file if it exists, as
+            # SQLite WAL mode writes there and main DB mtime stays stale)
             try:
                 db_path = str(PIPELINE_STATE_DB)
-                mtime = os.path.getmtime(db_path) if os.path.exists(db_path) else 0
+                wal_path = db_path + "-wal"
+                if os.path.exists(wal_path):
+                    mtime = os.path.getmtime(wal_path)
+                elif os.path.exists(db_path):
+                    mtime = os.path.getmtime(db_path)
+                else:
+                    mtime = 0
             except OSError:
                 mtime = 0
             if mtime != _ws_state_mtime:
