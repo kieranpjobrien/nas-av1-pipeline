@@ -322,20 +322,23 @@ export function PipelinePage({ wsData, onFileClick }) {
             </div>
 
             {/* Breakdown bars */}
-            <div style={{ display: "flex", justifyContent: "center", gap: 24, marginTop: 16, flexWrap: "wrap" }}>
+            <div style={{ display: "flex", justifyContent: "center", gap: 16, marginTop: 16, flexWrap: "wrap" }}>
               {[
                 { label: "AV1 Video", pct: completion.pct_video, count: completion.av1, colour: PALETTE.accent },
                 { label: "EAC-3 Audio", pct: completion.pct_audio, count: completion.eac3_done, colour: PALETTE.cyan || "#22d3ee" },
                 { label: "English Subs", pct: completion.pct_subs, count: completion.subs_done, colour: "#a78bfa" },
+                { label: "TMDb Metadata", pct: completion.pct_tmdb || 0, count: completion.has_tmdb || 0, colour: "#f59e0b" },
+                { label: "Langs Known", pct: completion.pct_langs_known || 0, count: completion.total - (completion.und_audio_files || 0) - (completion.und_sub_files || 0), colour: "#10b981" },
+                { label: "Clean Filenames", pct: completion.pct_filename || 0, count: completion.has_clean_filename || 0, colour: "#6366f1" },
               ].map(({ label, pct: p, count, colour }) => (
-                <div key={label} style={{ minWidth: 120, textAlign: "center" }}>
-                  <div style={{ fontSize: 18, fontWeight: 700, fontFamily: "'JetBrains Mono', monospace", color: colour }}>
+                <div key={label} style={{ minWidth: 100, textAlign: "center" }}>
+                  <div style={{ fontSize: 16, fontWeight: 700, fontFamily: "'JetBrains Mono', monospace", color: colour }}>
                     {p.toFixed(1)}%
                   </div>
-                  <div style={{ margin: "4px auto", width: 100, height: 4, background: PALETTE.surfaceLight, borderRadius: 2, overflow: "hidden" }}>
+                  <div style={{ margin: "4px auto", width: 80, height: 4, background: PALETTE.surfaceLight, borderRadius: 2, overflow: "hidden" }}>
                     <div style={{ height: "100%", width: `${Math.min(p, 100)}%`, background: colour, borderRadius: 2 }} />
                   </div>
-                  <div style={{ fontSize: 10, color: PALETTE.textMuted }}>{label} ({count.toLocaleString()})</div>
+                  <div style={{ fontSize: 9, color: PALETTE.textMuted }}>{label} ({count.toLocaleString()})</div>
                 </div>
               ))}
             </div>

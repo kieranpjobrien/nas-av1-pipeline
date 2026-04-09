@@ -472,7 +472,51 @@ def get_library_completion():
     del counts["quick_wins_audio"]
     del counts["quick_wins_subs"]
 
-    # Real gap fill count — AV1 files needing ANY work (tracks, metadata, filename, language)
+    # Detailed completion stats for hero display
+    has_tmdb = sum(1 for f in files if f.get("tmdb"))
+    has_clean_filename = 0
+    has_und_audio = 0
+    has_und_subs = 0
+    und_langs = {"und", "unk", ""}
+
+    try:
+        from pipeline.filename import clean_filename as _cf
+    except ImportError:
+        _cf = None
+
+    for f in files:
+        # Filename check
+        if _cf:
+            try:
+                clean = _cf(f.get("filepath", ""), f.get("library_type", ""))
+                if not clean or clean == f.get("filename"):
+                    has_clean_filename += 1
+            except Exception:
+                has_clean_filename += 1
+        else:
+            has_clean_filename += 1
+
+        # Undetermined language tracks
+        for a in f.get("audio_streams", []):
+            lang = (a.get("language") or "und").lower().strip()
+            if lang in und_langs and not a.get("detected_language"):
+                has_und_audio += 1
+                break
+        for s in f.get("subtitle_streams", []):
+            lang = (s.get("language") or "und").lower().strip()
+            if lang in und_langs and not s.get("detected_language"):
+                has_und_subs += 1
+                break
+
+    counts["has_tmdb"] = has_tmdb
+    counts["pct_tmdb"] = round(100 * has_tmdb / total, 1) if total else 0
+    counts["has_clean_filename"] = has_clean_filename
+    counts["pct_filename"] = round(100 * has_clean_filename / total, 1) if total else 0
+    counts["und_audio_files"] = has_und_audio
+    counts["und_sub_files"] = has_und_subs
+    counts["pct_langs_known"] = round(100 * (total - has_und_audio - has_und_subs) / total, 1) if total else 0
+
+    # Real gap fill count
     try:
         from pipeline.gap_filler import analyse_gaps
         from pipeline.config import build_config as _bc
