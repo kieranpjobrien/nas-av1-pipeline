@@ -70,22 +70,22 @@ def full_gamut(
             # Wait for network worker (up to 10 min for large files)
             wait_start = time.time()
             max_wait = 600  # 10 minutes
+            logged_wait = False
             while time.time() - wait_start < max_wait:
                 existing = state.get_file(filepath)
                 status = existing.get("status") if existing else None
                 local_path = existing.get("local_path") if existing else None
-                if status == FileStatus.FETCHING.value:
-                    # Network worker is actively fetching — wait
-                    time.sleep(5)
-                    continue
                 if local_path and os.path.exists(local_path):
                     logging.info(f"Pre-fetched by network worker: {filename}")
                     break
                 if status == FileStatus.ERROR.value:
                     logging.error(f"Fetch failed (network worker): {filename}")
                     return False
-                # Not yet started by network worker — fetch ourselves
-                break
+                # Network worker is fetching, or hasn't started yet — wait
+                if not logged_wait:
+                    logging.info(f"Waiting for network worker to fetch: {filename}")
+                    logged_wait = True
+                time.sleep(5)
 
             existing = state.get_file(filepath)
             local_path = existing.get("local_path") if existing else None
