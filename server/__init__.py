@@ -203,11 +203,11 @@ PROCESS_CONFIGS = {
         "cwd": str(Path(__file__).parent.parent),
     },
     "detect_languages": {
-        "cmd": [sys.executable, "-m", "tools.detect_languages", "--workers", "6"],
+        "cmd": [sys.executable, "-m", "tools.detect_languages", "--workers", "6", "--apply", "--min-confidence", "0.85"],
         "cwd": str(Path(__file__).parent.parent),
     },
     "detect_languages_whisper": {
-        "cmd": [sys.executable, "-m", "tools.detect_languages", "--whisper"],
+        "cmd": [sys.executable, "-m", "tools.detect_languages", "--whisper", "--apply", "--min-confidence", "0.85"],
         "cwd": str(Path(__file__).parent.parent),
     },
     "detect_languages_spotcheck": {
