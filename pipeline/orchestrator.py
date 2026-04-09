@@ -55,6 +55,16 @@ class Orchestrator:
         for subdir in ("fetch", "encoded", "force", "whisper_tmp", "ocr_tmp"):
             os.makedirs(os.path.join(self.staging_dir, subdir), exist_ok=True)
 
+        # Reset any non-terminal states from previous crashed runs
+        reset_count = self.state._conn.execute(
+            "UPDATE pipeline_files SET status = ?, stage = NULL, error = NULL "
+            "WHERE status NOT IN (?, ?)",
+            ("pending", "done", "pending")
+        ).rowcount
+        self.state._conn.commit()
+        if reset_count:
+            logging.info(f"  Reset {reset_count} stale entries from previous run")
+
         self.state.compact()
         full_gamut_queue = self.control.apply_queue_overrides(full_gamut_queue)
         gap_filler_queue = self.control.apply_queue_overrides(gap_filler_queue)

@@ -119,23 +119,34 @@ function getActiveFiles(data) {
   const active = [];
   const recentlyDone = [];
   const nowSecs = Date.now() / 1000;
+  // Stale threshold: if last_updated is older than 5 min, the entry is from a crashed run
+  const STALE_SECS = 300;
 
   for (const [path, info] of Object.entries(files)) {
     const s = (info.status || "").toLowerCase();
+    const stage = (info.stage || "").toLowerCase();
     const lastUpdatedSecs = info.last_updated
       ? new Date(info.last_updated).getTime() / 1000
       : null;
     const age = lastUpdatedSecs ? nowSecs - lastUpdatedSecs : null;
 
-    const label = info.audio_only
-      ? (s === "encoding" ? "audio remux" : s)
-      : s;
+    // Skip stale entries (from crashed pipeline runs)
+    if (age !== null && age > STALE_SECS && s !== "done") continue;
 
-    if (["fetching", "encoding", "uploading", "verifying", "replacing"].includes(s)) {
-      active.push({ path, status: label, elapsed: age, last_updated: info.last_updated, audio_only: !!info.audio_only });
-    } else if (["replaced", "verified"].includes(s) && age !== null && age < 60) {
-      // Show recently completed items for 60 seconds so the activity panel doesn't go blank
-      recentlyDone.push({ path, status: label || s, elapsed: age, last_updated: info.last_updated, audio_only: !!info.audio_only, done: true });
+    // Map status + stage to display label
+    let label = s;
+    if (s === "processing" && stage === "encoding") label = "encoding";
+    else if (s === "processing" && stage === "language_detect") label = "detecting languages";
+    else if (s === "processing") label = "processing";
+    else if (s === "uploading" && stage === "pending_upload") label = "awaiting upload";
+    else if (s === "uploading" && stage === "upload") label = "uploading";
+    else if (s === "uploading" && stage === "verify") label = "verifying";
+    else if (s === "uploading" && stage === "replace") label = "replacing";
+
+    if (["fetching", "processing", "uploading"].includes(s)) {
+      active.push({ path, status: label, elapsed: age, last_updated: info.last_updated });
+    } else if (s === "done" && age !== null && age < 60) {
+      recentlyDone.push({ path, status: "done", elapsed: age, last_updated: info.last_updated, done: true });
     }
   }
 
