@@ -65,14 +65,12 @@ class Orchestrator:
 
         threads = {}
         threads["gpu"] = threading.Thread(
-            target=self._gpu_worker, args=(full_gamut_queue,), daemon=True, name="gpu-encode")
+            target=self._gpu_worker, args=(full_gamut_queue, gap_filler_queue,), daemon=True, name="gpu-encode")
         threads["network"] = threading.Thread(
             target=self._network_worker, args=(full_gamut_queue,), daemon=True, name="network")
         if enable_gap_filler:
             threads["gap_filler"] = threading.Thread(
                 target=self._gap_filler_worker, args=(gap_filler_queue,), daemon=True, name="gap-filler")
-        threads["force_monitor"] = threading.Thread(
-            target=self._force_monitor, daemon=True, name="force-monitor")
 
         for name, t in threads.items():
             t.start()
@@ -97,19 +95,19 @@ class Orchestrator:
     # GPU Worker — holds GPU lock during NVENC encode
     # =========================================================================
 
-    def _gpu_worker(self, queue: list[dict]):
-        """Full gamut encodes. Releases GPU lock between files so gap filler can use whisper."""
+    def _gpu_worker(self, queue: list[dict], gap_queue: list[dict]):
+        """Full gamut encodes + force items. Releases GPU lock between files."""
         logging.info("GPU worker started")
         dispatched: set[str] = set()
         processed = 0
 
         while not self._shutdown.is_set():
-            # Check for force items needing GPU (highest priority)
-            try:
-                force_item = self._force_gpu_queue.get_nowait()
-                item = force_item
-                logging.info(f"[FORCE GPU] {item.get('filename', '?')}")
-            except queue_mod.Empty:
+            # Priority 1: Force items from the force stack
+            item = self._pop_force_item(gap_queue)
+            is_force = item is not None
+
+            # Priority 2: Regular queue
+            if not item:
                 item = self._pick_next(queue, dispatched)
 
             if item is None:
@@ -125,24 +123,61 @@ class Orchestrator:
             while self.control.is_encode_paused() and not self._shutdown.is_set():
                 self._shutdown.wait(timeout=5)
 
-            logging.info(f"\n[GPU {processed}/{len(queue)}] {item.get('tier_name', '?')} | "
+            tag = "FORCE" if is_force else f"GPU {processed}/{len(queue)}"
+            logging.info(f"\n[{tag}] {item.get('tier_name', '?')} | "
                          f"{item['filename']} ({format_bytes(item.get('file_size_bytes', 0))})")
 
-            # Acquire GPU lock — gap filler will release it if holding
+            # Acquire GPU lock
             self._gpu_available.clear()
             with self._gpu_lock:
-                effective_config = self._apply_overrides(item)
-                success = full_gamut(filepath, item, effective_config, self.state, self.staging_dir)
+                # Force items that are already AV1 → gap fill instead of full gamut
+                is_av1 = item.get("video", {}).get("codec_raw") == "av1" if isinstance(item.get("video"), dict) else False
+                if is_force and is_av1:
+                    gaps = analyse_gaps(item, self.config)
+                    if gaps.needs_anything:
+                        gap_fill(filepath, item, gaps, self.config, self.state)
+                else:
+                    effective_config = self._apply_overrides(item)
+                    success = full_gamut(filepath, item, effective_config, self.state, self.staging_dir)
+                    if not success:
+                        self.state.stats["errors"] = self.state.stats.get("errors", 0) + 1
+                        self.state.save()
 
-            # Release GPU — gap filler can now grab it for whisper
             self._gpu_available.set()
 
-            if not success:
-                self.state.stats["errors"] = self.state.stats.get("errors", 0) + 1
-                self.state.save()
-
-        self._gpu_available.set()  # ensure gap filler isn't stuck waiting
+        self._gpu_available.set()
         logging.info("GPU worker finished")
+
+    def _pop_force_item(self, gap_queue: list[dict]) -> dict | None:
+        """Pop the top force item and return it as a queue-compatible dict."""
+        force_items = self.control.get_force_items()
+        if not force_items:
+            return None
+
+        filepath = force_items[0]
+        self.control.remove_force_item(filepath)
+
+        if not os.path.exists(filepath):
+            logging.warning(f"Force item not found: {os.path.basename(filepath)}")
+            return None
+
+        # Look up in media report for full metadata
+        entry = self._lookup_file(filepath)
+        if entry:
+            return entry
+
+        # Check gap_queue
+        for item in gap_queue:
+            if item.get("filepath") == filepath:
+                return item
+
+        # Minimal fallback
+        return {
+            "filepath": filepath,
+            "filename": os.path.basename(filepath),
+            "file_size_bytes": os.path.getsize(filepath) if os.path.exists(filepath) else 0,
+            "library_type": "movie" if "Movies" in filepath else "series",
+        }
 
     # =========================================================================
     # Network Worker — pre-fetch files to keep GPU fed
@@ -271,89 +306,6 @@ class Orchestrator:
 
     # =========================================================================
     # Force Monitor — immediate fetch + GPU preemption
-    # =========================================================================
-
-    def _force_monitor(self):
-        """Watches force stack. Preempts GPU for immediate processing."""
-        logging.info("Force monitor started")
-        force_buffer_max = 200 * 1024**3
-        force_dir = os.path.join(self.staging_dir, "force")
-        os.makedirs(force_dir, exist_ok=True)
-
-        while not self._shutdown.is_set():
-            force_items = self.control.get_force_items()
-            if not force_items:
-                self._shutdown.wait(timeout=2)
-                continue
-
-            filepath = force_items[0]
-            self.control.remove_force_item(filepath)
-
-            if not os.path.exists(filepath):
-                logging.warning(f"Force item not found: {os.path.basename(filepath)}")
-                continue
-
-            logging.info(f"\n[FORCE] {os.path.basename(filepath)}")
-
-            # Look up in media report
-            file_entry = self._lookup_file(filepath)
-
-            if file_entry and file_entry.get("video", {}).get("codec_raw") == "av1":
-                # Gap fill — check if GPU needed
-                gaps = analyse_gaps(file_entry, self.config)
-                if gaps.needs_language_detect:
-                    # Preempt GPU
-                    logging.info(f"  Preempting GPU for force item...")
-                    self._gpu_preempt.set()
-
-                    # Wait for GPU to be released
-                    while not self._gpu_available.wait(timeout=2):
-                        if self._shutdown.is_set():
-                            break
-
-                    if not self._shutdown.is_set():
-                        self._gpu_available.clear()
-                        with self._gpu_lock:
-                            self._gpu_preempt.clear()
-                            gap_fill(filepath, file_entry, gaps, self.config, self.state)
-                        self._gpu_available.set()
-                elif gaps.needs_anything:
-                    gap_fill(filepath, file_entry, gaps, self.config, self.state)
-                else:
-                    logging.info(f"  Force item already clean")
-            else:
-                # Needs full encode — preempt GPU
-                logging.info(f"  Force item needs full encode — preempting GPU")
-                self._gpu_preempt.set()
-
-                while not self._gpu_available.wait(timeout=2):
-                    if self._shutdown.is_set():
-                        break
-
-                if not self._shutdown.is_set():
-                    self._gpu_available.clear()
-                    with self._gpu_lock:
-                        self._gpu_preempt.clear()
-                        if file_entry:
-                            effective_config = self._apply_overrides(file_entry)
-                            full_gamut(filepath, file_entry, effective_config, self.state, self.staging_dir)
-                        else:
-                            # Minimal item — build from filepath
-                            item = {
-                                "filepath": filepath,
-                                "filename": os.path.basename(filepath),
-                                "file_size_bytes": os.path.getsize(filepath) if os.path.exists(filepath) else 0,
-                                "file_size_gb": 0,
-                                "duration_seconds": 0,
-                                "library_type": "movie" if "Movies" in filepath else "series",
-                            }
-                            full_gamut(filepath, item, self.config, self.state, self.staging_dir)
-                    self._gpu_available.set()
-
-            self._shutdown.wait(timeout=1)
-
-        logging.info("Force monitor finished")
-
     # =========================================================================
     # Helpers
     # =========================================================================
