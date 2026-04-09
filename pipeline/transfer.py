@@ -84,6 +84,15 @@ def fetch_file(item: dict, staging_dir: str, config: dict, state: PipelineState,
 
     logging.info(f"Fetching: {item['filename']} ({format_bytes(file_size)})")
 
+    # Clean up stale local file from a previous failed run (avoids WinError 32)
+    if os.path.exists(local_path):
+        try:
+            os.remove(local_path)
+        except OSError:
+            logging.warning(f"Cannot remove stale fetch file (locked): {os.path.basename(local_path)}")
+            state.set_file(source, FileStatus.ERROR, error="stale fetch file locked", stage="fetch")
+            return None
+
     try:
         start = time.time()
         shutil.copy2(source, local_path)
