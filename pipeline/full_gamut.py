@@ -118,8 +118,9 @@ def full_gamut(
 
         # Build the ONE ffmpeg command
         encode_start = time.time()
+        # TODO: integrate external_subs into ffmpeg command (add -i and -map for each)
         cmd = build_ffmpeg_cmd(actual_input, output_path, item, config,
-                               include_subs=True, external_subs=external_subs)
+                               include_subs=True)
 
         logging.info(f"  Encoding: AV1 + EAC-3 audio + strip foreign tracks")
         res_key = get_res_key(item)
