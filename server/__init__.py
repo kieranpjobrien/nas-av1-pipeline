@@ -894,13 +894,7 @@ def get_force_list():
     """Get the current force stack (LIFO order)."""
     current = read_json_safe(CONTROL_DIR / "priority.json") or {}
     force = current.get("force", [])
-    items = []
-    for fp in force:
-        items.append({
-            "filepath": fp,
-            "filename": os.path.basename(fp),
-            "exists": os.path.exists(fp),
-        })
+    items = [{"filepath": fp, "filename": os.path.basename(fp)} for fp in force]
     return {"items": items, "count": len(items)}
 
 

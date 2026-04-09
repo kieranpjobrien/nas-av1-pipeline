@@ -173,12 +173,12 @@ def main():
     logging.info(f"Gap filler: {len(gap_filler_queue)} files to clean up")
 
     if args.dry_run:
-        logging.info("\nDRY RUN — full gamut queue:")
+        logging.info("\nDRY RUN -- full gamut queue:")
         for item in full_gamut_queue[:20]:
             logging.info(f"  {item['tier_name']:25s} {item['filename']}")
         if len(full_gamut_queue) > 20:
             logging.info(f"  ... and {len(full_gamut_queue) - 20} more")
-        logging.info(f"\nDRY RUN — gap filler queue:")
+        logging.info("\nDRY RUN -- gap filler queue:")
         from pipeline.gap_filler import analyse_gaps
         for entry in gap_filler_queue[:20]:
             gaps = analyse_gaps(entry, config)

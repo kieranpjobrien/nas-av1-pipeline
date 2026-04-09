@@ -301,7 +301,7 @@ function MissingFilesDrillDown({ category, data, onClose, onRefresh }) {
 
           {/* Suggested filename */}
           {category === "filename" && f.suggested_name && renaming !== i && (
-            <div style={{ marginTop: 2, color: PALETTE.accent, fontSize: 9 }}>-> {f.suggested_name}</div>
+            <div style={{ marginTop: 2, color: PALETTE.accent, fontSize: 9 }}>{"\u2192"} {f.suggested_name}</div>
           )}
         </div>
       ))}
