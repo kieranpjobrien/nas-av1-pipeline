@@ -1164,13 +1164,17 @@ def apply_detections_for_file(
     is_mkv = filepath.lower().endswith(".mkv")
     use_mkvpropedit = is_mkv and _find_mkvpropedit() is not None
 
+    if not is_mkv:
+        # Non-MKV files: detections are saved in the report, but don't try to
+        # write tags (remuxing mp4/m2ts is destructive and slow). The pipeline
+        # will apply tags when it encodes to MKV.
+        logging.info(f"  Non-MKV — skipping apply (tags saved in report): {Path(filepath).name}")
+        return 0, 0
+
     if use_mkvpropedit:
         return _apply_file_mkvpropedit(filepath, actionable)
     else:
-        if not is_mkv:
-            logging.warning(f"  Non-MKV file — using ffmpeg remux: {Path(filepath).name}")
-        else:
-            logging.info(f"  mkvpropedit not found — falling back to ffmpeg: {Path(filepath).name}")
+        logging.info(f"  mkvpropedit not found — falling back to ffmpeg: {Path(filepath).name}")
         return _apply_file_ffmpeg(filepath, actionable)
 
 
