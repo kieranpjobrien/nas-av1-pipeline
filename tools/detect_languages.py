@@ -745,15 +745,16 @@ def process_file(
                     if detected and detected != "und" and confidence >= 0.5:
                         detected_text_langs[sub_all_idx] = detected
                 else:
-                    # Empty track — no linguistic content
+                    # OCR/text extraction found nothing — leave as und,
+                    # gap filler will strip if non-English
                     text_results.append({
                         "filepath": filepath,
                         "track_type": "subtitle",
                         "stream_index": sub_all_idx,
                         "codec": codec,
-                        "detected_language": "zxx",
-                        "confidence": 1.0,
-                        "method": "empty_track",
+                        "detected_language": None,
+                        "confidence": 0.0,
+                        "method": "text_extraction_empty",
                         "chars_sampled": 0,
                     })
 
@@ -1333,12 +1334,6 @@ def _patch_entry_from_results(
         if lang and lang != "und" and conf >= min_confidence:
             streams[idx]["detected_language"] = lang
             streams[idx]["detection_confidence"] = conf
-            streams[idx]["detection_method"] = method
-            stats["detected"] = stats.get("detected", 0) + 1
-        elif lang == "zxx":
-            # Empty/no-content track — mark so it's not re-attempted
-            streams[idx]["detected_language"] = "zxx"
-            streams[idx]["detection_confidence"] = 1.0
             streams[idx]["detection_method"] = method
             stats["detected"] = stats.get("detected", 0) + 1
         else:
