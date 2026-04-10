@@ -104,8 +104,12 @@ def build_queues(report_path: str, config: dict, state: PipelineState, control: 
     # Sort: full_gamut by priority tier then size desc
     full_gamut_queue.sort(key=lambda x: (x["priority_tier"], -x["file_size_bytes"]))
 
-    # Gap filler: smallest first (fastest wins)
-    gap_filler_queue.sort(key=lambda x: x.get("file_size_bytes", 0))
+    # Gap filler: NAS-only work first (no fetch), then by size
+    # needs_fetch is True only for audio transcode — everything else runs on NAS
+    def _gap_sort_key(entry):
+        gaps = analyse_gaps(entry, config)
+        return (1 if gaps.needs_fetch else 0, entry.get("file_size_bytes", 0))
+    gap_filler_queue.sort(key=_gap_sort_key)
 
     return full_gamut_queue, gap_filler_queue
 
