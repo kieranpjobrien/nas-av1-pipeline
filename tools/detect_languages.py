@@ -149,13 +149,14 @@ def extract_subtitle_text(filepath: str, sub_stream_index: int, max_chars: int =
 def extract_bitmap_subtitle_text(
     filepath: str,
     sub_stream_index: int,
-    sample_frames: int = 10,
+    duration_secs: float = 0,
+    sample_frames: int = 30,
     max_chars: int = 4000,
 ) -> Optional[str]:
     """Extract text from a bitmap subtitle stream (PGS/DVD) via ffmpeg + Tesseract OCR.
 
-    Extracts the first N subtitle frames as PNG images, runs Tesseract on each,
-    and aggregates the text for language detection.
+    Samples from 3 windows across the file (20-30%, 45-55%, 70-80%) to avoid
+    empty opening credits. Extracts ~10 frames per window, runs Tesseract on each.
 
     Returns stripped text or None on failure / if Tesseract is not installed.
     """
@@ -167,33 +168,41 @@ def extract_bitmap_subtitle_text(
     tmp_dir = os.path.join(str(STAGING_DIR), "ocr_tmp", f"{uuid.uuid4().hex[:8]}_{sub_stream_index}")
     os.makedirs(tmp_dir, exist_ok=True)
 
-    try:
-        # Extract subtitle frames as images
-        pattern = os.path.join(tmp_dir, "sub_%04d.png")
-        cmd = [
-            "ffmpeg", "-hide_banner", "-loglevel", "error",
-            "-i", filepath,
-            "-map", f"0:s:{sub_stream_index}",
-            "-t", "300",   # first 5 minutes
-            "-frames:v", str(sample_frames),
-            pattern,
-        ]
-        try:
-            subprocess.run(cmd, capture_output=True, timeout=120)
-        except (subprocess.TimeoutExpired, FileNotFoundError):
-            return None
+    total_dur = max(duration_secs, 600)
+    # 3 windows: 20-30%, 45-55%, 70-80% of the file
+    windows = [
+        (int(total_dur * 0.20), int(total_dur * 0.10)),  # start at 20%, 10% duration
+        (int(total_dur * 0.45), int(total_dur * 0.10)),
+        (int(total_dur * 0.70), int(total_dur * 0.10)),
+    ]
+    frames_per_window = max(sample_frames // 3, 5)
 
-        # Find extracted images
-        images = sorted(
-            f for f in os.listdir(tmp_dir) if f.endswith(".png")
-        )[:sample_frames]
+    try:
+        all_text = []
+        for win_idx, (offset, win_dur) in enumerate(windows):
+            pattern = os.path.join(tmp_dir, f"sub_w{win_idx}_%04d.png")
+            cmd = [
+                "ffmpeg", "-hide_banner", "-loglevel", "error",
+                "-ss", str(offset),
+                "-i", filepath,
+                "-map", f"0:s:{sub_stream_index}",
+                "-t", str(win_dur),
+                "-frames:v", str(frames_per_window),
+                pattern,
+            ]
+            try:
+                subprocess.run(cmd, capture_output=True, timeout=120)
+            except (subprocess.TimeoutExpired, FileNotFoundError):
+                continue
+
+        # Find all extracted images across all windows
+        images = sorted(f for f in os.listdir(tmp_dir) if f.endswith(".png"))
 
         if not images:
             return None
 
         # OCR each image
-        all_text = []
-        for img_name in images:
+        for img_name in images[:sample_frames]:
             img_path = os.path.join(tmp_dir, img_name)
             try:
                 ocr_cmd = [tesseract, img_path, "stdout", "--oem", "3", "--psm", "6"]
@@ -213,7 +222,6 @@ def extract_bitmap_subtitle_text(
         return combined[:max_chars] if combined.strip() else None
 
     finally:
-        # Clean up temp images
         try:
             for f in os.listdir(tmp_dir):
                 os.remove(os.path.join(tmp_dir, f))
@@ -760,7 +768,8 @@ def process_file(
                 continue
 
             # Try OCR first (most accurate for bitmap subs)
-            ocr_text = extract_bitmap_subtitle_text(filepath, sub_all_idx)
+            file_duration = file_entry.get("duration_seconds", 0)
+            ocr_text = extract_bitmap_subtitle_text(filepath, sub_all_idx, duration_secs=file_duration)
             if ocr_text:
                 detected, confidence = detect_language(ocr_text)
                 if detected and detected != "und" and confidence >= 0.5:

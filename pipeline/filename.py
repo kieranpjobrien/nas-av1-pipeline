@@ -37,12 +37,12 @@ _BASE_TAG_PARTS = (
     # HDR / color / bit depth
     r"|SDR|HDR\d*|HDR10\+?|DV|DoVi|Dolby[\s.]?Vision|HLG"
     r"|10bit|8bit|12bit"
-    # Language tags
-    r"|DUAL|MULTi|English|German|POLISH|iTALiAN|FRENCH|SPANISH"
+    # Language tags — case-sensitive via (?-i:) to avoid matching real words like "Italian Dream"
+    r"|(?-i:DUAL|MULTi|ENGLISH|GERMAN|POLISH|iTALiAN|FRENCH|SPANISH"
     r"|NORDiC|DUTCH|SWEDISH|FINNISH|DANISH|NORWEGIAN|CZECH"
     r"|HUNGARIAN|TURKISH|ARABIC|DL"
     r"|PORTUGUESE|RUSSIAN|JAPANESE|KOREAN|CHINESE|HINDI|THAI"
-    r"|ROMANIAN|GREEK|BULGARIAN|CROATIAN|SERBIAN|UKRAINIAN"
+    r"|ROMANIAN|GREEK|BULGARIAN|CROATIAN|SERBIAN|UKRAINIAN)"
     # Release tags
     r"|REPACK\d*|INTERNAL|PROPER|HYBRID|Hybrid"
     r"|EXTENDED|UNRATED|THEATRICAL|IMAX|OPEN[\s.]?MATTE"
@@ -72,8 +72,11 @@ _EDITION_RE = re.compile(
 
 
 def _dots_to_spaces(s: str) -> str:
-    """Replace dots/underscores with spaces, collapse whitespace."""
+    """Replace dots/underscores with spaces, preserving decimal numbers (e.g. 2.5)."""
+    # Protect decimal numbers: "2.5" -> "2DECPT5" then restore after
+    s = re.sub(r"(\d)\.(\d)", r"\1DECPT\2", s)
     s = re.sub(r"[._]+", " ", s)
+    s = s.replace("DECPT", ".")
     return " ".join(s.split())
 
 
@@ -242,9 +245,9 @@ def clean_series_name(stem: str, tag_re: re.Pattern = _TAG_BOUNDARY_RE) -> str |
 
     # Strip trailing tech tokens (after CamelCase split, these may now be separated)
     episode_title = re.sub(r"\s+(?:WEB|H\s*1|H\s*0|0)$", "", episode_title)
-    # Strip concatenated trailing codec remnants: "710NH1" -> "710N", "titleH264" -> "title"
-    # Only match H followed by 0/1/2 + optional digits (H1, H264, H265, H0)
-    episode_title = re.sub(r"(?<=[A-Za-z0-9])H[012]\d*$", "", episode_title)
+    # Strip concatenated trailing codec remnants: "titleH264" -> "title"
+    # Only H264/H265 — single-digit H1/H2 is too ambiguous (e.g. "710N" is a real title)
+    episode_title = re.sub(r"(?<=[a-z])H26[45]$", "", episode_title)
     episode_title = episode_title.rstrip(" -")
 
     # Quality gate: if the cleaned episode title still contains obvious tag junk,
@@ -252,8 +255,8 @@ def clean_series_name(stem: str, tag_re: re.Pattern = _TAG_BOUNDARY_RE) -> str |
     _JUNK_WORDS = re.compile(
         r"\b(Hybrid|DDP|AAC|AC3|TrueHD|Atmos|BluRay|Bluray|HDTV|Dtsa|AVC"
         r"|WebHD|DLWeb|DLAudio|WEBRip|Webrip|REMUX|REPACK|HLG|WEBh264"
-        r"|iTALiAN|MULTi|NORDiC|LPCM|Opus|VP9|MPEG[24]"
-        r"|PORTUGUESE|RUSSIAN|JAPANESE|KOREAN|CHINESE|HINDI)\b",
+        r"|(?-i:iTALiAN|MULTi|NORDiC)|LPCM|Opus|VP9|MPEG[24]"
+        r"|(?-i:PORTUGUESE|RUSSIAN|JAPANESE|KOREAN|CHINESE|HINDI))\b",
         re.IGNORECASE,
     )
     # Catch concatenated junk like "Hybrid1English", "SDR1English", "10+DDP...",
@@ -261,9 +264,9 @@ def clean_series_name(stem: str, tag_re: re.Pattern = _TAG_BOUNDARY_RE) -> str |
     _JUNK_CONCAT = re.compile(
         r"(Hybrid|DDP|AAC|AC3|SDR|HDR|AVC|Atmos|DoVi?|blurayd)\d"
         r"|AC3DL|DLWeb|bluraydd|DD\+\d|\d+Bluray"
-        r"|^\d+\+?\d*[A-Za-z]\w{2,}$"   # pure numeric junk: "10+1English" (letter + 2+ trailing)
-        r"|^German\b|^English\b"       # leading language tag = no real title
-        r"|i\s*TALi|MULTi"             # space-split iTALiAN/MULTi
+        # Removed: ^\d+[A-Z]\w{2,}$ was too aggressive (matched real titles like "710NH1")
+        r"|(?-i:^GERMAN\b|^ENGLISH\b)" # leading language tag = no real title (ALL CAPS only)
+        r"|(?-i:i\s*TALi|MULTi)"       # space-split iTALiAN/MULTi (case-sensitive)
         r"|^Do Vi?\d"                   # DoVi/DV remnant: "Do Vi10Atmos"
         r"|\bp\s*DD"                     # "p DD+5.1" — resolution+audio junk
         r"|^p\s+\w{1,3}$"               # lone "p H" or "p H1" — pure junk
