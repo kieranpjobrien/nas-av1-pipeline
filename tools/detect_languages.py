@@ -553,20 +553,30 @@ def detect_audio_languages_for_file(
             results[aidx] = (None, 0.0)
             continue
 
-        # Tiny on first sample — high confidence = done
-        lang, prob = _whisper_detect_one(tiny, wav_paths[0])
-        if lang and prob >= 0.7:
-            results[aidx] = (lang, prob)
-            continue
-
-        # Low confidence — check remaining samples
-        detections = [(lang, prob)] if lang else []
-        for wp in wav_paths[1:]:
+        # Stage 1: Tiny model on all samples, majority vote
+        detections = []
+        for wp in wav_paths:
             l, p = _whisper_detect_one(tiny, wp)
             if l:
                 detections.append((l, p))
 
-        results[aidx] = _majority_vote(detections)
+        lang, conf = _majority_vote(detections)
+
+        # Stage 2: If low confidence, escalate to small model
+        if not lang or conf < 0.7:
+            small = _get_whisper_model("small")
+            if small:
+                logging.info(f"    Escalating track {aidx} to small model (tiny conf={conf:.2f})")
+                detections_small = []
+                for wp in wav_paths:
+                    l, p = _whisper_detect_one(small, wp)
+                    if l:
+                        detections_small.append((l, p))
+                lang_s, conf_s = _majority_vote(detections_small)
+                if conf_s > conf:
+                    lang, conf = lang_s, conf_s
+
+        results[aidx] = (lang, conf)
 
     # Clean up all temp files
     for wav_list in all_samples.values():
