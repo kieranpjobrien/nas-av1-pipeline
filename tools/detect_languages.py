@@ -936,6 +936,7 @@ def _run_whisper_parallel(
     stats: dict,
     report: dict,
     save_interval: int,
+    retry_unresolved: bool = False,
 ) -> None:
     """Parallel whisper with progressive detection and immediate saves.
 
@@ -958,13 +959,19 @@ def _run_whisper_parallel(
     result_lock = threading.Lock()
     save_lock = threading.Lock()
 
-    # Build work items — skip already-detected tracks
+    # Build work items
     for entry in to_process:
         und_audio = []
         for i, a in enumerate(entry.get("audio_streams", [])):
             lang = (a.get("language") or "und").lower().strip()
             if whisper_all or lang in UND_LANGS:
-                if not whisper_all and (a.get("detection_method") == "whisper" or a.get("whisper_attempted")):
+                if retry_unresolved:
+                    # Only retry tracks that were attempted but unresolved
+                    if not a.get("whisper_attempted"):
+                        continue
+                    # Clear the flag so we retry
+                    a.pop("whisper_attempted", None)
+                elif not whisper_all and (a.get("detection_method") == "whisper" or a.get("whisper_attempted")):
                     continue
                 und_audio.append(i)
         if und_audio:
@@ -1000,6 +1007,23 @@ def _run_whisper_parallel(
             results = {}
 
             for aidx in audio_indices:
+                if retry_unresolved:
+                    # Retry mode: 3×60s at different offsets, small model only
+                    detections = []
+                    for pct in (0.15, 0.45, 0.75):
+                        w = _extract_single_sample(filepath, aidx, int(duration * pct), duration=60)
+                        if w:
+                            l, p = _whisper_detect_one(small or tiny, w)
+                            if l:
+                                detections.append((l, p))
+                            try:
+                                os.remove(w)
+                            except OSError:
+                                pass
+                    lang, conf = _majority_vote(detections)
+                    results[aidx] = (lang, conf)
+                    continue
+
                 # Stage 1: Single sample at 20% (fast)
                 offset1 = int(max(30, duration * 0.2))
                 wav = _extract_single_sample(filepath, aidx, offset1)
@@ -1105,6 +1129,7 @@ def enrich_report(
     whisper_all: bool = False,
     workers: int = 6,
     min_confidence: float = 0.80,
+    retry_unresolved: bool = False,
 ) -> dict:
     """Run language detection on all files and patch results into report entries.
 
@@ -1164,7 +1189,7 @@ def enrich_report(
     if use_whisper:
         logging.info("  Whisper: parallel mode (extract threads + GPU/CPU inference)")
         _run_whisper_parallel(to_process, whisper_all, min_confidence, detection_stats,
-                              report, SAVE_INTERVAL)
+                              report, SAVE_INTERVAL, retry_unresolved=retry_unresolved)
     else:
         with ThreadPoolExecutor(max_workers=workers) as executor:
             futures = {executor.submit(process_file, entry): entry for entry in to_process}
@@ -1412,13 +1437,15 @@ def main():
                         help="Use faster-whisper for audio tracks that heuristics can't resolve")
     parser.add_argument("--whisper-all", action="store_true",
                         help="Run whisper on ALL audio tracks (verify existing tags)")
+    parser.add_argument("--retry-unresolved", action="store_true",
+                        help="Retry previously unresolved whisper tracks with longer samples at different offsets")
     parser.add_argument("--spot-check", type=int, default=0, metavar="N",
                         help="Whisper spot-check: verify N random already-tagged tracks (e.g. --spot-check 200)")
     parser.add_argument("--workers", type=int, default=6,
                         help="Parallel workers for subtitle extraction (default: 6)")
     args = parser.parse_args()
 
-    use_whisper = args.whisper or args.whisper_all or args.spot_check > 0
+    use_whisper = args.whisper or args.whisper_all or args.spot_check > 0 or args.retry_unresolved
 
     # Check pipeline isn't encoding (whisper competes for GPU)
     if use_whisper:
@@ -1504,6 +1531,7 @@ def main():
             whisper_all=args.whisper_all,
             workers=args.workers,
             min_confidence=args.min_confidence,
+            retry_unresolved=getattr(args, "retry_unresolved", False),
         )
         # Reload report after detection (enrich_report saves incrementally)
         report = read_report()

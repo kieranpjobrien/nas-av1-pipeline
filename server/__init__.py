@@ -209,6 +209,10 @@ PROCESS_CONFIGS = {
         "cmd": [sys.executable, "-m", "tools.detect_languages", "--whisper", "--apply", "--min-confidence", "0.85"],
         "cwd": str(Path(__file__).parent.parent),
     },
+    "detect_languages_retry": {
+        "cmd": [sys.executable, "-m", "tools.detect_languages", "--whisper", "--retry-unresolved", "--apply", "--min-confidence", "0.75"],
+        "cwd": str(Path(__file__).parent.parent),
+    },
     "detect_languages_spotcheck": {
         "cmd": [sys.executable, "-m", "tools.detect_languages", "--spot-check", "200"],
         "cwd": str(Path(__file__).parent.parent),
