@@ -929,6 +929,94 @@ def _extract_single_sample(
     return None
 
 
+def _escalating_whisper_detect(
+    filepath: str,
+    aidx: int,
+    duration: float,
+    tiny,
+    small,
+    min_confidence: float,
+) -> tuple[Optional[str], float]:
+    """4-phase escalating whisper detection. Each phase only runs if previous failed.
+
+    Phase 1: 1×30s sample at 20%, tiny model. Fast — resolves ~70% of tracks.
+    Phase 2: 3×30s samples at 20%/45%/75%, tiny model, majority vote.
+    Phase 3: 3×30s samples at 15%/45%/75%, small model, majority vote.
+    Phase 4: 5×120s samples at 10%/25%/50%/70%/90%, small model. Last resort.
+
+    Returns (language, confidence) or (None, 0.0).
+    """
+    fn = os.path.basename(filepath)
+
+    # Phase 1: Quick check — 1 sample, tiny
+    wav = _extract_single_sample(filepath, aidx, int(max(30, duration * 0.2)))
+    if not wav:
+        return (None, 0.0)
+    lang, prob = _whisper_detect_one(tiny, wav)
+    try:
+        os.remove(wav)
+    except OSError:
+        pass
+    if lang and prob >= 0.9:
+        return (lang, prob)
+
+    # Phase 2: 3 samples, tiny, majority vote
+    detections = [(lang, prob)] if lang else []
+    for pct in (0.45, 0.75):
+        w = _extract_single_sample(filepath, aidx, int(duration * pct))
+        if w:
+            l, p = _whisper_detect_one(tiny, w)
+            if l:
+                detections.append((l, p))
+            try:
+                os.remove(w)
+            except OSError:
+                pass
+    lang, conf = _majority_vote(detections)
+    if lang and conf >= min_confidence:
+        return (lang, conf)
+
+    # Phase 3: 3 samples, small model
+    if small:
+        small_dets = []
+        for pct in (0.15, 0.45, 0.75):
+            w = _extract_single_sample(filepath, aidx, int(duration * pct))
+            if w:
+                l, p = _whisper_detect_one(small, w)
+                if l:
+                    small_dets.append((l, p))
+                try:
+                    os.remove(w)
+                except OSError:
+                    pass
+        if small_dets:
+            lang_s, conf_s = _majority_vote(small_dets)
+            if conf_s > (conf or 0):
+                lang, conf = lang_s, conf_s
+        if lang and conf >= min_confidence:
+            return (lang, conf)
+
+    # Phase 4: 5×120s, small model, different offsets — last resort
+    if small:
+        deep_dets = []
+        for pct in (0.1, 0.25, 0.5, 0.7, 0.9):
+            w = _extract_single_sample(filepath, aidx, int(duration * pct), duration=120)
+            if w:
+                l, p = _whisper_detect_one(small, w)
+                if l:
+                    deep_dets.append((l, p))
+                try:
+                    os.remove(w)
+                except OSError:
+                    pass
+        if deep_dets:
+            lang_d, conf_d = _majority_vote(deep_dets)
+            if conf_d > (conf or 0):
+                lang, conf = lang_d, conf_d
+
+    return (lang, conf or 0.0)
+
+
 def _run_whisper_parallel(
     to_process: list[dict],
     whisper_all: bool,
@@ -1007,81 +1095,13 @@ def _run_whisper_parallel(
             results = {}
 
             for aidx in audio_indices:
-                if retry_unresolved:
-                    # Retry mode: 3×60s at different offsets, small model only
-                    detections = []
-                    for pct in (0.15, 0.45, 0.75):
-                        w = _extract_single_sample(filepath, aidx, int(duration * pct), duration=60)
-                        if w:
-                            l, p = _whisper_detect_one(small or tiny, w)
-                            if l:
-                                detections.append((l, p))
-                            try:
-                                os.remove(w)
-                            except OSError:
-                                pass
-                    lang, conf = _majority_vote(detections)
-                    results[aidx] = (lang, conf)
-                    continue
-
-                # Stage 1: Single sample at 20% (fast)
-                offset1 = int(max(30, duration * 0.2))
-                wav = _extract_single_sample(filepath, aidx, offset1)
-                if not wav:
-                    results[aidx] = (None, 0.0)
-                    continue
-
-                lang, prob = _whisper_detect_one(tiny, wav)
-                try:
-                    os.remove(wav)
-                except OSError:
-                    pass
-
-                if lang and prob >= 0.9:
-                    results[aidx] = (lang, prob)
-                    continue
-
-                # Stage 2: Two more samples (40%, 70%), majority vote with tiny
-                extra_wavs = []
-                for pct in (0.4, 0.7):
-                    w = _extract_single_sample(filepath, aidx, int(duration * pct))
-                    if w:
-                        extra_wavs.append(w)
-
-                detections = [(lang, prob)] if lang else []
-                for w in extra_wavs:
-                    l, p = _whisper_detect_one(tiny, w)
-                    if l:
-                        detections.append((l, p))
-                    try:
-                        os.remove(w)
-                    except OSError:
-                        pass
-
-                lang, conf = _majority_vote(detections)
-
-                # Stage 3: Escalate to small model if still uncertain
-                if small and (not lang or conf < 0.7):
-                    # Re-extract (samples were cleaned) — just 2 samples for small
-                    small_dets = []
-                    for pct in (0.25, 0.55):
-                        w = _extract_single_sample(filepath, aidx, int(duration * pct))
-                        if w:
-                            l, p = _whisper_detect_one(small, w)
-                            if l:
-                                small_dets.append((l, p))
-                            try:
-                                os.remove(w)
-                            except OSError:
-                                pass
-                    if small_dets:
-                        lang_s, conf_s = _majority_vote(small_dets)
-                        if conf_s > conf:
-                            lang, conf = lang_s, conf_s
-
+                lang, conf = _escalating_whisper_detect(
+                    filepath, aidx, duration, tiny, small, min_confidence,
+                )
                 results[aidx] = (lang, conf)
 
-            # Patch results into entry
+            # Patch results into entry and apply tags immediately
+            apply_detections = []
             with result_lock:
                 for aidx, (lang, conf) in results.items():
                     streams = entry.get("audio_streams", [])
@@ -1091,6 +1111,12 @@ def _run_whisper_parallel(
                             streams[aidx]["detection_confidence"] = round(conf, 3)
                             streams[aidx]["detection_method"] = "whisper"
                             stats["detected"] = stats.get("detected", 0) + 1
+                            apply_detections.append({
+                                "track_type": "audio",
+                                "stream_index": aidx,
+                                "detected_language": lang,
+                                "confidence": conf,
+                            })
                         else:
                             streams[aidx]["whisper_attempted"] = True
                             stats["failed"] = stats.get("failed", 0) + 1
@@ -1099,11 +1125,18 @@ def _run_whisper_parallel(
                 completed[0] += 1
                 c = completed[0]
 
+            # Apply tags to file immediately (don't batch)
+            if apply_detections and filepath.lower().endswith(".mkv"):
+                try:
+                    apply_detections_for_file(filepath, apply_detections, min_confidence)
+                except Exception:
+                    pass
+
             if c % 5 == 0 or c == actual_total:
                 logging.info(f"  Whisper: {c}/{actual_total} "
                              f"({stats.get('detected', 0)} detected, {stats.get('failed', 0)} unresolved)")
 
-            # Save after EVERY file — never lose progress
+            # Save report after EVERY file — never lose progress
             with save_lock:
                 _incremental_save(report, [entry])
 
