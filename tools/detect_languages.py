@@ -391,7 +391,8 @@ def _extract_all_audio_samples(
     """
     tmp_dir = os.path.join(str(STAGING_DIR), "whisper_tmp")
     os.makedirs(tmp_dir, exist_ok=True)
-    base = f"{os.getpid()}"
+    import threading
+    base = f"{os.getpid()}_{threading.current_thread().ident}"
 
     total = max(duration_secs, 120)
     if sample_duration >= 20:
@@ -428,7 +429,7 @@ def _extract_all_audio_samples(
         result[aidx] = paths
 
     try:
-        subprocess.run(cmd, capture_output=True, timeout=90)
+        subprocess.run(cmd, capture_output=True, timeout=300)
     except (subprocess.TimeoutExpired, FileNotFoundError):
         pass
 
