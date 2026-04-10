@@ -737,14 +737,15 @@ def process_file(
                     if detected and detected != "und" and confidence >= 0.5:
                         detected_text_langs[sub_all_idx] = detected
                 else:
+                    # Empty track — no linguistic content
                     text_results.append({
                         "filepath": filepath,
                         "track_type": "subtitle",
                         "stream_index": sub_all_idx,
                         "codec": codec,
-                        "detected_language": None,
-                        "confidence": 0.0,
-                        "method": "text_extraction_failed",
+                        "detected_language": "zxx",
+                        "confidence": 1.0,
+                        "method": "empty_track",
                         "chars_sampled": 0,
                     })
 
@@ -1190,11 +1191,12 @@ def enrich_report(
             if has_und_audio:
                 to_process.append(entry)
     else:
-        # Text/OCR mode: files with any undetermined tracks
+        # Text/OCR mode: files with undetermined tracks not yet attempted
         to_process = []
         for entry in files:
             has_und = any(
                 (s.get("language") or "und").lower().strip() in UND_LANGS
+                and not s.get("detection_method")  # skip already-attempted tracks
                 for streams in (entry.get("subtitle_streams", []), entry.get("audio_streams", []))
                 for s in streams
             )
@@ -1324,7 +1326,15 @@ def _patch_entry_from_results(
             streams[idx]["detection_confidence"] = conf
             streams[idx]["detection_method"] = method
             stats["detected"] = stats.get("detected", 0) + 1
+        elif lang == "zxx":
+            # Empty/no-content track — mark so it's not re-attempted
+            streams[idx]["detected_language"] = "zxx"
+            streams[idx]["detection_confidence"] = 1.0
+            streams[idx]["detection_method"] = method
+            stats["detected"] = stats.get("detected", 0) + 1
         else:
+            # Mark as attempted so we don't re-try
+            streams[idx]["detection_method"] = method or "failed"
             stats["failed"] = stats.get("failed", 0) + 1
 
 
