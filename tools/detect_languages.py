@@ -898,6 +898,37 @@ def process_file(
 # ---------------------------------------------------------------------------
 
 
+def _extract_single_sample(
+    filepath: str, audio_index: int, offset_secs: int, duration: int = 30,
+) -> Optional[str]:
+    """Extract one audio sample. Fast — single seek, single output."""
+    import threading
+    tmp_dir = os.path.join(str(STAGING_DIR), "whisper_tmp")
+    os.makedirs(tmp_dir, exist_ok=True)
+    base = f"{os.getpid()}_{threading.current_thread().ident}"
+    wav_path = os.path.join(tmp_dir, f"{base}_a{audio_index}_o{offset_secs}.wav")
+
+    try:
+        subprocess.run(
+            ["ffmpeg", "-hide_banner", "-loglevel", "error",
+             "-ss", str(offset_secs), "-i", filepath,
+             "-t", str(duration), "-map", f"0:a:{audio_index}",
+             "-ac", "1", "-ar", "16000", "-y", wav_path],
+            capture_output=True, timeout=120,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return None
+
+    if os.path.exists(wav_path) and os.path.getsize(wav_path) > 10_000:
+        return wav_path
+    # Clean up empty file
+    try:
+        os.remove(wav_path)
+    except OSError:
+        pass
+    return None
+
+
 def _run_whisper_parallel(
     to_process: list[dict],
     whisper_all: bool,
@@ -906,175 +937,160 @@ def _run_whisper_parallel(
     report: dict,
     save_interval: int,
 ) -> None:
-    """Run whisper language detection with parallel extraction and dual inference.
+    """Parallel whisper with progressive detection and immediate saves.
+
+    Strategy per track:
+    1. Extract 1 sample from 20% into the file (fast — single seek)
+    2. Run tiny model — if confidence >= 0.9, done
+    3. If low confidence, extract 2 more samples (40%, 70%), majority vote
+    4. Still low? Escalate to small model on GPU
 
     Architecture:
-    - 4 extractor threads: pull audio samples from NAS concurrently (network-bound)
-    - 1 GPU inference thread: runs tiny model, escalates to small if low confidence
-    - 1 CPU inference thread: runs tiny model only (overflow from GPU)
-    - Both inference threads consume from the same queue
+    - 4 worker threads: each handles a file end-to-end (extract + infer)
+    - GPU tiny + small models shared (thread-safe in faster-whisper)
+    - CPU tiny model for overflow
+    - Save to report after EVERY file
     """
     import queue
     import threading
 
-    # Queues
-    extract_queue: queue.Queue = queue.Queue()  # entries waiting for extraction
-    infer_queue: queue.Queue = queue.Queue(maxsize=20)  # extracted samples ready for inference
-    result_queue: queue.Queue = queue.Queue()  # completed results
-    done_event = threading.Event()
+    work_queue: queue.Queue = queue.Queue()
+    result_lock = threading.Lock()
+    save_lock = threading.Lock()
 
-    total = len(to_process)
-
-    # Pre-fill extract queue
+    # Build work items — skip already-detected tracks
     for entry in to_process:
         und_audio = []
         for i, a in enumerate(entry.get("audio_streams", [])):
             lang = (a.get("language") or "und").lower().strip()
             if whisper_all or lang in UND_LANGS:
-                if not whisper_all and a.get("detection_method") == "whisper":
+                if not whisper_all and (a.get("detection_method") == "whisper" or a.get("whisper_attempted")):
                     continue
                 und_audio.append(i)
         if und_audio:
-            extract_queue.put((entry, und_audio))
+            work_queue.put((entry, und_audio))
 
-    actual_total = extract_queue.qsize()
+    actual_total = work_queue.qsize()
     if actual_total == 0:
         logging.info("  No audio tracks need whisper detection")
         return
 
-    logging.info(f"  {actual_total} files to process, 4 extractors + GPU + CPU inference")
+    logging.info(f"  {actual_total} files to process (progressive: 1 sample -> 3 -> small model)")
 
-    # --- Extractor thread ---
-    def extractor_worker():
-        while not done_event.is_set():
+    # Pre-load models
+    tiny = _get_whisper_model("tiny")
+    small = _get_whisper_model("small")
+    if not tiny:
+        logging.error("  Failed to load whisper model")
+        return
+
+    completed = [0]
+    processed_entries = []
+
+    def worker():
+        while True:
             try:
-                entry, audio_indices = extract_queue.get(timeout=2)
+                entry, audio_indices = work_queue.get(timeout=2)
             except queue.Empty:
-                if extract_queue.empty():
-                    break
-                continue
+                break
 
             filepath = entry["filepath"]
-            duration = entry.get("duration_seconds", 0)
-            try:
-                samples = _extract_all_audio_samples(filepath, audio_indices, duration, sample_duration=30)
-                infer_queue.put((entry, audio_indices, samples))
-            except Exception as e:
-                logging.warning(f"    Extract failed {entry.get('filename', '?')}: {e}")
-                result_queue.put((entry, {}))
-            finally:
-                extract_queue.task_done()
-
-    # --- Inference thread (GPU or CPU) ---
-    def inference_worker(device: str):
-        model = _get_whisper_model("tiny")
-        if not model:
-            return
-        small_model = _get_whisper_model("small") if device == "cuda" else None
-
-        while not done_event.is_set():
-            try:
-                entry, audio_indices, all_samples = infer_queue.get(timeout=2)
-            except queue.Empty:
-                if extract_queue.empty() and infer_queue.empty():
-                    break
-                continue
-
+            duration = entry.get("duration_seconds", 0) or 120
+            filename = entry.get("filename", "?")
             results = {}
+
             for aidx in audio_indices:
-                wav_paths = all_samples.get(aidx, [])
-                if not wav_paths:
+                # Stage 1: Single sample at 20% (fast)
+                offset1 = int(max(30, duration * 0.2))
+                wav = _extract_single_sample(filepath, aidx, offset1)
+                if not wav:
                     results[aidx] = (None, 0.0)
                     continue
 
-                # Tiny on all samples
-                detections = []
-                for wp in wav_paths:
-                    l, p = _whisper_detect_one(model, wp)
+                lang, prob = _whisper_detect_one(tiny, wav)
+                try:
+                    os.remove(wav)
+                except OSError:
+                    pass
+
+                if lang and prob >= 0.9:
+                    results[aidx] = (lang, prob)
+                    continue
+
+                # Stage 2: Two more samples (40%, 70%), majority vote with tiny
+                extra_wavs = []
+                for pct in (0.4, 0.7):
+                    w = _extract_single_sample(filepath, aidx, int(duration * pct))
+                    if w:
+                        extra_wavs.append(w)
+
+                detections = [(lang, prob)] if lang else []
+                for w in extra_wavs:
+                    l, p = _whisper_detect_one(tiny, w)
                     if l:
                         detections.append((l, p))
-
-                lang, conf = _majority_vote(detections)
-
-                # GPU: escalate to small if low confidence
-                if small_model and (not lang or conf < 0.7):
-                    detections_small = []
-                    for wp in wav_paths:
-                        l, p = _whisper_detect_one(small_model, wp)
-                        if l:
-                            detections_small.append((l, p))
-                    lang_s, conf_s = _majority_vote(detections_small)
-                    if conf_s > conf:
-                        lang, conf = lang_s, conf_s
-
-                results[aidx] = (lang, conf)
-
-            # Clean up wav files
-            for wav_list in all_samples.values():
-                for wp in wav_list:
                     try:
-                        os.remove(wp)
+                        os.remove(w)
                     except OSError:
                         pass
 
-            result_queue.put((entry, results))
-            infer_queue.task_done()
+                lang, conf = _majority_vote(detections)
 
-    # Start threads
-    extractors = [threading.Thread(target=extractor_worker, daemon=True, name=f"extract-{i}")
-                  for i in range(4)]
-    gpu_thread = threading.Thread(target=inference_worker, args=("cuda",), daemon=True, name="infer-gpu")
-    cpu_thread = threading.Thread(target=inference_worker, args=("cpu",), daemon=True, name="infer-cpu")
+                # Stage 3: Escalate to small model if still uncertain
+                if small and (not lang or conf < 0.7):
+                    # Re-extract (samples were cleaned) — just 2 samples for small
+                    small_dets = []
+                    for pct in (0.25, 0.55):
+                        w = _extract_single_sample(filepath, aidx, int(duration * pct))
+                        if w:
+                            l, p = _whisper_detect_one(small, w)
+                            if l:
+                                small_dets.append((l, p))
+                            try:
+                                os.remove(w)
+                            except OSError:
+                                pass
+                    if small_dets:
+                        lang_s, conf_s = _majority_vote(small_dets)
+                        if conf_s > conf:
+                            lang, conf = lang_s, conf_s
 
-    for t in extractors:
+                results[aidx] = (lang, conf)
+
+            # Patch results into entry
+            with result_lock:
+                for aidx, (lang, conf) in results.items():
+                    streams = entry.get("audio_streams", [])
+                    if aidx < len(streams):
+                        if lang and lang != "und" and conf >= min_confidence:
+                            streams[aidx]["detected_language"] = lang
+                            streams[aidx]["detection_confidence"] = round(conf, 3)
+                            streams[aidx]["detection_method"] = "whisper"
+                            stats["detected"] = stats.get("detected", 0) + 1
+                        else:
+                            streams[aidx]["whisper_attempted"] = True
+                            stats["failed"] = stats.get("failed", 0) + 1
+
+                processed_entries.append(entry)
+                completed[0] += 1
+                c = completed[0]
+
+            if c % 5 == 0 or c == actual_total:
+                logging.info(f"  Whisper: {c}/{actual_total} "
+                             f"({stats.get('detected', 0)} detected, {stats.get('failed', 0)} unresolved)")
+
+            # Save after EVERY file — never lose progress
+            with save_lock:
+                _incremental_save(report, [entry])
+
+            work_queue.task_done()
+
+    # 4 worker threads — each does extract + infer for one file at a time
+    threads = [threading.Thread(target=worker, daemon=True, name=f"whisper-{i}") for i in range(4)]
+    for t in threads:
         t.start()
-    gpu_thread.start()
-    cpu_thread.start()
-
-    # Collect results
-    completed = 0
-    processed_entries = []
-    while completed < actual_total:
-        try:
-            entry, results = result_queue.get(timeout=30)
-        except queue.Empty:
-            # Check if all threads are dead
-            if not any(t.is_alive() for t in extractors) and not gpu_thread.is_alive() and not cpu_thread.is_alive():
-                break
-            continue
-
-        completed += 1
-
-        # Patch results into entry
-        for aidx, (lang, conf) in results.items():
-            streams = entry.get("audio_streams", [])
-            if aidx < len(streams):
-                if lang and lang != "und" and conf >= min_confidence:
-                    streams[aidx]["detected_language"] = lang
-                    streams[aidx]["detection_confidence"] = round(conf, 3)
-                    streams[aidx]["detection_method"] = "whisper"
-                    stats["detected"] = stats.get("detected", 0) + 1
-                else:
-                    streams[aidx]["whisper_attempted"] = True
-                    stats["failed"] = stats.get("failed", 0) + 1
-
-        processed_entries.append(entry)
-
-        if completed % 10 == 0 or completed == actual_total:
-            logging.info(f"  Whisper progress: {completed}/{actual_total} "
-                         f"({stats.get('detected', 0)} detected, {stats.get('failed', 0)} unresolved)")
-
-        if completed % save_interval == 0:
-            _incremental_save(report, processed_entries)
-
-    # Final save
-    _incremental_save(report, processed_entries)
-
-    done_event.set()
-    for t in extractors:
-        t.join(timeout=5)
-    gpu_thread.join(timeout=5)
-    cpu_thread.join(timeout=5)
+    for t in threads:
+        t.join()
 
     logging.info(f"  Whisper complete: {stats.get('detected', 0)} detected, {stats.get('failed', 0)} unresolved")
 
