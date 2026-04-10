@@ -352,6 +352,14 @@ def _get_whisper_model(size: str = "tiny"):
         return ref
 
     try:
+        # Add NVIDIA dll directories so CUDA runtime libraries are found
+        venv_nvidia = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".venv", "Lib", "site-packages", "nvidia")
+        if os.path.isdir(venv_nvidia):
+            for subdir in ("cublas", "cudnn", "cuda_nvrtc"):
+                bin_dir = os.path.join(venv_nvidia, subdir, "bin")
+                if os.path.isdir(bin_dir):
+                    os.add_dll_directory(bin_dir)
+
         from faster_whisper import WhisperModel
         try:
             model = WhisperModel(size, device="cuda", compute_type="float16")
