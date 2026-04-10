@@ -345,11 +345,7 @@ _whisper_small = None
 
 
 def _get_whisper_model(size: str = "tiny"):
-    """Lazy-load a faster-whisper model. Tiny for fast screening, small for confirmation.
-
-    Uses CPU with int8 quantisation — tiny model runs at ~0.35s per 10s sample
-    on CPU which is fast enough (no CUDA cublas dependency needed).
-    """
+    """Lazy-load a faster-whisper model. Uses CUDA (GPU) with float16, falls back to CPU."""
     global _whisper_tiny, _whisper_small
     ref = _whisper_tiny if size == "tiny" else _whisper_small
     if ref is not None:
@@ -357,8 +353,12 @@ def _get_whisper_model(size: str = "tiny"):
 
     try:
         from faster_whisper import WhisperModel
-        model = WhisperModel(size, device="cpu", compute_type="int8")
-        logging.info(f"Loaded faster-whisper model ({size}, cpu/int8)")
+        try:
+            model = WhisperModel(size, device="cuda", compute_type="float16")
+            logging.info(f"Loaded faster-whisper model ({size}, cuda/float16)")
+        except Exception:
+            model = WhisperModel(size, device="cpu", compute_type="int8")
+            logging.info(f"Loaded faster-whisper model ({size}, cpu/int8 fallback)")
     except Exception as e:
         logging.error(f"Failed to load whisper model {size}: {e}")
         return None
@@ -535,8 +535,8 @@ def detect_audio_languages_for_file(
     previously failed tracks).
     Returns {audio_index: (lang, confidence), ...}.
     """
-    sample_dur = 30 if aggressive else 10
-    n_samples = 5 if aggressive else 3
+    sample_dur = 30
+    n_samples = 5
     logging.info(f"    Extracting {len(audio_indices)} tracks × {n_samples} samples ({sample_dur}s each)...")
     all_samples = _extract_all_audio_samples(filepath, audio_indices, duration_secs, sample_duration=sample_dur)
     extracted = sum(len(v) for v in all_samples.values())
