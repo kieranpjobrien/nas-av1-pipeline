@@ -14,6 +14,8 @@ import signal
 import threading
 import time
 
+from typing import Optional
+
 from pipeline.config import get_res_key
 from pipeline.ffmpeg import format_bytes, format_duration
 from pipeline.full_gamut import full_gamut, finalize_upload
@@ -37,6 +39,7 @@ class Orchestrator:
         self._gpu_available = threading.Event()     # set when GPU is free
         self._gpu_available.set()                   # starts available
         self._force_gpu_queue = queue_mod.Queue()   # force items needing GPU
+        self._gpu_wants: Optional[str] = None       # filepath the GPU is waiting on — network fetches this first
 
         signal.signal(signal.SIGTERM, self._handle_signal)
         signal.signal(signal.SIGINT, self._handle_signal)
@@ -129,6 +132,9 @@ class Orchestrator:
             while self.control.is_encode_paused() and not self._shutdown.is_set():
                 self._shutdown.wait(timeout=5)
 
+            # Tell the network worker what we need fetched
+            self._gpu_wants = filepath
+
             tag = "FORCE" if is_force else f"GPU {processed}/{len(queue)}"
             logging.info(f"\n[{tag}] {item.get('tier_name', '?')} | "
                          f"{item['filename']} ({format_bytes(item.get('file_size_bytes', 0))})")
@@ -149,8 +155,10 @@ class Orchestrator:
                         self.state.stats["errors"] = self.state.stats.get("errors", 0) + 1
                         self.state.save()
 
+            self._gpu_wants = None
             self._gpu_available.set()
 
+        self._gpu_wants = None
         self._gpu_available.set()
         logging.info("GPU worker finished")
 
@@ -194,8 +202,9 @@ class Orchestrator:
 
         Priority order:
         1. Upload encoded files (frees local space, completes pipeline for that file)
-        2. Fetch force items (user priority)
-        3. Fetch next from queue (keep GPU fed)
+        2. Fetch what the GPU is waiting on (never starve the GPU)
+        3. Fetch force items (user priority)
+        4. Fetch next from queue (pre-fetch ahead)
         """
         logging.info("Network worker started")
         max_buffer = self.config.get("max_fetch_buffer_bytes", 2000 * 1024**3)
@@ -220,7 +229,22 @@ class Orchestrator:
                 self._shutdown.wait(timeout=5)
                 continue
 
-            # === Priority 2: Fetch force items ===
+            # === Priority 2: Fetch what the GPU is blocked on ===
+            gpu_wants = self._gpu_wants
+            if gpu_wants:
+                existing = self.state.get_file(gpu_wants)
+                status = existing["status"] if existing else None
+                if status in (None, FileStatus.PENDING.value):
+                    entry = self._lookup_file(gpu_wants)
+                    if not entry:
+                        entry = {"filepath": gpu_wants, "filename": os.path.basename(gpu_wants),
+                                 "file_size_bytes": 0, "library_type": "movie" if "Movies" in gpu_wants else "series"}
+                    result = fetch_file(entry, self.staging_dir, self.config, self.state)
+                    if result is not None:
+                        did_work = True
+                        continue
+
+            # === Priority 3: Fetch force items ===
             force_items = self.control.get_force_items()
             for fp in force_items:
                 if self._shutdown.is_set():
