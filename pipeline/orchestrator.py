@@ -68,6 +68,20 @@ class Orchestrator:
         if reset_count:
             logging.info(f"  Reset {reset_count} stale entries from previous run")
 
+        # Clean orphaned fetch/encoded files from previous runs
+        for subdir in ("fetch", "encoded"):
+            d = os.path.join(self.staging_dir, subdir)
+            if os.path.isdir(d):
+                cleaned = 0
+                for f in os.listdir(d):
+                    try:
+                        os.remove(os.path.join(d, f))
+                        cleaned += 1
+                    except OSError:
+                        pass
+                if cleaned:
+                    logging.info(f"  Cleaned {cleaned} orphaned files from {subdir}/")
+
         self.state.compact()
         full_gamut_queue = self.control.apply_queue_overrides(full_gamut_queue)
         gap_filler_queue = self.control.apply_queue_overrides(gap_filler_queue)
