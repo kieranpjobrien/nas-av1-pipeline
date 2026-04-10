@@ -227,7 +227,6 @@ export function ControlPage({ wsControl }) {
       <ProcessRow name="tmdb_enrich" label="TMDb Metadata (report + files)" startLabel="Enrich" onFlash={showFlash} />
       <ProcessRow name="detect_languages" label="Language Detection + Apply (Text + OCR)" startLabel="Detect + Apply" onFlash={showFlash} />
       <ProcessRow name="detect_languages_whisper" label="Language Detection + Apply (Whisper)" startLabel="Detect + Apply (GPU)" onFlash={showFlash} badge="uses GPU" />
-      <ProcessRow name="detect_languages_retry" label="Retry Unresolved (Whisper, longer samples)" startLabel="Retry (GPU)" onFlash={showFlash} badge="uses GPU" />
 
       {/* Diagnostics */}
       <div style={{ marginTop: 16, marginBottom: 4, color: PALETTE.textMuted, fontSize: 11, fontWeight: 600, textTransform: "uppercase", letterSpacing: 1 }}>Diagnostics</div>
