@@ -326,10 +326,17 @@ class Orchestrator:
     # =========================================================================
 
     def _gap_filler_worker(self, queue: list[dict]):
-        """CPU-only cleanup. Grabs GPU between encodes for whisper language detection."""
-        logging.info(f"Gap filler started: {len(queue)} items")
+        """CPU/NAS cleanup running alongside GPU encoding.
+
+        Does everything that doesn't need the GPU: track stripping, sub muxing,
+        metadata writing, filename cleaning, foreign sub deletion. All directly
+        on the NAS via mkvmerge/mkvpropedit. Skips whisper language detection
+        (run that separately from the dashboard).
+        """
+        logging.info(f"Gap filler started: {len(queue)} items (running alongside encoder)")
         dispatched: set[str] = set()
         processed = 0
+        skipped_lang = 0
 
         while not self._shutdown.is_set():
             item = self._pick_next_gap(queue, dispatched)
@@ -344,67 +351,33 @@ class Orchestrator:
             processed += 1
 
             gaps = analyse_gaps(item, self.config)
+
+            # Skip items that ONLY need language detection — that's whisper territory
+            if gaps.needs_language_detect and not (
+                gaps.needs_track_removal or gaps.needs_sub_mux or
+                gaps.needs_audio_transcode or gaps.needs_metadata or
+                gaps.needs_filename_clean or gaps.needs_foreign_sub_cleanup
+            ):
+                skipped_lang += 1
+                continue
+
+            # Clear language detect flag — we're not doing whisper here
+            gaps.needs_language_detect = False
+
             if not gaps.needs_anything:
                 self.state.set_file(filepath, FileStatus.DONE, mode="gap_filler", reason="clean")
                 continue
 
             logging.info(f"\n[GAP {processed}/{len(queue)}] {gaps.describe()} | {item['filename']}")
 
-            # If this item needs whisper (language detection), we need the GPU.
-            # Wait for GPU to be available (between encodes), then grab it.
-            if gaps.needs_language_detect:
-                # Do CPU work first while waiting
-                cpu_gaps = _cpu_only_gaps(gaps)
-                if cpu_gaps.needs_anything:
-                    logging.info(f"  CPU work while waiting for GPU...")
-                    gap_fill(filepath, item, cpu_gaps, self.config, self.state)
-
-                # Now wait for and acquire GPU for whisper
-                logging.info(f"  Waiting for GPU (whisper)...")
-                while not self._gpu_available.wait(timeout=2):
-                    if self._shutdown.is_set():
-                        break
-                    if self._gpu_preempt.is_set():
-                        break  # force next preempted us
-
-                if self._shutdown.is_set():
-                    break
-
-                if not self._gpu_preempt.is_set():
-                    # We got the GPU — do whisper
-                    self._gpu_available.clear()
-                    with self._gpu_lock:
-                        logging.info(f"  GPU acquired for whisper")
-                        # Re-analyse with whisper enabled
-                        from pipeline.language import detect_all_languages
-                        try:
-                            enriched = detect_all_languages(item, use_whisper=True)
-                            if enriched:
-                                item.update(enriched)
-                                gaps = analyse_gaps(item, self.config)
-                        except Exception as e:
-                            logging.warning(f"  Whisper failed: {e}")
-                    self._gpu_available.set()
-
-                    # Now do remaining gap fill with detected languages
-                    if gaps.needs_anything:
-                        gap_fill(filepath, item, gaps, self.config, self.state)
-                    else:
-                        self.state.set_file(filepath, FileStatus.DONE, mode="gap_filler")
-                else:
-                    # Preempted by force next — defer this item
-                    self._gpu_preempt.clear()
-                    dispatched.discard(filepath)
-                    logging.info(f"  Preempted by Force Next, deferring")
-                    continue
-            else:
-                # No GPU needed — just do it
-                gap_fill(filepath, item, gaps, self.config, self.state)
+            gap_fill(filepath, item, gaps, self.config, self.state)
 
             if not self.state.get_file(filepath) or self.state.get_file(filepath).get("status") == "error":
                 self.state.stats["errors"] = self.state.stats.get("errors", 0) + 1
                 self.state.save()
 
+        if skipped_lang:
+            logging.info(f"Gap filler: skipped {skipped_lang} files needing only language detection (run whisper separately)")
         logging.info("Gap filler finished")
 
     # =========================================================================
@@ -495,18 +468,3 @@ class Orchestrator:
         return None
 
 
-def _cpu_only_gaps(gaps):
-    """Return a copy of gaps with GPU-requiring work stripped out."""
-    from pipeline.gap_filler import GapAnalysis
-    cpu = GapAnalysis(
-        needs_track_removal=gaps.needs_track_removal,
-        needs_audio_transcode=False,  # audio transcode is CPU but let's bundle it with whisper
-        needs_metadata=gaps.needs_metadata,
-        needs_filename_clean=gaps.needs_filename_clean,
-        needs_language_detect=False,  # whisper needs GPU
-        audio_keep_indices=gaps.audio_keep_indices[:],
-        sub_keep_indices=gaps.sub_keep_indices[:],
-        audio_transcode_indices=[],
-        clean_name=gaps.clean_name,
-    )
-    return cpu

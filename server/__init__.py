@@ -157,7 +157,7 @@ PROCESS_CONFIGS = {
         "cwd": str(Path(__file__).parent.parent),
     },
     "pipeline": {
-        "cmd": [sys.executable, "-m", "pipeline", "--no-gap-filler"],
+        "cmd": [sys.executable, "-m", "pipeline"],
         "cwd": str(Path(__file__).parent.parent),
     },
     "gap_filler": {
