@@ -59,10 +59,12 @@ class GapAnalysis:
     needs_filename_clean: bool = False
     needs_language_detect: bool = False
     needs_sub_mux: bool = False
+    needs_foreign_sub_cleanup: bool = False
     audio_keep_indices: list[int] = field(default_factory=list)
     sub_keep_indices: list[int] = field(default_factory=list)
     audio_transcode_indices: list[int] = field(default_factory=list)
     external_subs: list[str] = field(default_factory=list)
+    foreign_external_subs: list[str] = field(default_factory=list)
     clean_name: Optional[str] = None
 
     @property
@@ -74,7 +76,8 @@ class GapAnalysis:
     def needs_anything(self) -> bool:
         return (self.needs_track_removal or self.needs_audio_transcode or
                 self.needs_metadata or self.needs_filename_clean or
-                self.needs_language_detect or self.needs_sub_mux)
+                self.needs_language_detect or self.needs_sub_mux or
+                self.needs_foreign_sub_cleanup)
 
     def describe(self) -> str:
         parts = []
@@ -82,6 +85,8 @@ class GapAnalysis:
             parts.append("strip tracks")
         if self.needs_sub_mux:
             parts.append(f"mux {len(self.external_subs)} subs")
+        if self.needs_foreign_sub_cleanup:
+            parts.append(f"delete {len(self.foreign_external_subs)} foreign subs")
         if self.needs_audio_transcode:
             parts.append("transcode audio")
         if self.needs_metadata:
@@ -166,16 +171,22 @@ def analyse_gaps(file_entry: dict, config: dict) -> GapAnalysis:
     source_dir = os.path.dirname(filepath)
     stem = Path(filepath).stem
     sub_exts = {".srt", ".ass", ".ssa", ".sub"}
+    eng_tokens = {".en.", ".eng.", ".en-", ".eng-"}
+    foreign_ext_subs = []
     try:
         for f in os.listdir(source_dir):
             ext = Path(f).suffix.lower()
             if ext in sub_exts and f.startswith(stem[:20]):
-                # Only English subs
                 fl = f.lower()
-                if ".en." in fl or ".eng." in fl:
+                if any(t in fl for t in eng_tokens):
                     gaps.external_subs.append(os.path.join(source_dir, f))
+                else:
+                    foreign_ext_subs.append(os.path.join(source_dir, f))
     except OSError:
         pass
+    if foreign_ext_subs:
+        gaps.foreign_external_subs = foreign_ext_subs
+        gaps.needs_foreign_sub_cleanup = True
     if gaps.external_subs:
         gaps.needs_sub_mux = True
 
@@ -229,9 +240,18 @@ def gap_fill(
                 for sub_path in gaps.external_subs:
                     try:
                         os.remove(sub_path)
-                        logging.info(f"  Removed external sub: {os.path.basename(sub_path)}")
+                        logging.info(f"  Muxed and removed: {os.path.basename(sub_path)}")
                     except OSError:
                         pass
+
+        # Delete foreign external subs (not muxed, just cleaned up)
+        if gaps.needs_foreign_sub_cleanup:
+            for sub_path in gaps.foreign_external_subs:
+                try:
+                    os.remove(sub_path)
+                    logging.info(f"  Deleted foreign sub: {os.path.basename(sub_path)}")
+                except OSError:
+                    pass
 
         # Audio transcode (needs fetch + ffmpeg)
         elif gaps.needs_audio_transcode:
