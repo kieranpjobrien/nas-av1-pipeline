@@ -249,6 +249,11 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
     # === Replace original (crash-safe) ===
     backup_path = filepath + ".original.bak"
     try:
+        # If clean-named target already exists (e.g. from a previous encode of a
+        # duplicate scene-tagged file), delete it first so rename succeeds
+        if os.path.exists(final_path) and final_path != filepath:
+            os.remove(final_path)
+            logging.info(f"  Removed existing target: {final_name}")
         if os.path.exists(filepath) and not os.path.exists(backup_path):
             os.rename(filepath, backup_path)
         if os.path.exists(dest_path):
