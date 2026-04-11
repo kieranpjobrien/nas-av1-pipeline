@@ -1130,7 +1130,13 @@ function FilteredFileList({ files, title, onFileClick, onClose, statusMap }) {
               <span style={{ color: getCodecColour(f.video?.codec) }}>{f.video?.codec || "?"}</span>
               <span style={{ color: PALETTE.textMuted }}>{f.video?.resolution_class || "?"}</span>
               <span style={{ color: PALETTE.textMuted }}>{fmt(f.file_size_gb)}</span>
-              <StatusBadge status={statusMap?.[f.filepath]} />
+              <StatusBadge status={
+                // Don't show DONE if the file still needs encoding (non-AV1)
+                (f.video?.codec_raw || f.video?.codec || "").toLowerCase() !== "av1"
+                && ["done", "replaced", "verified", "completed"].includes((statusMap?.[f.filepath] || "").toLowerCase())
+                  ? null
+                  : statusMap?.[f.filepath]
+              } />
             </span>
           </div>
         ))}
