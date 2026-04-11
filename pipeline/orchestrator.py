@@ -71,13 +71,16 @@ class Orchestrator:
         done_rows = self.state._conn.execute(
             "SELECT filepath FROM pipeline_files WHERE status = 'done'"
         ).fetchall()
-        ghost_count = 0
-        for (fp,) in done_rows:
-            if not os.path.exists(fp):
+        if done_rows:
+            from concurrent.futures import ThreadPoolExecutor
+            paths = [fp for (fp,) in done_rows]
+            with ThreadPoolExecutor(max_workers=16) as pool:
+                existence = list(pool.map(os.path.exists, paths))
+            ghosts = [p for p, exists in zip(paths, existence) if not exists]
+            for fp in ghosts:
                 self.state._conn.execute("DELETE FROM pipeline_files WHERE filepath = ?", (fp,))
-                ghost_count += 1
-        if ghost_count:
-            logging.info(f"  Removed {ghost_count} ghost entries (files renamed/deleted)")
+            if ghosts:
+                logging.info(f"  Removed {len(ghosts)} ghost entries (files renamed/deleted)")
 
         self.state._conn.commit()
 
