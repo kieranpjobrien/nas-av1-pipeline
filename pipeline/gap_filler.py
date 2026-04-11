@@ -98,6 +98,29 @@ class GapAnalysis:
         return " + ".join(parts) if parts else "nothing"
 
 
+def _scan_external_subs(filepath: str, gaps: GapAnalysis) -> None:
+    """Scan for external subtitle files next to the MKV. Called lazily during gap_fill."""
+    source_dir = os.path.dirname(filepath)
+    stem = Path(filepath).stem
+    sub_exts = {".srt", ".ass", ".ssa", ".sub"}
+    eng_tokens = {".en.", ".eng.", ".en-", ".eng-"}
+    try:
+        for f in os.listdir(source_dir):
+            ext = Path(f).suffix.lower()
+            if ext in sub_exts and f.startswith(stem[:20]):
+                fl = f.lower()
+                if any(t in fl for t in eng_tokens):
+                    gaps.external_subs.append(os.path.join(source_dir, f))
+                else:
+                    gaps.foreign_external_subs.append(os.path.join(source_dir, f))
+    except OSError:
+        pass
+    if gaps.external_subs:
+        gaps.needs_sub_mux = True
+    if gaps.foreign_external_subs:
+        gaps.needs_foreign_sub_cleanup = True
+
+
 def analyse_gaps(file_entry: dict, config: dict) -> GapAnalysis:
     """Analyse what an already-AV1 file needs to be fully done."""
     gaps = GapAnalysis()
@@ -166,27 +189,9 @@ def analyse_gaps(file_entry: dict, config: dict) -> GapAnalysis:
             gaps.needs_language_detect = True
             break
 
-    # External subtitle check — Bazarr downloads .srt/.ass next to the file
-    filepath = file_entry.get("filepath", "")
-    source_dir = os.path.dirname(filepath)
-    stem = Path(filepath).stem
-    sub_exts = {".srt", ".ass", ".ssa", ".sub"}
-    eng_tokens = {".en.", ".eng.", ".en-", ".eng-"}
-    foreign_ext_subs = []
-    try:
-        for f in os.listdir(source_dir):
-            ext = Path(f).suffix.lower()
-            if ext in sub_exts and f.startswith(stem[:20]):
-                fl = f.lower()
-                if any(t in fl for t in eng_tokens):
-                    gaps.external_subs.append(os.path.join(source_dir, f))
-                else:
-                    foreign_ext_subs.append(os.path.join(source_dir, f))
-    except OSError:
-        pass
-    if foreign_ext_subs:
-        gaps.foreign_external_subs = foreign_ext_subs
-        gaps.needs_foreign_sub_cleanup = True
+    # External subtitle check — deferred to gap_fill() to avoid slow NAS scans
+    # during queue building. Set a flag so gap_fill knows to check.
+    gaps._check_external_subs = True
     if gaps.external_subs:
         gaps.needs_sub_mux = True
 
@@ -207,6 +212,10 @@ def gap_fill(
     """
     filename = file_entry["filename"]
     library_type = file_entry.get("library_type", "")
+
+    # Deferred external sub check (avoids slow NAS scans during queue building)
+    if getattr(gaps, '_check_external_subs', False):
+        _scan_external_subs(filepath, gaps)
 
     if not gaps.needs_anything:
         state.set_file(filepath, FileStatus.DONE, mode="gap_filler", reason="nothing to do")
