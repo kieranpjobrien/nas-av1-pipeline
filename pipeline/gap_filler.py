@@ -58,9 +58,11 @@ class GapAnalysis:
     needs_metadata: bool = False
     needs_filename_clean: bool = False
     needs_language_detect: bool = False
+    needs_sub_mux: bool = False
     audio_keep_indices: list[int] = field(default_factory=list)
     sub_keep_indices: list[int] = field(default_factory=list)
     audio_transcode_indices: list[int] = field(default_factory=list)
+    external_subs: list[str] = field(default_factory=list)
     clean_name: Optional[str] = None
 
     @property
@@ -72,12 +74,14 @@ class GapAnalysis:
     def needs_anything(self) -> bool:
         return (self.needs_track_removal or self.needs_audio_transcode or
                 self.needs_metadata or self.needs_filename_clean or
-                self.needs_language_detect)
+                self.needs_language_detect or self.needs_sub_mux)
 
     def describe(self) -> str:
         parts = []
         if self.needs_track_removal:
             parts.append("strip tracks")
+        if self.needs_sub_mux:
+            parts.append(f"mux {len(self.external_subs)} subs")
         if self.needs_audio_transcode:
             parts.append("transcode audio")
         if self.needs_metadata:
@@ -157,6 +161,24 @@ def analyse_gaps(file_entry: dict, config: dict) -> GapAnalysis:
             gaps.needs_language_detect = True
             break
 
+    # External subtitle check — Bazarr downloads .srt/.ass next to the file
+    filepath = file_entry.get("filepath", "")
+    source_dir = os.path.dirname(filepath)
+    stem = Path(filepath).stem
+    sub_exts = {".srt", ".ass", ".ssa", ".sub"}
+    try:
+        for f in os.listdir(source_dir):
+            ext = Path(f).suffix.lower()
+            if ext in sub_exts and f.startswith(stem[:20]):
+                # Only English subs
+                fl = f.lower()
+                if ".en." in fl or ".eng." in fl:
+                    gaps.external_subs.append(os.path.join(source_dir, f))
+    except OSError:
+        pass
+    if gaps.external_subs:
+        gaps.needs_sub_mux = True
+
     return gaps
 
 
@@ -196,12 +218,20 @@ def gap_fill(
             except Exception as e:
                 logging.warning(f"  Language detection failed: {e}")
 
-        # Track removal (mkvmerge on NAS — no fetch)
-        if gaps.needs_track_removal and not gaps.needs_audio_transcode:
+        # Track removal and/or sub muxing (mkvmerge on NAS — no fetch)
+        if (gaps.needs_track_removal or gaps.needs_sub_mux) and not gaps.needs_audio_transcode:
             success = _strip_tracks_on_nas(filepath, gaps)
             if not success:
                 state.set_file(filepath, FileStatus.ERROR, error="track strip failed", stage="gap_fill")
                 return False
+            # Delete external sub files after successful mux
+            if gaps.needs_sub_mux:
+                for sub_path in gaps.external_subs:
+                    try:
+                        os.remove(sub_path)
+                        logging.info(f"  Removed external sub: {os.path.basename(sub_path)}")
+                    except OSError:
+                        pass
 
         # Audio transcode (needs fetch + ffmpeg)
         elif gaps.needs_audio_transcode:
@@ -265,6 +295,15 @@ def _strip_tracks_on_nas(filepath: str, gaps: GapAnalysis) -> bool:
         cmd.extend(["--no-subtitles"])
 
     cmd.append(filepath)
+
+    # Add external subtitle files as additional inputs
+    for sub_path in gaps.external_subs:
+        # Parse language from filename (e.g. Movie.en.srt -> eng)
+        lang = "eng"
+        fl = os.path.basename(sub_path).lower()
+        if ".en." in fl or ".eng." in fl:
+            lang = "eng"
+        cmd.extend(["--language", f"0:{lang}", sub_path])
 
     try:
         src_size = os.path.getsize(filepath)

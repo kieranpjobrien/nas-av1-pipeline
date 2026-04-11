@@ -136,8 +136,38 @@ def _map_subtitle_streams(cmd: list[str], item: dict, config: dict) -> None:
         logging.info(f"  Stripped {stripped} non-English subtitle stream(s)")
 
 
+def _parse_sub_language(filepath: str) -> str:
+    """Extract language code from Bazarr subtitle filename.
+
+    Patterns: Movie.en.srt, Movie.en.hi.srt, Movie.en.forced.srt
+    Returns ISO 639 code or 'eng' as default.
+    """
+    from pathlib import Path
+    stem = Path(filepath).stem  # e.g. "Movie (2020).en.hi"
+    parts = stem.rsplit(".", 3)
+    # Walk backwards through dot-separated parts looking for a 2-3 char lang code
+    lang_codes = {"en", "eng", "fr", "fre", "de", "deu", "ger", "es", "spa", "it", "ita",
+                  "pt", "por", "nl", "nld", "dut", "ja", "jpn", "ko", "kor", "zh", "zho",
+                  "chi", "ru", "rus", "ar", "ara", "hi", "hin", "sv", "swe", "no", "nor",
+                  "da", "dan", "fi", "fin", "pl", "pol", "tr", "tur", "cs", "ces", "cze",
+                  "hu", "hun", "ro", "ron", "rum", "el", "ell", "gre", "he", "heb",
+                  "th", "tha", "vi", "vie", "id", "ind", "ms", "msa", "may"}
+    forced = False
+    hi = False
+    for part in reversed(parts[1:]):  # skip the main title
+        p = part.lower()
+        if p == "hi" or p == "sdh":
+            hi = True
+        elif p == "forced":
+            forced = True
+        elif p in lang_codes:
+            return p
+    return "eng"
+
+
 def build_ffmpeg_cmd(input_path: str, output_path: str, item: dict, config: dict,
-                     include_subs: bool = True) -> list[str]:
+                     include_subs: bool = True,
+                     external_subs: list[str] | None = None) -> list[str]:
     """Build the ffmpeg command for NVENC AV1 encoding."""
     is_hdr = item.get("hdr", False)
     params = resolve_encode_params(config, item)
@@ -152,10 +182,16 @@ def build_ffmpeg_cmd(input_path: str, output_path: str, item: dict, config: dict
         "ffmpeg", "-y",
         "-err_detect", "ignore_err",  # continue past corrupt data in input
         "-i", input_path,
-        # Map only the first video stream. Audio and subs are mapped selectively below.
-        # Excludes data streams, cover art (mjpeg/bmp), and other junk.
-        "-map", "0:v:0",
     ]
+
+    # Add external subtitle files as additional inputs
+    if external_subs:
+        for sub_path in external_subs:
+            cmd.extend(["-i", sub_path])
+
+    # Map only the first video stream from input 0
+    cmd.extend(["-map", "0:v:0"])
+
     # Audio stream mapping
     if audio_keep is not None:
         for idx in audio_keep:
@@ -165,6 +201,11 @@ def build_ffmpeg_cmd(input_path: str, output_path: str, item: dict, config: dict
 
     if include_subs:
         _map_subtitle_streams(cmd, item, config)
+
+    # Map external subtitle inputs (inputs 1, 2, 3, ...)
+    if external_subs:
+        for i in range(len(external_subs)):
+            cmd.extend(["-map", f"{i + 1}:s"])
 
     # Video: NVENC AV1
     cmd.extend([
@@ -246,6 +287,19 @@ def build_ffmpeg_cmd(input_path: str, output_path: str, item: dict, config: dict
     # Subtitles: copy all (when mapped)
     if include_subs:
         cmd.extend(["-c:s", "copy"])
+
+    # Set language metadata for external subtitle streams
+    if external_subs:
+        # Count internal subtitle streams to get the right output index
+        internal_sub_count = len(item.get("subtitle_streams", [])) if include_subs else 0
+        for i, sub_path in enumerate(external_subs):
+            lang = _parse_sub_language(sub_path)
+            out_idx = internal_sub_count + i
+            cmd.extend([f"-metadata:s:s:{out_idx}", f"language={lang}"])
+            # Mark hearing-impaired subs
+            basename = os.path.basename(sub_path).lower()
+            if ".hi." in basename or ".sdh." in basename:
+                cmd.extend([f"-disposition:s:{out_idx}", "hearing_impaired"])
 
     # Strip encoder metadata bloat (scene group tags, encoder info)
     cmd.extend(["-map_metadata", "-1"])

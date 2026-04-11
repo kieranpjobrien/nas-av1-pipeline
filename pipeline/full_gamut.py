@@ -125,11 +125,16 @@ def full_gamut(
             if remuxed_path:
                 actual_input = remuxed_path
 
-        # Build the ONE ffmpeg command
+        # Build the ONE ffmpeg command (including external subs from Bazarr)
         encode_start = time.time()
-        # TODO: integrate external_subs into ffmpeg command (add -i and -map for each)
+        # Filter external subs to English only (en, eng) — don't mux foreign subs
+        eng_external = [s for s in external_subs
+                        if any(t in os.path.basename(s).lower().rsplit('.', 3)
+                               for t in ('.en.', '.eng.'))]
+        if eng_external:
+            logging.info(f"  Muxing {len(eng_external)} external English subtitle(s)")
         cmd = build_ffmpeg_cmd(actual_input, output_path, item, config,
-                               include_subs=True)
+                               include_subs=True, external_subs=eng_external or None)
 
         logging.info(f"  Encoding: AV1 + EAC-3 audio + strip foreign tracks")
         res_key = get_res_key(item)
