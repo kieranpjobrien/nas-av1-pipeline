@@ -64,9 +64,22 @@ class Orchestrator:
             "WHERE status NOT IN (?, ?)",
             ("pending", "done", "pending")
         ).rowcount
-        self.state._conn.commit()
         if reset_count:
             logging.info(f"  Reset {reset_count} stale entries from previous run")
+
+        # Remove ghost 'done' entries where the source file no longer exists (renamed/deleted)
+        done_rows = self.state._conn.execute(
+            "SELECT filepath FROM pipeline_files WHERE status = 'done'"
+        ).fetchall()
+        ghost_count = 0
+        for (fp,) in done_rows:
+            if not os.path.exists(fp):
+                self.state._conn.execute("DELETE FROM pipeline_files WHERE filepath = ?", (fp,))
+                ghost_count += 1
+        if ghost_count:
+            logging.info(f"  Removed {ghost_count} ghost entries (files renamed/deleted)")
+
+        self.state._conn.commit()
 
         # Clean orphaned fetch/encoded files from previous runs
         for subdir in ("fetch", "encoded"):
