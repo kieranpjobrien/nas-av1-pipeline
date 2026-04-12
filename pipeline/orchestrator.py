@@ -329,69 +329,71 @@ class Orchestrator:
     # =========================================================================
 
     def _gap_filler_worker(self, queue: list[dict]):
-        """Parallel gap filler — 3 workers doing NAS cleanup alongside GPU encoding.
+        """Parallel gap filler with separate pools for heavy and light work.
 
-        Each worker picks a file, does mkvmerge/mkvpropedit on the NAS directly.
-        Multiple mkvmerge processes running concurrently saturate NAS I/O better
-        than a single sequential worker (benchmark: 40 MB/s single → 114 MB/s with 4).
+        3 mkvmerge workers: track stripping, sub muxing (heavy NAS I/O)
+        2 quick workers: rename, metadata, foreign sub delete (instant)
+
+        Items are triaged by what they need — instant ops don't queue behind
+        2-minute mkvmerge operations.
         """
         import queue as queue_mod
 
-        work_queue: queue_mod.Queue = queue_mod.Queue()
-        dispatched_lock = threading.Lock()
-        dispatched: set[str] = set()
+        heavy_queue: queue_mod.Queue = queue_mod.Queue()  # mkvmerge ops
+        quick_queue: queue_mod.Queue = queue_mod.Queue()  # instant ops
+        stats_lock = threading.Lock()
         processed = [0]
         skipped_lang = [0]
-        total = len(queue)
 
-        # Pre-filter queue: skip items that only need language detection
+        # Triage: analyse each item and route to the right queue
         for item in queue:
             filepath = item["filepath"]
             existing = self.state.get_file(filepath)
             status = existing["status"] if existing else None
             if status in (FileStatus.DONE.value, FileStatus.ERROR.value):
                 continue
-            work_queue.put(item)
 
-        actual_total = work_queue.qsize()
-        logging.info(f"Gap filler started: {actual_total} items, 3 workers (running alongside encoder)")
+            gaps = analyse_gaps(item, self.config)
 
-        def worker(worker_id: int):
+            # Skip items that ONLY need language detection
+            if gaps.needs_language_detect and not (
+                gaps.needs_track_removal or gaps.needs_sub_mux or
+                gaps.needs_audio_transcode or gaps.needs_metadata or
+                gaps.needs_filename_clean or gaps.needs_foreign_sub_cleanup
+            ):
+                skipped_lang[0] += 1
+                continue
+
+            gaps.needs_language_detect = False
+
+            if not gaps.needs_anything:
+                self.state.set_file(filepath, FileStatus.DONE, mode="gap_filler", reason="clean")
+                continue
+
+            # Route: heavy (mkvmerge) vs quick (rename/metadata/delete)
+            if gaps.needs_track_removal or gaps.needs_sub_mux or gaps.needs_audio_transcode:
+                heavy_queue.put((item, gaps))
+            else:
+                quick_queue.put((item, gaps))
+
+        heavy_total = heavy_queue.qsize()
+        quick_total = quick_queue.qsize()
+        total = heavy_total + quick_total
+        logging.info(f"Gap filler started: {heavy_total} heavy (mkvmerge) + {quick_total} quick (rename/meta/delete)")
+
+        def worker(name: str, q: queue_mod.Queue):
             while not self._shutdown.is_set():
                 try:
-                    item = work_queue.get(timeout=2)
+                    item, gaps = q.get(timeout=2)
                 except queue_mod.Empty:
                     break
 
                 filepath = item["filepath"]
-                with dispatched_lock:
-                    if filepath in dispatched:
-                        work_queue.task_done()
-                        continue
-                    dispatched.add(filepath)
+                with stats_lock:
+                    processed[0] += 1
+                    p = processed[0]
 
-                gaps = analyse_gaps(item, self.config)
-
-                # Skip items that ONLY need language detection
-                if gaps.needs_language_detect and not (
-                    gaps.needs_track_removal or gaps.needs_sub_mux or
-                    gaps.needs_audio_transcode or gaps.needs_metadata or
-                    gaps.needs_filename_clean or gaps.needs_foreign_sub_cleanup
-                ):
-                    skipped_lang[0] += 1
-                    work_queue.task_done()
-                    continue
-
-                gaps.needs_language_detect = False
-
-                if not gaps.needs_anything:
-                    self.state.set_file(filepath, FileStatus.DONE, mode="gap_filler", reason="clean")
-                    work_queue.task_done()
-                    continue
-
-                processed[0] += 1
-                p = processed[0]
-                logging.info(f"\n[GAP {p}/{actual_total}] {gaps.describe()} | {item['filename']}")
+                logging.info(f"[{name} {p}/{total}] {gaps.describe()} | {item['filename']}")
 
                 gap_fill(filepath, item, gaps, self.config, self.state)
 
@@ -399,14 +401,18 @@ class Orchestrator:
                     self.state.stats["errors"] = self.state.stats.get("errors", 0) + 1
                     self.state.save()
 
-                work_queue.task_done()
+                q.task_done()
 
-        workers = [threading.Thread(target=worker, args=(i,), daemon=True, name=f"gap-{i}")
-                   for i in range(3)]
-        for w in workers:
-            w.start()
-        for w in workers:
-            w.join()
+        threads = []
+        for i in range(3):
+            threads.append(threading.Thread(target=worker, args=(f"MKV-{i}", heavy_queue), daemon=True))
+        for i in range(2):
+            threads.append(threading.Thread(target=worker, args=(f"QUICK-{i}", quick_queue), daemon=True))
+
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
 
         if skipped_lang[0]:
             logging.info(f"Gap filler: skipped {skipped_lang[0]} files needing only language detection")
