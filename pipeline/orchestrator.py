@@ -443,16 +443,41 @@ class Orchestrator:
 
                 # Rename
                 if gaps.needs_filename_clean and gaps.clean_name:
+                    old_path = filepath
                     new_path = _rename_file(filepath, gaps.clean_name)
                     if new_path:
                         filepath = new_path
                         filename = gaps.clean_name
+                        # Patch report with new path/filename
+                        try:
+                            from tools.report_lock import read_report, write_report
+                            rpt = read_report()
+                            for entry in rpt.get("files", []):
+                                if entry.get("filepath") == old_path:
+                                    entry["filepath"] = new_path
+                                    entry["filename"] = gaps.clean_name
+                                    break
+                            write_report(rpt)
+                        except Exception:
+                            pass
 
                 # TMDb metadata
                 if gaps.needs_metadata:
                     try:
                         from pipeline.metadata import enrich_and_tag
-                        enrich_and_tag(filepath, filename, library_type)
+                        tmdb_data = enrich_and_tag(filepath, filename, library_type)
+                        # Patch TMDb directly into the report (update_entry doesn't read MKV tags)
+                        if tmdb_data:
+                            from tools.report_lock import read_report, write_report
+                            try:
+                                rpt = read_report()
+                                for entry in rpt.get("files", []):
+                                    if entry.get("filepath") == filepath or entry.get("filepath") == item.get("filepath"):
+                                        entry["tmdb"] = tmdb_data
+                                        break
+                                write_report(rpt)
+                            except Exception:
+                                pass
                     except Exception:
                         pass
 
@@ -468,8 +493,8 @@ class Orchestrator:
                 try:
                     from pipeline.report import update_entry
                     update_entry(filepath, library_type)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logging.warning(f"  Report update failed for {filename}: {e}")
 
                 quick_queue.task_done()
 
