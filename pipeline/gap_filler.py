@@ -14,6 +14,7 @@ import logging
 import os
 import shutil
 import subprocess
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -48,6 +49,52 @@ def _find_tool(name: str, search_paths: list[str]) -> Optional[str]:
         if os.path.isfile(path):
             return path
     return None
+
+
+# Drive letter mapping for mkvmerge/mkvpropedit (they don't support UNC paths)
+_drive_map_lock = threading.Lock()
+_mapped_drive: Optional[str] = None
+_mapped_share: Optional[str] = None
+
+
+def _unc_to_mapped(filepath: str) -> tuple[str, bool]:
+    """Convert a UNC path to a mapped drive path for mkvmerge.
+
+    Returns (mapped_path, was_mapped). If already a local path, returns as-is.
+    The mapping is shared across all workers and persists for the session.
+    """
+    global _mapped_drive, _mapped_share
+
+    if not filepath.startswith("\\\\"):
+        return filepath, False
+
+    # Extract share: \\server\share
+    parts = filepath.split(os.sep)
+    if len(parts) < 5:
+        return filepath, False
+    share = os.sep + os.sep + parts[2] + os.sep + parts[3]
+    rest = os.sep.join(parts[4:])
+
+    with _drive_map_lock:
+        if _mapped_share == share and _mapped_drive:
+            return _mapped_drive + os.sep + rest, True
+
+        # Find a free drive letter
+        import string as string_mod
+        for letter in "MNOPQRSTUVWXYZ":
+            if not os.path.exists(letter + ":" + os.sep):
+                drive = letter + ":"
+                result = subprocess.run(
+                    ["net", "use", drive, share],
+                    capture_output=True, text=True, timeout=10,
+                )
+                if result.returncode == 0:
+                    _mapped_drive = drive
+                    _mapped_share = share
+                    logging.info(f"  Mapped {share} -> {drive}")
+                    return drive + os.sep + rest, True
+
+    return filepath, False
 
 
 @dataclass
@@ -332,7 +379,9 @@ def _strip_tracks_on_nas(filepath: str, gaps: GapAnalysis) -> bool:
         logging.error("mkvmerge not found — cannot strip tracks")
         return False
 
-    tmp_path = filepath + ".gapfill_tmp.mkv"
+    # Map UNC paths — mkvmerge doesn't support UNC
+    mapped_fp, was_mapped = _unc_to_mapped(filepath)
+    tmp_path = mapped_fp + ".gapfill_tmp.mkv"
     cmd = [mkvmerge, "-o", tmp_path]
 
     # Audio track selection
@@ -345,24 +394,25 @@ def _strip_tracks_on_nas(filepath: str, gaps: GapAnalysis) -> bool:
     elif not gaps.sub_keep_indices and gaps.needs_track_removal:
         cmd.extend(["--no-subtitles"])
 
-    cmd.append(filepath)
+    cmd.append(mapped_fp)
 
     # Add external subtitle files as additional inputs
     for sub_path in gaps.external_subs:
-        # Parse language from filename (e.g. Movie.en.srt -> eng)
+        mapped_sub, _ = _unc_to_mapped(sub_path)
         lang = "eng"
         fl = os.path.basename(sub_path).lower()
         if ".en." in fl or ".eng." in fl:
             lang = "eng"
-        cmd.extend(["--language", f"0:{lang}", sub_path])
+        cmd.extend(["--language", f"0:{lang}", mapped_sub])
 
     try:
-        src_size = os.path.getsize(filepath)
+        src_size = os.path.getsize(mapped_fp)
         timeout = max(600, int(src_size / (2 * 1024 * 1024)))  # 10 min minimum, shares NAS with network worker
 
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         if result.returncode >= 2:
-            logging.error(f"  mkvmerge failed: {result.stderr[:200]}")
+            err = result.stderr.strip() or result.stdout.strip()
+            logging.error(f"  mkvmerge failed: {err[:200]}")
             return False
 
         if not os.path.exists(tmp_path):
@@ -374,7 +424,7 @@ def _strip_tracks_on_nas(filepath: str, gaps: GapAnalysis) -> bool:
             os.remove(tmp_path)
             return False
 
-        os.replace(tmp_path, filepath)
+        os.replace(tmp_path, mapped_fp)
         saved = src_size - dst_size
         logging.info(f"  Stripped tracks: {format_bytes(src_size)} -> {format_bytes(dst_size)} "
                      f"({format_bytes(abs(saved))} {'saved' if saved > 0 else 'added'})")
