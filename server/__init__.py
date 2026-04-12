@@ -413,6 +413,7 @@ def get_library_completion():
         "av1": 0,
         "eac3_done": 0,
         "subs_done": 0,
+        "no_foreign_subs": 0,
         "fully_done": 0,
         "needs_video": 0,
         "needs_audio": 0,
@@ -440,15 +441,23 @@ def get_library_completion():
 
         audio_ok = audio_codec_ok and audio_clean
 
-        # Subs: has at least one English sub (not just "all subs are English/und")
+        # Subs: exactly one English sub track
         eng_sub_langs = {"eng", "en", "english"}
         sub_streams = f.get("subtitle_streams", [])
-        has_english_sub = any(
-            (s.get("language") or s.get("detected_language") or "").lower().strip() in eng_sub_langs
-            for s in sub_streams
+        eng_sub_count = sum(
+            1 for s in sub_streams
+            if (s.get("language") or s.get("detected_language") or "").lower().strip() in eng_sub_langs
         )
-        # Also OK if no subs at all and no external subs exist
-        subs_ok = has_english_sub
+        has_one_eng_sub = eng_sub_count == 1
+
+        # Foreign subs: any non-English, non-und subs remaining
+        non_eng_subs = sum(
+            1 for s in sub_streams
+            if (s.get("language") or s.get("detected_language") or "und").lower().strip() not in keep_langs
+        )
+        no_foreign_subs = non_eng_subs == 0
+
+        subs_ok = has_one_eng_sub and no_foreign_subs
 
         if is_av1:
             counts["av1"] += 1
@@ -465,7 +474,9 @@ def get_library_completion():
 
         if subs_ok:
             counts["subs_done"] += 1
-        elif is_av1:
+        if no_foreign_subs:
+            counts["no_foreign_subs"] += 1
+        if not subs_ok and is_av1:
             counts["needs_subs"] += 1
             if audio_ok:
                 counts["quick_wins_subs"].append(fp)
@@ -476,6 +487,7 @@ def get_library_completion():
     counts["pct_video"] = round(100 * counts["av1"] / total, 1) if total else 0
     counts["pct_audio"] = round(100 * counts["eac3_done"] / total, 1) if total else 0
     counts["pct_subs"] = round(100 * counts["subs_done"] / total, 1) if total else 0
+    counts["pct_no_foreign_subs"] = round(100 * counts["no_foreign_subs"] / total, 1) if total else 0
     counts["pct_done"] = round(100 * counts["fully_done"] / total, 1) if total else 0
     counts["quick_wins_audio_count"] = len(counts["quick_wins_audio"])
     counts["quick_wins_subs_count"] = len(counts["quick_wins_subs"])
