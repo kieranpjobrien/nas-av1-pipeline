@@ -79,13 +79,26 @@ def _unc_to_mapped(filepath: str) -> tuple[str, bool]:
         if _mapped_share == share and _mapped_drive:
             return _mapped_drive + os.sep + rest, True
 
-        # Find a free drive letter
-        import string as string_mod
+        # Check if an existing mapping already covers this share
+        try:
+            net_result = subprocess.run(
+                ["net", "use"], capture_output=True, text=True, timeout=10,
+            )
+            for line in net_result.stdout.splitlines():
+                parts = line.split()
+                if len(parts) >= 3 and parts[1].endswith(":") and parts[2].lower() == share.lower():
+                    _mapped_drive = parts[1]
+                    _mapped_share = share
+                    return _mapped_drive + os.sep + rest, True
+        except Exception:
+            pass
+
+        # Find a free drive letter and map it
         for letter in "MNOPQRSTUVWXYZ":
             if not os.path.exists(letter + ":" + os.sep):
                 drive = letter + ":"
                 result = subprocess.run(
-                    ["net", "use", drive, share],
+                    ["net", "use", drive, share, "/persistent:no"],
                     capture_output=True, text=True, timeout=10,
                 )
                 if result.returncode == 0:
@@ -412,7 +425,7 @@ def _strip_tracks_on_nas(filepath: str, gaps: GapAnalysis) -> bool:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         if result.returncode >= 2:
             err = result.stderr.strip() or result.stdout.strip()
-            logging.error(f"  mkvmerge failed: {err[:200]}")
+            logging.error(f"  mkvmerge failed: {err[:500]}")
             return False
 
         if not os.path.exists(tmp_path):
