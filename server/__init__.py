@@ -441,13 +441,14 @@ def get_library_completion():
 
         audio_ok = audio_codec_ok and audio_clean
 
-        # Subs: has at least one English sub (regular or HI both count)
+        # Subs: exactly one English sub (regular, not HI — HI should be stripped)
         eng_sub_langs = {"eng", "en", "english"}
         sub_streams = f.get("subtitle_streams", [])
-        has_eng_sub = any(
-            (s.get("language") or s.get("detected_language") or "").lower().strip() in eng_sub_langs
-            for s in sub_streams
+        eng_sub_count = sum(
+            1 for s in sub_streams
+            if (s.get("language") or s.get("detected_language") or "").lower().strip() in eng_sub_langs
         )
+        has_one_eng_sub = eng_sub_count == 1
 
         # Foreign subs: any non-English, non-und subs remaining
         non_eng_subs = sum(
@@ -456,7 +457,7 @@ def get_library_completion():
         )
         no_foreign_subs = non_eng_subs == 0
 
-        subs_ok = has_eng_sub and no_foreign_subs
+        subs_ok = has_one_eng_sub and no_foreign_subs
 
         if is_av1:
             counts["av1"] += 1

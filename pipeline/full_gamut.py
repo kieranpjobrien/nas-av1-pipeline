@@ -127,10 +127,15 @@ def full_gamut(
 
         # Build the ONE ffmpeg command (including external subs from Bazarr)
         encode_start = time.time()
-        # Filter external subs to English only (en, eng) — don't mux foreign subs
-        eng_external = [s for s in external_subs
-                        if any(t in os.path.basename(s).lower().rsplit('.', 3)
-                               for t in ('.en.', '.eng.'))]
+        # Filter external subs: only regular English (not HI) — 1 sub per file
+        eng_external = []
+        for s in external_subs:
+            fn = os.path.basename(s).lower()
+            is_eng = '.en.' in fn or '.eng.' in fn
+            is_hi = '.hi.' in fn or '.sdh.' in fn
+            if is_eng and not is_hi:
+                eng_external.append(s)
+                break  # only 1 regular English sub
         if eng_external:
             logging.info(f"  Muxing {len(eng_external)} external English subtitle(s)")
         cmd = build_ffmpeg_cmd(actual_input, output_path, item, config,

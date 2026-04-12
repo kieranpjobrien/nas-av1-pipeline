@@ -118,15 +118,23 @@ def _map_subtitle_streams(cmd: list[str], item: dict, config: dict) -> None:
         cmd.extend(["-map", "0:s?"])  # no metadata — let ffmpeg figure it out
         return
 
+    # Keep exactly 1 regular English sub + forced. Strip HI, duplicates, foreign.
+    eng_langs = {"eng", "en", "english"}
     mapped = 0
+    found_regular_eng = False
     for i, sub in enumerate(subs):
         lang = (sub.get("language") or "").lower().strip()
         title = (sub.get("title") or "").lower()
-        # Keep English/und subs, plus any marked as "forced" (foreign dialogue translations)
         is_forced = "forced" in title or "foreign" in title
-        if lang in _KEEP_LANGS or is_forced:
+        is_hi = "hearing" in title or "sdh" in title or ".hi" in title
+
+        if is_forced:
             cmd.extend(["-map", f"0:s:{i}"])
             mapped += 1
+        elif lang in eng_langs and not is_hi and not found_regular_eng:
+            cmd.extend(["-map", f"0:s:{i}"])
+            mapped += 1
+            found_regular_eng = True
 
     if mapped == 0:
         # No English subs found — map all to be safe (might have unlabelled ones)

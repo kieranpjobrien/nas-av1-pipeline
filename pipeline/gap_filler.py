@@ -164,14 +164,20 @@ def _scan_external_subs(filepath: str, gaps: GapAnalysis) -> None:
     stem = Path(filepath).stem
     sub_exts = {".srt", ".ass", ".ssa", ".sub"}
     eng_tokens = {".en.", ".eng.", ".en-", ".eng-"}
+    hi_tokens = {".hi.", ".sdh."}
+    found_regular_eng = False
     try:
         for f in os.listdir(source_dir):
             ext = Path(f).suffix.lower()
             if ext in sub_exts and f.startswith(stem[:20]):
                 fl = f.lower()
-                if any(t in fl for t in eng_tokens):
+                is_eng = any(t in fl for t in eng_tokens)
+                is_hi = any(t in fl for t in hi_tokens)
+                if is_eng and not is_hi and not found_regular_eng:
                     gaps.external_subs.append(os.path.join(source_dir, f))
+                    found_regular_eng = True
                 else:
+                    # HI, foreign, or duplicate English — all go to cleanup
                     gaps.foreign_external_subs.append(os.path.join(source_dir, f))
     except OSError:
         pass
@@ -211,14 +217,24 @@ def analyse_gaps(file_entry: dict, config: dict) -> GapAnalysis:
             gaps.needs_track_removal = True
             gaps.audio_keep_indices = clean_audio_keep
 
-    # Foreign subtitle check
+    # Subtitle selection: keep exactly 1 regular English sub + forced/foreign parts
+    # Strip: HI subs, duplicate English subs, all non-English subs
+    eng_sub_langs = {"eng", "en", "english"}
     sub_keep = []
+    found_regular_eng = False
     for i, s in enumerate(sub_streams):
         lang = (s.get("language") or s.get("detected_language") or "und").lower().strip()
         title = (s.get("title") or "").lower()
         is_forced = "forced" in title or "foreign" in title
-        if lang in _KEEP_LANGS or is_forced:
-            sub_keep.append(i)
+        is_hi = "hearing" in title or "sdh" in title or ".hi" in title
+
+        if is_forced:
+            sub_keep.append(i)  # always keep forced/foreign parts subs
+        elif lang in eng_sub_langs and not is_hi and not found_regular_eng:
+            sub_keep.append(i)  # keep first regular English sub
+            found_regular_eng = True
+        # Everything else (HI, non-English, duplicate English, und) gets stripped
+
     if len(sub_keep) < len(sub_streams):
         gaps.needs_track_removal = True
     gaps.sub_keep_indices = sub_keep
