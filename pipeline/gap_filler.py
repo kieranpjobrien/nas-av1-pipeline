@@ -213,6 +213,22 @@ def gap_fill(
     filename = file_entry["filename"]
     library_type = file_entry.get("library_type", "")
 
+    # Verify file still exists (may have been renamed by another worker)
+    if not os.path.exists(filepath):
+        # Try the clean name in the same directory
+        if gaps.clean_name:
+            alt_path = os.path.join(os.path.dirname(filepath), gaps.clean_name)
+            if os.path.exists(alt_path):
+                filepath = alt_path
+                filename = gaps.clean_name
+                gaps.needs_filename_clean = False  # already clean
+            else:
+                logging.warning(f"  File not found (renamed?): {filename}")
+                return True  # not an error, just already handled
+        else:
+            logging.warning(f"  File not found: {filename}")
+            return True
+
     # Deferred external sub check (avoids slow NAS scans during queue building)
     if getattr(gaps, '_check_external_subs', False):
         _scan_external_subs(filepath, gaps)
@@ -307,6 +323,10 @@ def _strip_tracks_on_nas(filepath: str, gaps: GapAnalysis) -> bool:
 
     No fetch needed — mkvmerge reads and writes on the NAS path.
     """
+    if not os.path.exists(filepath):
+        logging.error(f"  Track strip failed: file not found: {os.path.basename(filepath)}")
+        return False
+
     mkvmerge = _find_tool("mkvmerge", _MKVMERGE_SEARCH)
     if not mkvmerge:
         logging.error("mkvmerge not found — cannot strip tracks")
