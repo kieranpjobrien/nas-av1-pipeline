@@ -436,7 +436,7 @@ def _strip_tracks_on_nas(filepath: str, gaps: GapAnalysis) -> bool:
 
     try:
         src_size = os.path.getsize(mapped_fp)
-        timeout = max(600, int(src_size / (2 * 1024 * 1024)))  # 10 min minimum, shares NAS with network worker
+        timeout = max(900, int(src_size / (1024 * 1024)))  # 15 min minimum, 1s per MB (NAS shared with 3 workers + network)
 
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         if result.returncode >= 2:
