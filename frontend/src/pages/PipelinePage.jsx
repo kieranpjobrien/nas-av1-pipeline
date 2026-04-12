@@ -135,9 +135,10 @@ function getActiveFiles(data) {
     const filename = path.split(/[\\/]/).pop();
     const item = { path, filename, elapsed: age, last_updated: info.last_updated, info };
 
-    if (s === "processing" && stage === "encoding") {
+    if (s === "processing" && mode === "full_gamut") {
+      const label = stage === "encoding" ? "ENCODING" : stage === "language_detect" ? "DETECTING" : "PROCESSING";
       if (!threads.encoding || (item.last_updated || "") > (threads.encoding.last_updated || ""))
-        threads.encoding = { ...item, thread: "ENCODING", colour: PALETTE.accent };
+        threads.encoding = { ...item, thread: label, colour: PALETTE.accent };
     } else if (s === "fetching") {
       if (!threads.fetching || (item.last_updated || "") > (threads.fetching.last_updated || ""))
         threads.fetching = { ...item, thread: "FETCHING", colour: PALETTE.cyan || "#22d3ee" };
