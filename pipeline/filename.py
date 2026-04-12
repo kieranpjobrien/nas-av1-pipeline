@@ -362,7 +362,13 @@ def clean_filename(filepath: str, library_type: str) -> str | None:
     else:
         return None
 
-    if clean_stem is None or clean_stem == stem:
+    if clean_stem is None:
+        return None
+
+    # Strip trailing lone brackets/hyphens left by aggressive cleaning
+    clean_stem = re.sub(r"\s*[\(\[\-]+\s*$", "", clean_stem).rstrip()
+
+    if clean_stem == stem:
         return None
 
     return f"{clean_stem}{ext}"

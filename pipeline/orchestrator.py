@@ -390,7 +390,20 @@ class Orchestrator:
     # =========================================================================
 
     def _pick_next(self, queue: list[dict], dispatched: set[str]) -> dict | None:
-        """Pick next item from full gamut queue."""
+        """Pick next item from full gamut queue. Prefers already-fetched files."""
+        # First pass: find a file that's already fetched (status=PROCESSING, local file exists)
+        for item in queue:
+            fp = item["filepath"]
+            if fp in dispatched:
+                continue
+            existing = self.state.get_file(fp)
+            status = existing["status"] if existing else None
+            if status == FileStatus.PROCESSING.value:
+                local = existing.get("local_path")
+                if local and os.path.exists(local):
+                    return item
+
+        # Second pass: pick next pending file (will need fetching)
         for item in queue:
             fp = item["filepath"]
             if fp in dispatched:
@@ -399,9 +412,7 @@ class Orchestrator:
                 continue
             existing = self.state.get_file(fp)
             status = existing["status"] if existing else None
-            if status in (FileStatus.DONE.value, FileStatus.ERROR.value):
-                continue
-            if status == FileStatus.PROCESSING.value:
+            if status in (FileStatus.DONE.value, FileStatus.ERROR.value, FileStatus.PROCESSING.value):
                 continue
             return item
         return None
