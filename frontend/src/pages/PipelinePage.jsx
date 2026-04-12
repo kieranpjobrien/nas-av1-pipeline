@@ -486,7 +486,7 @@ export function PipelinePage({ wsData, onFileClick }) {
               {[
                 { key: "video", label: "AV1 Video", pct: completion.pct_video, count: completion.av1, colour: PALETTE.accent },
                 { key: "audio", label: "EAC-3 Audio", pct: completion.pct_audio, count: completion.eac3_done, colour: PALETTE.cyan || "#22d3ee" },
-                { key: "subs", label: "1 Eng Sub", pct: completion.pct_subs, count: completion.subs_done, colour: "#a78bfa" },
+                { key: "subs", label: "Eng Sub", pct: completion.pct_subs, count: completion.subs_done, colour: "#a78bfa" },
                 { key: "foreign_subs", label: "No Foreign Subs", pct: completion.pct_no_foreign_subs || 0, count: completion.no_foreign_subs || 0, colour: "#c084fc" },
                 { key: "tmdb", label: "TMDb Metadata", pct: completion.pct_tmdb || 0, count: completion.has_tmdb || 0, colour: "#f59e0b" },
                 { key: "langs", label: "Langs Known", pct: completion.pct_langs_known || 0, count: completion.total - (completion.und_audio_files || 0) - (completion.und_sub_files || 0), colour: "#10b981" },
