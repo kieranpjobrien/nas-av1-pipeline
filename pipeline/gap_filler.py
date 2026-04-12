@@ -291,6 +291,8 @@ def gap_fill(
             logging.warning(f"  Report update failed: {e}")
 
         state.set_file(filepath, FileStatus.DONE, mode="gap_filler")
+        state.stats["gap_filled"] = state.stats.get("gap_filled", 0) + 1
+        state.save()
         logging.info(f"  DONE: Gap filled: {filename}")
         return True
 
@@ -336,7 +338,7 @@ def _strip_tracks_on_nas(filepath: str, gaps: GapAnalysis) -> bool:
 
     try:
         src_size = os.path.getsize(filepath)
-        timeout = max(300, int(src_size / (5 * 1024 * 1024)))  # 5 min minimum, 1s per 5MB
+        timeout = max(600, int(src_size / (2 * 1024 * 1024)))  # 10 min minimum, shares NAS with network worker
 
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         if result.returncode >= 2:

@@ -116,44 +116,56 @@ function getErrors(files) {
 
 function getActiveFiles(data) {
   const files = data.files || {};
-  const active = [];
-  const recentlyDone = [];
   const nowSecs = Date.now() / 1000;
-  // Stale threshold: if last_updated is older than 5 min, the entry is from a crashed run
   const STALE_SECS = 300;
+
+  // Categorise by thread type
+  const threads = { encoding: null, fetching: null, uploading: null, gap_fill: null };
+  const recentlyDone = [];
 
   for (const [path, info] of Object.entries(files)) {
     const s = (info.status || "").toLowerCase();
     const stage = (info.stage || "").toLowerCase();
-    const lastUpdatedSecs = info.last_updated
-      ? new Date(info.last_updated).getTime() / 1000
-      : null;
+    const mode = (info.mode || "").toLowerCase();
+    const lastUpdatedSecs = info.last_updated ? new Date(info.last_updated).getTime() / 1000 : null;
     const age = lastUpdatedSecs ? nowSecs - lastUpdatedSecs : null;
 
-    // Skip stale entries (from crashed pipeline runs)
     if (age !== null && age > STALE_SECS && s !== "done") continue;
 
-    // Map status + stage to display label
-    let label = s;
-    if (s === "processing" && stage === "encoding") label = "encoding";
-    else if (s === "processing" && stage === "language_detect") label = "detecting languages";
-    else if (s === "processing") label = "processing";
-    else if (s === "uploading" && stage === "pending_upload") label = "awaiting upload";
-    else if (s === "uploading" && stage === "upload") label = "uploading";
-    else if (s === "uploading" && stage === "verify") label = "verifying";
-    else if (s === "uploading" && stage === "replace") label = "replacing";
+    const filename = path.split(/[\\/]/).pop();
+    const item = { path, filename, elapsed: age, last_updated: info.last_updated, info };
 
-    if (["fetching", "processing", "uploading"].includes(s)) {
-      active.push({ path, status: label, elapsed: age, last_updated: info.last_updated });
-    } else if (s === "done" && age !== null && age < 60) {
-      recentlyDone.push({ path, status: "done", elapsed: age, last_updated: info.last_updated, done: true });
+    if (s === "processing" && stage === "encoding") {
+      if (!threads.encoding || (item.last_updated || "") > (threads.encoding.last_updated || ""))
+        threads.encoding = { ...item, thread: "ENCODING", colour: PALETTE.accent };
+    } else if (s === "fetching") {
+      if (!threads.fetching || (item.last_updated || "") > (threads.fetching.last_updated || ""))
+        threads.fetching = { ...item, thread: "FETCHING", colour: PALETTE.cyan || "#22d3ee" };
+    } else if (s === "uploading" && stage === "pending_upload") {
+      if (!threads.uploading || (item.last_updated || "") > (threads.uploading.last_updated || ""))
+        threads.uploading = { ...item, thread: "AWAITING UPLOAD", colour: "#f97316" };
+    } else if (s === "uploading" && (stage === "upload" || stage === "verify" || stage === "replace")) {
+      if (!threads.uploading || (item.last_updated || "") > (threads.uploading.last_updated || ""))
+        threads.uploading = { ...item, thread: stage === "upload" ? "UPLOADING" : stage === "verify" ? "VERIFYING" : "REPLACING", colour: PALETTE.cyan || "#22d3ee" };
+    } else if (s === "processing" && (mode === "gap_filler" || stage === "gap_fill")) {
+      if (!threads.gap_fill || (item.last_updated || "") > (threads.gap_fill.last_updated || ""))
+        threads.gap_fill = { ...item, thread: "GAP FILL", colour: "#eab308" };
+    } else if (s === "done" && age !== null && age < 120) {
+      recentlyDone.push({ ...item, thread: "DONE", colour: PALETTE.green, done: true });
     }
   }
 
-  active.sort((a, b) => (b.last_updated || "").localeCompare(a.last_updated || ""));
   recentlyDone.sort((a, b) => (b.last_updated || "").localeCompare(a.last_updated || ""));
 
-  return [...active, ...recentlyDone.slice(0, 8)];
+  // Build ordered list: encoding first, then fetching, uploading, gap fill, done
+  const result = [];
+  if (threads.encoding) result.push(threads.encoding);
+  if (threads.fetching) result.push(threads.fetching);
+  if (threads.uploading) result.push(threads.uploading);
+  if (threads.gap_fill) result.push(threads.gap_fill);
+  result.push(...recentlyDone.slice(0, 3));
+
+  return result;
 }
 
 function getUpNext(data, priorityPaths, limit = 15) {
@@ -525,62 +537,79 @@ export function PipelinePage({ wsData, onFileClick }) {
           </div>
         )}
 
-        {/* Stats row */}
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 10, marginTop: 16, justifyContent: "center" }}>
-          {/* Cached */}
-          {(() => {
-            const fetchedFiles = Object.values(files).filter(f => (f.status || "").toLowerCase() === "fetched");
-            const fetchedCount = fetchedFiles.length;
-            const fetchedBytes = fetchedFiles.reduce((sum, f) => sum + (f.input_size_bytes || f.source_size_bytes || 0), 0);
-            return fetchedCount > 0 ? (
-              <StatCard label="Cached" value={fetchedCount} sub={fmt(fetchedBytes)} colour={PALETTE.accent} />
-            ) : null;
-          })()}
+        {/* Session Progress */}
+        {(() => {
+          const gapFilled = stats.gap_filled || 0;
+          const errCount = Object.values(files).filter(f => ["error", "failed"].includes((f.status || "").toLowerCase())).length;
+          const speed = stats.total_content_duration_secs > 0 && stats.total_encode_time_secs > 0
+            ? (stats.total_encode_time_secs / (stats.total_content_duration_secs / 3600)).toFixed(1)
+            : null;
+          const speedGb = stats.total_source_size_bytes > 0 && stats.total_encode_time_secs > 0
+            ? (stats.total_encode_time_secs / 60 / (stats.total_source_size_bytes / (1024 ** 3))).toFixed(1)
+            : null;
+          const inputSize = stats.total_source_size_bytes || 0;
+          const outputSize = inputSize - (stats.bytes_saved || 0);
 
-          {/* Encoding Speed */}
-          {completed > 0 && stats.total_encode_time_secs > 0 && (
-            <StatCard
-              label="Encoding Speed"
-              value={stats.total_content_duration_secs > 0
-                ? `${(stats.total_encode_time_secs / (stats.total_content_duration_secs / 3600)).toFixed(1)} min/hr`
-                : "—"}
-              sub={stats.total_source_size_bytes > 0
-                ? `${(stats.total_encode_time_secs / 60 / (stats.total_source_size_bytes / (1024 ** 3))).toFixed(1)} min/GB`
-                : undefined}
-              colour={PALETTE.accent}
-            />
-          )}
+          const statStyle = { display: "inline-flex", alignItems: "baseline", gap: 4, fontSize: 13 };
+          const valStyle = (colour) => ({ fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, color: colour || PALETTE.text });
+          const sepStyle = { color: PALETTE.border, margin: "0 6px" };
 
-          {/* Today */}
-          {(() => {
-            const todayStr = new Date().toISOString().slice(0, 10);
-            const todayCount = Object.values(files).filter(f => {
-              const s = (f.status || "").toLowerCase();
-              return ["replaced", "verified"].includes(s) && f.last_updated && f.last_updated.slice(0, 10) === todayStr;
-            }).length;
-            return <StatCard label="Today" value={todayCount} colour={todayCount > 0 ? PALETTE.green : PALETTE.textMuted} />;
-          })()}
-
-          {/* Errors */}
-          {(() => {
-            const errCount = Object.values(files).filter(f => ["error", "failed"].includes((f.status || "").toLowerCase())).length;
-            return errCount > 0
-              ? <StatCard label="Errors" value={errCount} colour={PALETTE.red} />
-              : <StatCard label="Errors" value={0} />;
-          })()}
-        </div>
-
-        {/* Encoding ETA */}
-        {completed > 0 && overallETA != null && (
-          <div style={{ color: PALETTE.accent, fontSize: 13, marginTop: 12, fontFamily: "'JetBrains Mono', monospace" }}>
-            Encoding ETA: {formatETA(overallETA)} remaining
-          </div>
-        )}
-        {data.last_updated && (
-          <div style={{ color: PALETTE.textMuted, fontSize: 11, marginTop: 4 }}>
-            Updated: {new Date(data.last_updated).toLocaleString()}
-          </div>
-        )}
+          return (
+            <div style={{ marginTop: 16, textAlign: "center", lineHeight: 2 }}>
+              <div>
+                {completed > 0 && (
+                  <span style={statStyle}>
+                    <span style={{ color: PALETTE.textMuted }}>Encoded:</span>
+                    <span style={valStyle(PALETTE.accent)}>{completed}</span>
+                    <span style={{ color: PALETTE.textMuted, fontSize: 11 }}>({fmt(inputSize)} {"\u2192"} {fmt(outputSize > 0 ? outputSize : 0)})</span>
+                  </span>
+                )}
+                {completed > 0 && gapFilled > 0 && <span style={sepStyle}>{"\u00b7"}</span>}
+                {gapFilled > 0 && (
+                  <span style={statStyle}>
+                    <span style={{ color: PALETTE.textMuted }}>Gap filled:</span>
+                    <span style={valStyle("#eab308")}>{gapFilled}</span>
+                  </span>
+                )}
+                {errCount > 0 && (
+                  <>
+                    <span style={sepStyle}>{"\u00b7"}</span>
+                    <span style={statStyle}>
+                      <span style={{ color: PALETTE.textMuted }}>Errors:</span>
+                      <span style={valStyle(PALETTE.red)}>{errCount}</span>
+                    </span>
+                  </>
+                )}
+              </div>
+              <div>
+                {speed && (
+                  <span style={statStyle}>
+                    <span style={{ color: PALETTE.textMuted }}>Speed:</span>
+                    <span style={valStyle(PALETTE.accent)}>{speed}</span>
+                    <span style={{ color: PALETTE.textMuted, fontSize: 11 }}>min/hr</span>
+                    {speedGb && <span style={{ color: PALETTE.textMuted, fontSize: 11 }}>({speedGb} min/GB)</span>}
+                  </span>
+                )}
+                {speed && stats.bytes_saved > 0 && <span style={sepStyle}>{"\u00b7"}</span>}
+                {stats.bytes_saved > 0 && (
+                  <span style={statStyle}>
+                    <span style={valStyle(PALETTE.green)}>{fmt(stats.bytes_saved)}</span>
+                    <span style={{ color: PALETTE.textMuted, fontSize: 11 }}>saved</span>
+                  </span>
+                )}
+                {overallETA != null && (
+                  <>
+                    <span style={sepStyle}>{"\u00b7"}</span>
+                    <span style={statStyle}>
+                      <span style={{ color: PALETTE.textMuted }}>ETA:</span>
+                      <span style={valStyle(PALETTE.accent)}>{formatETA(overallETA)}</span>
+                    </span>
+                  </>
+                )}
+              </div>
+            </div>
+          );
+        })()}
       </div>
 
       {/* Force List */}
@@ -610,48 +639,41 @@ export function PipelinePage({ wsData, onFileClick }) {
         </>
       )}
 
-      {/* Current activity */}
+      {/* Current activity — grouped by thread */}
       {activeFiles.length > 0 && (
         <>
-          <SectionTitle>Current Activity ({activeFiles.length})</SectionTitle>
-          <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 24 }}>
-            {activeFiles.map(({ path, status, elapsed, audio_only, done }, i) => {
-              const isStale = !done && elapsed != null && elapsed > 3600;
-              const dotColour = done ? PALETTE.green : isStale ? PALETTE.red : audio_only ? PALETTE.cyan : PALETTE.accent;
-              const badgeColour = done ? PALETTE.green : audio_only ? PALETTE.cyan : PALETTE.accent;
-              const filename = path.split(/[\\/]/).pop();
-              return (
-                <div key={i} style={{
-                  background: PALETTE.surface,
-                  border: `1px solid ${done ? PALETTE.green + "33" : isStale ? PALETTE.red + "44" : PALETTE.border}`,
-                  borderRadius: 10, padding: "12px 16px",
-                  display: "flex", alignItems: "center", gap: 12,
-                  opacity: done ? 0.6 : 1,
-                }}>
-                  <div style={{
-                    width: 8, height: 8, borderRadius: "50%", flexShrink: 0,
-                    background: dotColour,
-                    animation: done || isStale ? "none" : "pulse 1.5s infinite",
-                  }} />
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ color: PALETTE.text, fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{filename}</div>
-                    <div style={{ color: PALETTE.textMuted, fontSize: 10, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", marginTop: 2 }}>{path}</div>
-                  </div>
-                  <div style={{ display: "flex", alignItems: "center", gap: 12, flexShrink: 0 }}>
-                    <span style={{
-                      fontSize: 11, fontWeight: 600, padding: "2px 8px", borderRadius: 4,
-                      background: badgeColour + "22", color: badgeColour,
-                    }}>{done ? "done" : status}</span>
-                    {elapsed != null && (
-                      <span style={{
-                        fontSize: 11, fontFamily: "'JetBrains Mono', monospace",
-                        color: isStale ? PALETTE.red : PALETTE.textMuted,
-                      }}>{done ? `${Math.round(elapsed)}s ago` : formatETA(elapsed)}</span>
-                    )}
-                  </div>
-                </div>
-              );
-            })}
+          <SectionTitle>Current Activity</SectionTitle>
+          <div style={{ display: "flex", flexDirection: "column", gap: 4, marginBottom: 24 }}>
+            {activeFiles.map((item, i) => (
+              <div key={i} style={{
+                background: PALETTE.surface,
+                border: `1px solid ${item.done ? PALETTE.green + "22" : PALETTE.border}`,
+                borderRadius: 8, padding: "10px 14px",
+                display: "flex", alignItems: "center", gap: 10,
+                opacity: item.done ? 0.5 : 1,
+              }}>
+                <div style={{
+                  width: 7, height: 7, borderRadius: "50%", flexShrink: 0,
+                  background: item.colour,
+                  animation: item.done ? "none" : "pulse 1.5s infinite",
+                }} />
+                <span style={{
+                  fontSize: 10, fontWeight: 700, letterSpacing: 0.5,
+                  color: item.colour, minWidth: 90, flexShrink: 0,
+                  fontFamily: "'JetBrains Mono', monospace",
+                }}>{item.thread}</span>
+                <span style={{
+                  color: PALETTE.text, fontSize: 12, flex: 1,
+                  overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                }}>{item.filename}</span>
+                {item.elapsed != null && (
+                  <span style={{
+                    fontSize: 11, fontFamily: "'JetBrains Mono', monospace",
+                    color: PALETTE.textMuted, flexShrink: 0,
+                  }}>{item.done ? `${Math.round(item.elapsed)}s ago` : formatETA(item.elapsed)}</span>
+                )}
+              </div>
+            ))}
           </div>
         </>
       )}
