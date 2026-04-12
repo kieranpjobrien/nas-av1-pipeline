@@ -425,13 +425,14 @@ def get_library_completion():
         fp = f.get("filepath", "")
         is_av1 = f.get("video", {}).get("codec_raw") == "av1"
 
+        # Audio: all tracks are EAC-3 (regardless of video codec)
+        audio_streams = f.get("audio_streams", [])
         audio_codec_ok = all(
             (a.get("codec_raw") or a.get("codec", "")).lower() in ("eac3", "e-ac-3")
-            for a in f.get("audio_streams", [])
-        ) if f.get("audio_streams") else True
+            for a in audio_streams
+        ) if audio_streams else True
 
         # Audio clean: only English/und/original tracks remain (no foreign dubs)
-        audio_streams = f.get("audio_streams", [])
         audio_clean = all(
             i == 0 or (a.get("language") or a.get("detected_language") or "und").lower().strip() in keep_langs
             for i, a in enumerate(audio_streams)
@@ -439,24 +440,30 @@ def get_library_completion():
 
         audio_ok = audio_codec_ok and audio_clean
 
-        subs_ok = all(
-            (s.get("language") or s.get("detected_language") or "und").lower().strip() in keep_langs
-            for s in f.get("subtitle_streams", [])
+        # Subs: has at least one English sub (not just "all subs are English/und")
+        eng_sub_langs = {"eng", "en", "english"}
+        sub_streams = f.get("subtitle_streams", [])
+        has_english_sub = any(
+            (s.get("language") or s.get("detected_language") or "").lower().strip() in eng_sub_langs
+            for s in sub_streams
         )
+        # Also OK if no subs at all and no external subs exist
+        subs_ok = has_english_sub
 
         if is_av1:
             counts["av1"] += 1
         else:
             counts["needs_video"] += 1
 
-        if is_av1 and audio_ok:
+        # Count each metric across ALL files (not just AV1)
+        if audio_ok:
             counts["eac3_done"] += 1
         elif is_av1:
             counts["needs_audio"] += 1
             if subs_ok:
                 counts["quick_wins_audio"].append(fp)
 
-        if is_av1 and subs_ok:
+        if subs_ok:
             counts["subs_done"] += 1
         elif is_av1:
             counts["needs_subs"] += 1
@@ -488,16 +495,16 @@ def get_library_completion():
         _cf = None
 
     for f in files:
-        # Filename check
+        # Filename check — only count as clean if clean_filename returns no change
         if _cf:
             try:
                 clean = _cf(f.get("filepath", ""), f.get("library_type", ""))
                 if not clean or clean == f.get("filename"):
                     has_clean_filename += 1
             except Exception:
-                has_clean_filename += 1
+                pass  # error = unknown, don't count as clean
         else:
-            has_clean_filename += 1
+            has_clean_filename += 1  # no clean_filename module = can't check
 
         # Undetermined language tracks
         for a in f.get("audio_streams", []):
