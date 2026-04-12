@@ -464,6 +464,13 @@ class Orchestrator:
                         except OSError:
                             pass
 
+                # Update media report so hero bars reflect the change
+                try:
+                    from pipeline.report import update_entry
+                    update_entry(filepath, library_type)
+                except Exception:
+                    pass
+
                 quick_queue.task_done()
 
         threads = []
