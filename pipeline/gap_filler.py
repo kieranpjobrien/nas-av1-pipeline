@@ -413,12 +413,38 @@ def _strip_tracks_on_nas(filepath: str, gaps: GapAnalysis) -> bool:
     tmp_path = mapped_fp + ".gapfill_tmp.mkv"
     cmd = [mkvmerge, "-o", tmp_path]
 
-    # Audio track selection
-    if gaps.audio_keep_indices:
+    # Get track IDs from mkvmerge (they differ from ffprobe stream indices)
+    id_result = subprocess.run(
+        [mkvmerge, "--identify", "--identification-format", "json", mapped_fp],
+        capture_output=True, text=True, timeout=30,
+    )
+    audio_track_ids = []
+    sub_track_ids = []
+    if id_result.returncode == 0:
+        try:
+            id_data = json.loads(id_result.stdout)
+            for track in id_data.get("tracks", []):
+                if track["type"] == "audio":
+                    audio_track_ids.append(track["id"])
+                elif track["type"] == "subtitles":
+                    sub_track_ids.append(track["id"])
+        except (json.JSONDecodeError, KeyError):
+            pass
+
+    # Audio track selection (convert relative indices to absolute track IDs)
+    if gaps.audio_keep_indices and audio_track_ids:
+        keep_ids = [audio_track_ids[i] for i in gaps.audio_keep_indices if i < len(audio_track_ids)]
+        if keep_ids:
+            cmd.extend(["--audio-tracks", ",".join(str(tid) for tid in keep_ids)])
+    elif gaps.audio_keep_indices:
         cmd.extend(["--audio-tracks", ",".join(str(i) for i in gaps.audio_keep_indices)])
 
-    # Subtitle track selection
-    if gaps.sub_keep_indices:
+    # Subtitle track selection (convert relative indices to absolute track IDs)
+    if gaps.sub_keep_indices and sub_track_ids:
+        keep_ids = [sub_track_ids[i] for i in gaps.sub_keep_indices if i < len(sub_track_ids)]
+        if keep_ids:
+            cmd.extend(["--subtitle-tracks", ",".join(str(tid) for tid in keep_ids)])
+    elif gaps.sub_keep_indices:
         cmd.extend(["--subtitle-tracks", ",".join(str(i) for i in gaps.sub_keep_indices)])
     elif not gaps.sub_keep_indices and gaps.needs_track_removal:
         cmd.extend(["--no-subtitles"])
