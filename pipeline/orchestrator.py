@@ -499,7 +499,7 @@ class Orchestrator:
                 quick_queue.task_done()
 
         threads = []
-        for i in range(3):
+        for i in range(5):
             threads.append(threading.Thread(target=heavy_worker, args=(f"MKV-{i}",), daemon=True))
         for i in range(2):
             threads.append(threading.Thread(target=quick_worker, args=(f"QUICK-{i}",), daemon=True))
