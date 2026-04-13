@@ -183,6 +183,7 @@ def _scan_external_subs(filepath: str, gaps: GapAnalysis) -> None:
         pass
     if gaps.external_subs:
         gaps.needs_sub_mux = True
+        gaps.needs_track_removal = True
     if gaps.foreign_external_subs:
         gaps.needs_foreign_sub_cleanup = True
 
@@ -446,7 +447,22 @@ def _strip_tracks_on_nas(filepath: str, gaps: GapAnalysis) -> bool:
         cmd.extend(["--audio-tracks", ",".join(str(i) for i in gaps.audio_keep_indices)])
 
     # Subtitle track selection (convert relative indices to absolute track IDs)
-    if gaps.sub_keep_indices and sub_track_ids:
+    # When muxing external subs: strip ALL internal English subs (external replaces them)
+    # Only keep forced/foreign-parts internal subs
+    if gaps.external_subs and sub_track_ids:
+        # Keep only forced subs — the external sub replaces all internal English
+        forced_keep = []
+        for track in id_data.get("tracks", []):
+            if track["type"] == "subtitles":
+                props = track.get("properties", {})
+                name = (props.get("track_name") or "").lower()
+                if "forced" in name or "foreign" in name or props.get("forced_track"):
+                    forced_keep.append(track["id"])
+        if forced_keep:
+            cmd.extend(["--subtitle-tracks", ",".join(str(tid) for tid in forced_keep)])
+        else:
+            cmd.extend(["--no-subtitles"])  # strip all internal, external will be added
+    elif gaps.sub_keep_indices and sub_track_ids:
         keep_ids = [sub_track_ids[i] for i in gaps.sub_keep_indices if i < len(sub_track_ids)]
         if keep_ids:
             cmd.extend(["--subtitle-tracks", ",".join(str(tid) for tid in keep_ids)])
