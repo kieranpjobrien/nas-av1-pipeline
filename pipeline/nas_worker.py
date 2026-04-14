@@ -108,7 +108,7 @@ def remote_mkvpropedit(machine: dict, filepath: str,
 
 
 def remote_identify(machine: dict, filepath: str,
-                    timeout: int = 30) -> Optional[dict]:
+                    timeout: int = 60) -> Optional[dict]:
     """Run mkvmerge --identify on a remote machine, return parsed JSON."""
     args = ["--identify", "--identification-format", "json", _shell_quote(filepath)]
     result = _ssh_docker(machine, "mkvmerge", args, timeout)

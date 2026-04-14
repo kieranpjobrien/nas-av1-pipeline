@@ -505,8 +505,8 @@ class Orchestrator:
         # Media server workers (faster Docker, NFS mount) — 10 workers
         for i in range(10):
             threads.append(threading.Thread(target=heavy_worker, args=(f"SRV-{i}", SERVER), daemon=True))
-        # NAS workers (local disk, Synology Docker) — 6 workers
-        for i in range(6):
+        # NAS workers (local disk, Synology Docker — slower startup) — 3 workers
+        for i in range(3):
             threads.append(threading.Thread(target=heavy_worker, args=(f"NAS-{i}", NAS), daemon=True))
         # Quick workers (run on PC — instant ops)
         for i in range(2):

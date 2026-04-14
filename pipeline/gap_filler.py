@@ -482,7 +482,13 @@ def _strip_tracks_on_nas(filepath: str, gaps: GapAnalysis,
         return False
 
     # Verify and replace — check via the UNC path (accessible from this PC)
-    if not os.path.exists(filepath + ".gapfill_tmp.mkv"):
+    # SMB cache may take a moment to see NFS-written files
+    tmp_unc = filepath + ".gapfill_tmp.mkv"
+    for _ in range(5):
+        if os.path.exists(tmp_unc):
+            break
+        time.sleep(1)
+    if not os.path.exists(tmp_unc):
         logging.error(f"  Output file not found after remote mkvmerge")
         return False
 
