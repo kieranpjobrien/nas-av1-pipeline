@@ -373,7 +373,7 @@ class Orchestrator:
         quick_total = quick_queue.qsize()
         logging.info(f"Gap filler: {heavy_total} heavy (mkvmerge) + {quick_total} quick (rename/meta/delete)")
 
-        def heavy_worker(name: str):
+        def heavy_worker(name: str, machine: dict):
             while not self._shutdown.is_set():
                 try:
                     item, gaps = heavy_queue.get(timeout=2)
@@ -393,6 +393,8 @@ class Orchestrator:
                     continue
 
                 logging.info(f"[{name} {p}/{heavy_total}] {gaps.describe()} | {item['filename']}")
+                # Pass machine config to gap_fill for remote execution
+                gaps._remote_machine = machine
                 gap_fill(filepath, item, gaps, self.config, self.state)
 
                 if self.state.get_file(filepath) and self.state.get_file(filepath).get("status") == "error":
@@ -498,9 +500,15 @@ class Orchestrator:
 
                 quick_queue.task_done()
 
+        from pipeline.nas_worker import SERVER, NAS
         threads = []
-        for i in range(5):
-            threads.append(threading.Thread(target=heavy_worker, args=(f"MKV-{i}",), daemon=True))
+        # Media server workers (faster Docker, NFS mount) — 10 workers
+        for i in range(10):
+            threads.append(threading.Thread(target=heavy_worker, args=(f"SRV-{i}", SERVER), daemon=True))
+        # NAS workers (local disk, Synology Docker) — 6 workers
+        for i in range(6):
+            threads.append(threading.Thread(target=heavy_worker, args=(f"NAS-{i}", NAS), daemon=True))
+        # Quick workers (run on PC — instant ops)
         for i in range(2):
             threads.append(threading.Thread(target=quick_worker, args=(f"QUICK-{i}",), daemon=True))
 

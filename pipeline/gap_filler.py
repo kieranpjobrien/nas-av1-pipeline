@@ -331,9 +331,10 @@ def gap_fill(
             except Exception as e:
                 logging.warning(f"  Language detection failed: {e}")
 
-        # Track removal and/or sub muxing (mkvmerge on NAS — no fetch)
+        # Track removal and/or sub muxing (remote mkvmerge — no SMB transfer)
         if (gaps.needs_track_removal or gaps.needs_sub_mux) and not gaps.needs_audio_transcode:
-            success = _strip_tracks_on_nas(filepath, gaps)
+            machine = getattr(gaps, '_remote_machine', None)
+            success = _strip_tracks_on_nas(filepath, gaps, machine=machine)
             if not success:
                 state.set_file(filepath, FileStatus.ERROR, error="track strip failed", stage="gap_fill")
                 return False
@@ -395,62 +396,44 @@ def gap_fill(
         return False
 
 
-def _strip_tracks_on_nas(filepath: str, gaps: GapAnalysis) -> bool:
-    """Remove foreign audio/subtitle tracks using mkvmerge directly on NAS.
+def _strip_tracks_on_nas(filepath: str, gaps: GapAnalysis,
+                         machine: dict | None = None) -> bool:
+    """Remove foreign audio/subtitle tracks via remote mkvmerge on NAS or media server.
 
-    No fetch needed — mkvmerge reads and writes on the NAS path.
+    Runs mkvmerge inside a Docker container on the target machine via SSH.
+    No SMB transfer — direct local/NFS disk I/O. 100x faster.
     """
-    if not os.path.exists(filepath):
-        logging.error(f"  Track strip failed: file not found: {os.path.basename(filepath)}")
+    from pipeline.nas_worker import (
+        unc_to_container_path, remote_identify, remote_strip_and_mux,
+        SERVER, NAS,
+    )
+
+    if machine is None:
+        machine = SERVER  # default to media server (fastest Docker)
+
+    container_path = unc_to_container_path(filepath)
+    tmp_path = container_path + ".gapfill_tmp.mkv"
+
+    # Get track IDs from remote mkvmerge --identify
+    id_data = remote_identify(machine, container_path)
+    if not id_data:
+        logging.error(f"  Remote identify failed on {machine['label']}")
         return False
 
-    mkvmerge = _find_tool("mkvmerge", _MKVMERGE_SEARCH)
-    if not mkvmerge:
-        logging.error("mkvmerge not found — cannot strip tracks")
-        return False
+    audio_track_ids = [t["id"] for t in id_data.get("tracks", []) if t["type"] == "audio"]
+    sub_track_ids = [t["id"] for t in id_data.get("tracks", []) if t["type"] == "subtitles"]
 
-    # Map UNC paths — mkvmerge doesn't support UNC
-    mapped_fp, was_mapped = _unc_to_mapped(filepath)
-    tmp_path = mapped_fp + ".gapfill_tmp.mkv"
-    cmd = [mkvmerge, "-o", tmp_path]
-
-    # Get track IDs from mkvmerge (they differ from ffprobe stream indices)
-    audio_track_ids = []
-    sub_track_ids = []
-    try:
-        id_result = subprocess.run(
-            [mkvmerge, "--identify", "--identification-format", "json", mapped_fp],
-            capture_output=True, text=True, timeout=60, encoding="utf-8", errors="replace",
-        )
-        if id_result.returncode <= 1 and id_result.stdout:
-            id_data = json.loads(id_result.stdout)
-            for track in id_data.get("tracks", []):
-                if track["type"] == "audio":
-                    audio_track_ids.append(track["id"])
-                elif track["type"] == "subtitles":
-                    sub_track_ids.append(track["id"])
-    except (subprocess.TimeoutExpired, json.JSONDecodeError, KeyError, TypeError) as e:
-        logging.warning(f"  mkvmerge identify failed, using ffprobe indices: {e}")
-        # Fallback: calculate track IDs from stream order (video=0, then audio, then subs)
-        # This works for standard MKV layouts
-        audio_track_ids = list(range(1, 1 + len(gaps.audio_keep_indices) + 5))  # generous range
-        sub_track_ids = []  # can't determine, skip sub stripping for safety
-        if gaps.needs_track_removal and not gaps.audio_keep_indices:
-            return False  # can't safely strip without track IDs
-
-    # Audio track selection (convert relative indices to absolute track IDs)
+    # Convert relative indices to absolute track IDs
+    audio_keep_ids = None
     if gaps.audio_keep_indices and audio_track_ids:
-        keep_ids = [audio_track_ids[i] for i in gaps.audio_keep_indices if i < len(audio_track_ids)]
-        if keep_ids:
-            cmd.extend(["--audio-tracks", ",".join(str(tid) for tid in keep_ids)])
-    elif gaps.audio_keep_indices:
-        cmd.extend(["--audio-tracks", ",".join(str(i) for i in gaps.audio_keep_indices)])
+        audio_keep_ids = [audio_track_ids[i] for i in gaps.audio_keep_indices if i < len(audio_track_ids)]
 
-    # Subtitle track selection (convert relative indices to absolute track IDs)
-    # When muxing external subs: strip ALL internal English subs (external replaces them)
-    # Only keep forced/foreign-parts internal subs
+    # Subtitle selection
+    sub_keep_ids = None
+    no_subs = False
+
     if gaps.external_subs and sub_track_ids:
-        # Keep only forced subs — the external sub replaces all internal English
+        # Muxing external subs — strip ALL internal English, keep only forced
         forced_keep = []
         for track in id_data.get("tracks", []):
             if track["type"] == "subtitles":
@@ -459,64 +442,70 @@ def _strip_tracks_on_nas(filepath: str, gaps: GapAnalysis) -> bool:
                 if "forced" in name or "foreign" in name or props.get("forced_track"):
                     forced_keep.append(track["id"])
         if forced_keep:
-            cmd.extend(["--subtitle-tracks", ",".join(str(tid) for tid in forced_keep)])
+            sub_keep_ids = forced_keep
         else:
-            cmd.extend(["--no-subtitles"])  # strip all internal, external will be added
+            no_subs = True
     elif gaps.sub_keep_indices and sub_track_ids:
-        keep_ids = [sub_track_ids[i] for i in gaps.sub_keep_indices if i < len(sub_track_ids)]
-        if keep_ids:
-            cmd.extend(["--subtitle-tracks", ",".join(str(tid) for tid in keep_ids)])
-    elif gaps.sub_keep_indices:
-        cmd.extend(["--subtitle-tracks", ",".join(str(i) for i in gaps.sub_keep_indices)])
+        sub_keep_ids = [sub_track_ids[i] for i in gaps.sub_keep_indices if i < len(sub_track_ids)]
     elif not gaps.sub_keep_indices and gaps.needs_track_removal:
-        cmd.extend(["--no-subtitles"])
+        no_subs = True
 
-    cmd.append(mapped_fp)
-
-    # Add external subtitle files as additional inputs
-    for sub_path in gaps.external_subs:
-        mapped_sub, _ = _unc_to_mapped(sub_path)
-        lang = "eng"
-        fl = os.path.basename(sub_path).lower()
-        if ".en." in fl or ".eng." in fl:
+    # External subs — convert paths
+    external_sub_args = None
+    if gaps.external_subs:
+        external_sub_args = []
+        for sub_path in gaps.external_subs:
+            container_sub = unc_to_container_path(sub_path)
             lang = "eng"
-        cmd.extend(["--language", f"0:{lang}", mapped_sub])
+            external_sub_args.append((container_sub, lang))
 
+    # Calculate timeout based on file size
     try:
-        src_size = os.path.getsize(mapped_fp)
-        timeout = max(900, int(src_size / (1024 * 1024)))  # 15 min minimum, 1s per MB (NAS shared with 3 workers + network)
+        src_size = os.path.getsize(filepath)
+    except OSError:
+        src_size = 1024 * 1024 * 1024  # assume 1GB
+    timeout = max(300, int(src_size / (1024 * 1024)))
 
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-        if result.returncode >= 2:
-            err = result.stderr.strip() or result.stdout.strip()
-            logging.error(f"  mkvmerge failed: {err[:500]}")
-            return False
+    # Run remote mkvmerge
+    result = remote_strip_and_mux(
+        machine, container_path, tmp_path,
+        audio_keep_ids=audio_keep_ids,
+        sub_keep_ids=sub_keep_ids,
+        no_subs=no_subs,
+        external_sub_paths=external_sub_args,
+        timeout=timeout,
+    )
 
-        if not os.path.exists(tmp_path):
-            return False
+    if result.returncode >= 2:
+        err = result.stderr.strip() or result.stdout.strip()
+        logging.error(f"  mkvmerge failed ({machine['label']}): {err[:300]}")
+        return False
 
-        dst_size = os.path.getsize(tmp_path)
+    # Verify and replace — check via the UNC path (accessible from this PC)
+    if not os.path.exists(filepath + ".gapfill_tmp.mkv"):
+        logging.error(f"  Output file not found after remote mkvmerge")
+        return False
+
+    tmp_unc = filepath + ".gapfill_tmp.mkv"
+    try:
+        dst_size = os.path.getsize(tmp_unc)
         if dst_size < src_size * 0.3:
             logging.error(f"  Output too small ({format_bytes(dst_size)} vs {format_bytes(src_size)})")
-            os.remove(tmp_path)
+            os.remove(tmp_unc)
             return False
 
-        os.replace(tmp_path, mapped_fp)
+        os.replace(tmp_unc, filepath)
         saved = src_size - dst_size
-        logging.info(f"  Stripped tracks: {format_bytes(src_size)} -> {format_bytes(dst_size)} "
+        logging.info(f"  Stripped ({machine['label']}): {format_bytes(src_size)} -> {format_bytes(dst_size)} "
                      f"({format_bytes(abs(saved))} {'saved' if saved > 0 else 'added'})")
         return True
-
-    except subprocess.TimeoutExpired:
-        logging.error(f"  mkvmerge timed out")
-        return False
     except Exception as e:
-        logging.error(f"  Track strip failed: {e}")
+        logging.error(f"  Replace failed: {e}")
         return False
     finally:
-        if os.path.exists(tmp_path):
+        if os.path.exists(tmp_unc):
             try:
-                os.remove(tmp_path)
+                os.remove(tmp_unc)
             except OSError:
                 pass
 
