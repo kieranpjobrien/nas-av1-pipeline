@@ -19,23 +19,15 @@ from typing import Optional
 # Machine configs
 NAS = {
     "host": "kieran@192.168.4.42",
-    "docker_cmd": "sudo /usr/local/bin/docker",
-    "media_mount": "/volume1/Media",
-    "container_mount": "/media",
-    "unc_prefix": "\\\\KieranNAS\\Media",
+    "docker_prefix": "sudo /usr/local/bin/docker exec mkvworker",
     "label": "NAS",
 }
 
 SERVER = {
     "host": "kieran@192.168.4.43",
-    "docker_cmd": "docker",
-    "media_mount": "/mnt/nas/media",
-    "container_mount": "/media",
-    "unc_prefix": "\\\\KieranNAS\\Media",
+    "docker_prefix": "docker exec mkvworker",
     "label": "SRV",
 }
-
-MKVTOOLNIX_IMAGE = "jlesage/mkvtoolnix"
 
 
 def unc_to_container_path(unc_path: str) -> str:
@@ -56,22 +48,14 @@ def unc_to_container_path(unc_path: str) -> str:
 
 def _ssh_docker(machine: dict, tool: str, args: list[str],
                 timeout: int = 900) -> subprocess.CompletedProcess:
-    """Run a Docker container on a remote machine via SSH.
+    """Run a tool inside the persistent mkvworker container via SSH + docker exec.
 
-    Args:
-        machine: NAS or SERVER config dict
-        tool: 'mkvmerge', 'mkvpropedit', or 'ffprobe'
-        args: arguments to pass to the tool
-        timeout: max seconds to wait
+    Uses a pre-started container (docker exec, not docker run) to avoid
+    the 5-7s startup overhead per operation. Container stays running.
     """
-    docker = machine["docker_cmd"]
-    mount_src = machine["media_mount"]
+    prefix = machine["docker_prefix"]
 
-    docker_cmd = (
-        f"{docker} run --rm "
-        f"-v {mount_src}:/media "
-        f"{MKVTOOLNIX_IMAGE} {tool} {' '.join(args)}"
-    )
+    docker_cmd = f"{prefix} {tool} {' '.join(args)}"
 
     ssh_cmd = ["ssh", "-o", "ConnectTimeout=10", "-o", "BatchMode=yes",
                machine["host"], docker_cmd]

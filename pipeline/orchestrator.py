@@ -505,8 +505,9 @@ class Orchestrator:
         # Media server workers (faster Docker, NFS mount) — 10 workers
         for i in range(10):
             threads.append(threading.Thread(target=heavy_worker, args=(f"SRV-{i}", SERVER), daemon=True))
-        # NAS workers disabled — Synology Docker startup too slow for parallel ops
-        # All heavy work goes through media server (native Docker, 0.4s startup)
+        # NAS workers (local disk, persistent Docker container — no startup overhead)
+        for i in range(6):
+            threads.append(threading.Thread(target=heavy_worker, args=(f"NAS-{i}", NAS), daemon=True))
         # Quick workers (run on PC — instant ops)
         for i in range(2):
             threads.append(threading.Thread(target=quick_worker, args=(f"QUICK-{i}",), daemon=True))
