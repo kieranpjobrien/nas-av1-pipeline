@@ -54,28 +54,21 @@ class Orchestrator:
             os.makedirs(os.path.join(self.staging_dir, subdir), exist_ok=True)
 
         # Reset any non-terminal states from previous crashed runs
-        reset_count = self.state._conn.execute(
-            "UPDATE pipeline_files SET status = ?, stage = NULL, error = NULL WHERE status NOT IN (?, ?)",
-            ("pending", "done", "pending"),
-        ).rowcount
+        reset_count = self.state.reset_non_terminal()
         if reset_count:
             logging.info(f"  Reset {reset_count} stale entries from previous run")
 
         # Remove ghost 'done' entries where the source file no longer exists (renamed/deleted)
-        done_rows = self.state._conn.execute("SELECT filepath FROM pipeline_files WHERE status = 'done'").fetchall()
-        if done_rows:
+        done_paths = self.state.get_files_by_status(FileStatus.DONE)
+        if done_paths:
             from concurrent.futures import ThreadPoolExecutor
 
-            paths = [fp for (fp,) in done_rows]
             with ThreadPoolExecutor(max_workers=16) as pool:
-                existence = list(pool.map(os.path.exists, paths))
-            ghosts = [p for p, exists in zip(paths, existence) if not exists]
-            for fp in ghosts:
-                self.state._conn.execute("DELETE FROM pipeline_files WHERE filepath = ?", (fp,))
+                existence = list(pool.map(os.path.exists, done_paths))
+            ghosts = [p for p, exists in zip(done_paths, existence) if not exists]
             if ghosts:
+                self.state.remove_ghosts(ghosts)
                 logging.info(f"  Removed {len(ghosts)} ghost entries (files renamed/deleted)")
-
-        self.state._conn.commit()
 
         # Clean orphaned fetch/encoded files from previous runs
         for subdir in ("fetch", "encoded"):
@@ -330,12 +323,11 @@ class Orchestrator:
 
     def _find_pending_upload(self) -> dict | None:
         """Find a file with status=UPLOADING and stage=pending_upload."""
-        rows = self.state._conn.execute(
-            "SELECT filepath FROM pipeline_files WHERE status = ? AND stage = ?",
-            (FileStatus.UPLOADING.value, "pending_upload"),
-        ).fetchall()
-        if rows:
-            return {"filepath": rows[0][0]}
+        uploading = self.state.get_files_by_status(FileStatus.UPLOADING)
+        for fp in uploading:
+            entry = self.state.get_file(fp)
+            if entry and entry.get("stage") == "pending_upload":
+                return {"filepath": fp}
         return None
 
     # =========================================================================
@@ -478,8 +470,8 @@ class Orchestrator:
                                     entry["filename"] = gaps.clean_name
                                     break
                             write_report(rpt)
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logging.debug(f"  Report patch failed for {filename}: {e}")
 
                 # TMDb metadata
                 if gaps.needs_metadata:
@@ -500,10 +492,10 @@ class Orchestrator:
                                         entry["tmdb"] = tmdb_data
                                         break
                                 write_report(rpt)
-                            except Exception:
-                                pass
-                    except Exception:
-                        pass
+                            except Exception as e:
+                                logging.debug(f"  TMDb report patch failed for {filename}: {e}")
+                    except Exception as e:
+                        logging.debug(f"  TMDb tagging failed for {filename}: {e}")
 
                 # Delete foreign external subs
                 if gaps.needs_foreign_sub_cleanup:
@@ -626,6 +618,6 @@ class Orchestrator:
             for f in report.get("files", []):
                 if f.get("filepath") == filepath:
                     return f
-        except Exception:
-            pass
+        except Exception as e:
+            logging.debug(f"Media report lookup failed for {filepath}: {e}")
         return None

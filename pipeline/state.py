@@ -325,6 +325,33 @@ class PipelineState:
         """Mark stats as needing a flush. Call after modifying stats dict in-place."""
         self._stats_dirty = True
 
+    def reset_non_terminal(self) -> int:
+        """Reset any non-terminal states (from crashed runs) back to pending.
+
+        Returns the number of rows reset.
+        """
+        with self._lock:
+            count = self._conn.execute(
+                "UPDATE pipeline_files SET status = ?, stage = NULL, error = NULL WHERE status NOT IN (?, ?)",
+                ("pending", "done", "pending"),
+            ).rowcount
+            self._conn.commit()
+            return count
+
+    def remove_ghosts(self, filepaths: list[str]) -> int:
+        """Remove 'done' entries where the source file no longer exists.
+
+        Args:
+            filepaths: list of filepaths confirmed to not exist on disk.
+
+        Returns the number of ghost entries removed.
+        """
+        with self._lock:
+            for fp in filepaths:
+                self._conn.execute("DELETE FROM pipeline_files WHERE filepath = ?", (fp,))
+            self._conn.commit()
+            return len(filepaths)
+
     def compact(self) -> int:
         """Remove REPLACED and SKIPPED entries."""
         with self._lock:

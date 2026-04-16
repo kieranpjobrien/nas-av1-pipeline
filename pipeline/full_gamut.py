@@ -295,14 +295,14 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
         tmdb_data = enrich_and_tag(final_path, final_name, library_type)
         if tmdb_data:
             logging.info(f"  TMDb: {tmdb_data.get('director', tmdb_data.get('created_by', ['?']))}")
-    except Exception:
-        pass
+    except Exception as e:
+        logging.debug(f"  TMDb tagging failed: {e}")
 
     # === Update media report ===
     try:
         update_entry(final_path, library_type)
-    except Exception:
-        pass
+    except Exception as e:
+        logging.debug(f"  Report update failed: {e}")
 
     # === Plex scan ===
     _trigger_plex_scan(final_path)
@@ -439,25 +439,28 @@ def _trigger_plex_scan(filepath: str) -> None:
 
     def _scan():
         try:
-            import urllib.request
-
-            # Determine which section(s) to scan
-            sections_url = f"{PLEX_URL}/library/sections?X-Plex-Token={PLEX_TOKEN}"
-            resp = urllib.request.urlopen(sections_url, timeout=10)
-            # Scan all sections (simple approach)
+            from urllib.request import Request, urlopen
             from xml.etree import ElementTree
 
+            headers = {"X-Plex-Token": PLEX_TOKEN, "Accept": "application/xml"}
+
+            # Determine which section(s) to scan
+            sections_req = Request(f"{PLEX_URL}/library/sections", headers=headers)
+            resp = urlopen(sections_req, timeout=10)
             root = ElementTree.fromstring(resp.read())
             scanned = 0
             for section in root.findall(".//Directory"):
                 section_key = section.get("key")
                 if section_key:
-                    scan_url = f"{PLEX_URL}/library/sections/{section_key}/refresh?X-Plex-Token={PLEX_TOKEN}"
-                    urllib.request.urlopen(scan_url, timeout=10)
+                    scan_req = Request(
+                        f"{PLEX_URL}/library/sections/{section_key}/refresh",
+                        headers=headers,
+                    )
+                    urlopen(scan_req, timeout=10)
                     scanned += 1
             if scanned:
                 logging.info(f"  Triggered Plex scan ({scanned} sections)")
-        except Exception:
-            pass  # Plex scan is best-effort
+        except Exception as e:
+            logging.debug(f"  Plex scan failed (best-effort): {e}")
 
     threading.Thread(target=_scan, daemon=True, name="plex-scan").start()

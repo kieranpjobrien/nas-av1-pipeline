@@ -370,11 +370,7 @@ version = "2.0.0"
 source = { editable = "." }
 dependencies = [
     { name = "fastapi" },
-    { name = "faster-whisper" },
     { name = "langdetect" },
-    { name = "nvidia-cublas-cu12" },
-    { name = "nvidia-cudnn-cu12" },
-    { name = "pytesseract" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
@@ -385,22 +381,28 @@ dev = [
     { name = "pytest-asyncio" },
     { name = "ruff" },
 ]
+ml = [
+    { name = "faster-whisper" },
+    { name = "nvidia-cublas-cu12" },
+    { name = "nvidia-cudnn-cu12" },
+    { name = "pytesseract" },
+]
 
 [package.metadata]
 requires-dist = [
     { name = "fastapi", specifier = ">=0.115" },
-    { name = "faster-whisper", specifier = ">=1.2.1" },
+    { name = "faster-whisper", marker = "extra == 'ml'", specifier = ">=1.2.1" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27" },
     { name = "langdetect", specifier = ">=1.0.9" },
-    { name = "nvidia-cublas-cu12", specifier = ">=12.9.2.10" },
-    { name = "nvidia-cudnn-cu12", specifier = ">=9.20.0.48" },
-    { name = "pytesseract", specifier = ">=0.3.13" },
+    { name = "nvidia-cublas-cu12", marker = "extra == 'ml'", specifier = ">=12.9.2.10" },
+    { name = "nvidia-cudnn-cu12", marker = "extra == 'ml'", specifier = ">=9.20.0.48" },
+    { name = "pytesseract", marker = "extra == 'ml'", specifier = ">=0.3.13" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.9" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.34" },
 ]
-provides-extras = ["dev"]
+provides-extras = ["ml", "dev"]
 
 [[package]]
 name = "numpy"

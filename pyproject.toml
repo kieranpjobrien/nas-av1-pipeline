@@ -12,15 +12,17 @@ authors = [{name = "Kieran O'Brien"}]
 
 dependencies = [
     "fastapi>=0.115",
-    "faster-whisper>=1.2.1",
     "langdetect>=1.0.9",
-    "nvidia-cublas-cu12>=12.9.2.10",
-    "nvidia-cudnn-cu12>=9.20.0.48",
-    "pytesseract>=0.3.13",
     "uvicorn[standard]>=0.34",
 ]
 
 [project.optional-dependencies]
+ml = [
+    "faster-whisper>=1.2.1",
+    "nvidia-cublas-cu12>=12.9.2.10",
+    "nvidia-cudnn-cu12>=9.20.0.48",
+    "pytesseract>=0.3.13",
+]
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.23",

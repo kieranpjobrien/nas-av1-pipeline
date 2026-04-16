@@ -26,3 +26,9 @@ PLEX_TOKEN = os.environ.get("PLEX_TOKEN", "")
 
 # TMDb API key (for metadata enrichment)
 TMDB_API_KEY = os.environ.get("TMDB_API_KEY", "")
+
+# SSH hosts for remote mkvmerge/mkvpropedit execution
+NAS_SSH_HOST = os.environ.get("NAS_SSH_HOST", "")
+SERVER_SSH_HOST = os.environ.get("SERVER_SSH_HOST", "")
+NAS_DOCKER_PREFIX = os.environ.get("NAS_DOCKER_PREFIX", "sudo /usr/local/bin/docker exec mkvworker")
+SERVER_DOCKER_PREFIX = os.environ.get("SERVER_DOCKER_PREFIX", "docker exec mkvworker")

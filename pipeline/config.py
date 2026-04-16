@@ -1,5 +1,9 @@
 """Pipeline configuration defaults and constants."""
 
+# Language sets used across the pipeline for track filtering
+KEEP_LANGS: set[str] = {"eng", "en", "english", "und", ""}
+ENG_LANGS: set[str] = {"eng", "en", "english"}
+
 # Quality profiles — named presets that modify encoding params.
 # "baseline" is the default. "protected" preserves quality (reference films).
 # "lossy" trades quality for space savings (sitcoms, reality TV, etc.).

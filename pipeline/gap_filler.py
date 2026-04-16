@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Optional
 
 from paths import STAGING_DIR
+from pipeline.config import KEEP_LANGS
 from pipeline.ffmpeg import (
     _should_transcode_audio,
     format_bytes,
@@ -26,8 +27,6 @@ from pipeline.ffmpeg import (
 )
 from pipeline.report import update_entry
 from pipeline.state import FileStatus, PipelineState
-
-_KEEP_LANGS = {"eng", "en", "english", "und", ""}
 
 _MKVMERGE_SEARCH = [
     r"C:\Program Files\MKVToolNix\mkvmerge.exe",
@@ -158,7 +157,7 @@ def analyse_gaps(file_entry: dict, config: dict) -> GapAnalysis:
             if i == 0:
                 continue
             lang = (a.get("language") or a.get("detected_language") or "und").lower().strip()
-            if lang in _KEEP_LANGS:
+            if lang in KEEP_LANGS:
                 clean_audio_keep.append(i)
         if len(clean_audio_keep) < len(audio_streams):
             gaps.needs_track_removal = True

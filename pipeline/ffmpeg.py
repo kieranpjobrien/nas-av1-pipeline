@@ -8,10 +8,7 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
-from pipeline.config import resolve_encode_params
-
-# Languages to keep (everything else is stripped during encode)
-_KEEP_LANGS = {"eng", "en", "english", "und", ""}
+from pipeline.config import ENG_LANGS, KEEP_LANGS, resolve_encode_params
 
 
 def format_bytes(b: int) -> str:
@@ -50,8 +47,8 @@ def get_duration(filepath: str) -> Optional[float]:
 
             data = json.loads(result.stdout)
             return float(data.get("format", {}).get("duration", 0))
-    except Exception:
-        pass
+    except Exception as e:
+        logging.debug(f"ffprobe duration failed for {filepath}: {e}")
     return None
 
 
@@ -96,7 +93,7 @@ def _select_audio_streams(item: dict, config: dict) -> list[int] | None:
 
     for i, audio in enumerate(audio_streams):
         lang = (audio.get("language") or "").lower().strip()
-        if lang in _KEEP_LANGS:
+        if lang in KEEP_LANGS:
             keep.add(i)
 
     if len(keep) >= len(audio_streams):
@@ -125,7 +122,6 @@ def _map_subtitle_streams(cmd: list[str], item: dict, config: dict) -> None:
         return
 
     # Keep exactly 1 regular English sub + forced. Strip HI, duplicates, foreign.
-    eng_langs = {"eng", "en", "english"}
     mapped = 0
     found_regular_eng = False
     for i, sub in enumerate(subs):
@@ -137,7 +133,7 @@ def _map_subtitle_streams(cmd: list[str], item: dict, config: dict) -> None:
         if is_forced:
             cmd.extend(["-map", f"0:s:{i}"])
             mapped += 1
-        elif lang in eng_langs and not is_hi and not found_regular_eng:
+        elif lang in ENG_LANGS and not is_hi and not found_regular_eng:
             cmd.extend(["-map", f"0:s:{i}"])
             mapped += 1
             found_regular_eng = True

@@ -6,12 +6,20 @@ Routes:
     GET  /api/completion-missing  - files missing a specific completion category
 """
 
+import time
+
 from fastapi import APIRouter, HTTPException
 
 from paths import MEDIA_REPORT
+from pipeline.config import ENG_LANGS, KEEP_LANGS
 from server.helpers import read_json_safe
 
 router = APIRouter()
+
+# Simple time-based cache for library completion (polled frequently)
+_completion_cache: dict | None = None
+_completion_cache_time: float = 0.0
+_COMPLETION_CACHE_TTL: float = 5.0
 
 
 @router.get("/api/media-report")
@@ -26,13 +34,18 @@ def get_media_report() -> dict:
 @router.get("/api/library-completion")
 def get_library_completion() -> dict:
     """True library completion: AV1 video + EAC-3 audio + English-only subs."""
+    global _completion_cache, _completion_cache_time
+
+    now = time.monotonic()
+    if _completion_cache is not None and (now - _completion_cache_time) < _COMPLETION_CACHE_TTL:
+        return _completion_cache
+
     data = read_json_safe(MEDIA_REPORT)
     if data is None:
         raise HTTPException(404, "media_report.json not found")
 
     files = data.get("files", [])
     total = len(files)
-    keep_langs = {"eng", "en", "english", "und", ""}
 
     counts: dict = {
         "total": total,
@@ -60,7 +73,7 @@ def get_library_completion() -> dict:
         )
         audio_clean = (
             all(
-                i == 0 or (a.get("language") or a.get("detected_language") or "und").lower().strip() in keep_langs
+                i == 0 or (a.get("language") or a.get("detected_language") or "und").lower().strip() in KEEP_LANGS
                 for i, a in enumerate(audio_streams)
             )
             if audio_streams
@@ -68,19 +81,18 @@ def get_library_completion() -> dict:
         )
         audio_ok = audio_codec_ok and audio_clean
 
-        eng_sub_langs = {"eng", "en", "english"}
         sub_streams = f.get("subtitle_streams", [])
         eng_sub_count = sum(
             1
             for s in sub_streams
-            if (s.get("language") or s.get("detected_language") or "").lower().strip() in eng_sub_langs
+            if (s.get("language") or s.get("detected_language") or "").lower().strip() in ENG_LANGS
         )
         has_one_eng_sub = eng_sub_count == 1
 
         non_eng_subs = sum(
             1
             for s in sub_streams
-            if (s.get("language") or s.get("detected_language") or "und").lower().strip() not in keep_langs
+            if (s.get("language") or s.get("detected_language") or "und").lower().strip() not in KEEP_LANGS
         )
         no_foreign_subs = non_eng_subs == 0
         subs_ok = has_one_eng_sub and no_foreign_subs
@@ -193,14 +205,14 @@ def get_library_completion() -> dict:
         )
         a_clean = (
             all(
-                i == 0 or (a.get("language") or a.get("detected_language") or "und").lower().strip() in keep_langs
+                i == 0 or (a.get("language") or a.get("detected_language") or "und").lower().strip() in KEEP_LANGS
                 for i, a in enumerate(a_streams)
             )
             if a_streams
             else True
         )
         s_ok = all(
-            (s.get("language") or s.get("detected_language") or "und").lower().strip() in keep_langs
+            (s.get("language") or s.get("detected_language") or "und").lower().strip() in KEEP_LANGS
             for s in f.get("subtitle_streams", [])
         )
 
@@ -224,6 +236,8 @@ def get_library_completion() -> dict:
         for name, t in sorted(tiers.items(), key=lambda x: -x[1]["total"])
     ]
 
+    _completion_cache = counts
+    _completion_cache_time = now
     return counts
 
 
@@ -237,7 +251,6 @@ def get_completion_missing(category: str) -> dict:
     if data is None:
         raise HTTPException(404, "media_report.json not found")
     files = data.get("files", [])
-    keep_langs = {"eng", "en", "english", "und", ""}
     und_langs = {"und", "unk", ""}
     missing: list[dict] = []
     try:
@@ -265,7 +278,7 @@ def get_completion_missing(category: str) -> dict:
                 a_clean = (
                     all(
                         i == 0
-                        or (a.get("language") or a.get("detected_language") or "und").lower().strip() in keep_langs
+                        or (a.get("language") or a.get("detected_language") or "und").lower().strip() in KEEP_LANGS
                         for i, a in enumerate(f.get("audio_streams", []))
                     )
                     if f.get("audio_streams")
@@ -274,7 +287,7 @@ def get_completion_missing(category: str) -> dict:
                 hit = not (a_ok and a_clean)
         elif category == "subs":
             hit = not all(
-                (s.get("language") or s.get("detected_language") or "und").lower().strip() in keep_langs
+                (s.get("language") or s.get("detected_language") or "und").lower().strip() in KEEP_LANGS
                 for s in f.get("subtitle_streams", [])
             )
         elif category == "tmdb":
@@ -325,9 +338,8 @@ def get_completion_missing(category: str) -> dict:
                 )
             entry["sub_tracks"] = sub_tracks
 
-            eng_audio = {"eng", "en", "english"}
             has_english_audio = any(
-                (a.get("language") or a.get("detected_language") or "").lower().strip() in eng_audio
+                (a.get("language") or a.get("detected_language") or "").lower().strip() in ENG_LANGS
                 for a in f.get("audio_streams", [])
             )
             entry["has_english_audio"] = has_english_audio

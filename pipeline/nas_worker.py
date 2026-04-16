@@ -2,11 +2,11 @@
 
 Runs mkvmerge/mkvpropedit/ffprobe on remote machines where the media
 files are local (NAS) or NFS-mounted (media server). Avoids SMB
-network transfer entirely — 100x faster than running locally on PC.
+network transfer entirely -- 100x faster than running locally on PC.
 
 Machines:
-  NAS (192.168.4.42): Synology, Docker via sudo, /volume1/Media -> /media
-  Media Server (192.168.4.43): Ubuntu, Docker native, /mnt/nas/media -> /media
+  NAS: Synology, Docker via sudo, /volume1/Media -> /media
+  Media Server: Ubuntu, Docker native, /mnt/nas/media -> /media
 """
 
 import json
@@ -14,16 +14,18 @@ import os
 import subprocess
 from typing import Optional
 
+from paths import NAS_DOCKER_PREFIX, NAS_SSH_HOST, SERVER_DOCKER_PREFIX, SERVER_SSH_HOST
+
 # Machine configs
 NAS = {
-    "host": "kieran@192.168.4.42",
-    "docker_prefix": "sudo /usr/local/bin/docker exec mkvworker",
+    "host": NAS_SSH_HOST,
+    "docker_prefix": NAS_DOCKER_PREFIX,
     "label": "NAS",
 }
 
 SERVER = {
-    "host": "kieran@192.168.4.43",
-    "docker_prefix": "docker exec mkvworker",
+    "host": SERVER_SSH_HOST,
+    "docker_prefix": SERVER_DOCKER_PREFIX,
     "label": "SRV",
 }
 
@@ -52,7 +54,10 @@ def _ssh_docker(machine: dict, tool: str, args: list[str], timeout: int = 900) -
     """
     prefix = machine["docker_prefix"]
 
-    docker_cmd = f"{prefix} {tool} {' '.join(args)}"
+    # Shell-quote the tool name and every argument individually so the
+    # remote shell cannot interpret special characters in any position.
+    safe_parts = [_shell_quote(tool)] + [_shell_quote(a) for a in args]
+    docker_cmd = f"{prefix} {' '.join(safe_parts)}"
 
     ssh_cmd = ["ssh", "-o", "ConnectTimeout=10", "-o", "BatchMode=yes", machine["host"], docker_cmd]
 
@@ -82,13 +87,13 @@ def remote_mkvpropedit(
     filepath: container path (/media/...)
     edit_args: e.g. ['--edit', 'track:s1', '--set', 'language=eng']
     """
-    args = [_shell_quote(filepath)] + edit_args
+    args = [filepath] + edit_args
     return _ssh_docker(machine, "mkvpropedit", args, timeout)
 
 
 def remote_identify(machine: dict, filepath: str, timeout: int = 60) -> Optional[dict]:
     """Run mkvmerge --identify on a remote machine, return parsed JSON."""
-    args = ["--identify", "--identification-format", "json", _shell_quote(filepath)]
+    args = ["--identify", "--identification-format", "json", filepath]
     result = _ssh_docker(machine, "mkvmerge", args, timeout)
     if result.returncode <= 1 and result.stdout:
         try:
@@ -119,7 +124,7 @@ def remote_strip_and_mux(
         external_sub_paths: list of (container_path, language) for external subs
         timeout: seconds
     """
-    args = ["-o", _shell_quote(output_path)]
+    args = ["-o", output_path]
 
     if audio_keep_ids is not None:
         args.extend(["--audio-tracks", ",".join(str(i) for i in audio_keep_ids)])
@@ -129,12 +134,12 @@ def remote_strip_and_mux(
     elif sub_keep_ids is not None:
         args.extend(["--subtitle-tracks", ",".join(str(i) for i in sub_keep_ids)])
 
-    args.append(_shell_quote(input_path))
+    args.append(input_path)
 
     # External subtitle files
     if external_sub_paths:
         for sub_path, lang in external_sub_paths:
-            args.extend(["--language", f"0:{lang}", _shell_quote(sub_path)])
+            args.extend(["--language", f"0:{lang}", sub_path])
 
     return remote_mkvmerge(machine, args, timeout)
 

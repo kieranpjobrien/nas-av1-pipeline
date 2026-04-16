@@ -30,6 +30,7 @@ from datetime import datetime
 from fastapi import APIRouter, HTTPException
 
 from paths import MEDIA_REPORT
+from pipeline.config import KEEP_LANGS
 from server.helpers import (
     CONTROL_DIR,
     _get_pipeline_state,
@@ -305,7 +306,6 @@ def quick_wins() -> dict:
     if data is None:
         raise HTTPException(404, "media_report.json not found")
 
-    keep_langs = {"eng", "en", "english", "und", ""}
     files = data.get("files", [])
     paths = []
     for f in files:
@@ -319,14 +319,14 @@ def quick_wins() -> dict:
         )
         audio_clean = (
             all(
-                i == 0 or (a.get("language") or a.get("detected_language") or "und").lower().strip() in keep_langs
+                i == 0 or (a.get("language") or a.get("detected_language") or "und").lower().strip() in KEEP_LANGS
                 for i, a in enumerate(audio_streams)
             )
             if audio_streams
             else True
         )
         subs_ok = all(
-            (s.get("language") or s.get("detected_language") or "und").lower().strip() in keep_langs
+            (s.get("language") or s.get("detected_language") or "und").lower().strip() in KEEP_LANGS
             for s in f.get("subtitle_streams", [])
         )
         if not (audio_codec_ok and audio_clean and subs_ok):
