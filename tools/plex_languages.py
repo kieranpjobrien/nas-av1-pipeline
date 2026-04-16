@@ -2,15 +2,11 @@
 
 import argparse
 import csv
-import json
-import os
 import sqlite3
 import sys
 import zipfile
 from pathlib import Path
 from tempfile import TemporaryDirectory
-
-from paths import STAGING_DIR
 
 HERE = Path(__file__).parent.parent
 
@@ -26,7 +22,7 @@ def extract_sqlite_from_backup(backup_path: Path) -> Path:
         tdirp = Path(tdir)
         candidates = sorted(
             (n for n in zf.namelist() if n.lower().endswith(".db") or "com.plexapp.plugins.library.db" in n.lower()),
-            key=lambda s: (0 if "com.plexapp.plugins.library.db" in s.lower() else 1, len(s))
+            key=lambda s: (0 if "com.plexapp.plugins.library.db" in s.lower() else 1, len(s)),
         )
         if not candidates:
             raise RuntimeError("Backup looks like a ZIP, but no .db file found inside.")
@@ -63,7 +59,7 @@ def tables(con):
 
 
 def build_sql(con):
-    t = tables(con)
+    tables(con)
     ms_cols = cols(con, "media_streams")
 
     # Determine how to pick the audio rows
@@ -130,10 +126,13 @@ ORDER BY mp.title COLLATE NOCASE;
 
 def main():
     parser = argparse.ArgumentParser(description="Find non-English movies from Plex database backup")
-    parser.add_argument("--backup", type=str, default=None,
-                        help="Path to Plex database backup file (auto-detects databaseBackup* in project dir)")
-    parser.add_argument("--output", type=str, default=None,
-                        help="Output CSV path (default: plex_non_english.csv)")
+    parser.add_argument(
+        "--backup",
+        type=str,
+        default=None,
+        help="Path to Plex database backup file (auto-detects databaseBackup* in project dir)",
+    )
+    parser.add_argument("--output", type=str, default=None, help="Output CSV path (default: plex_non_english.csv)")
     args = parser.parse_args()
 
     if args.backup:

@@ -24,7 +24,7 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from paths import STAGING_DIR, MEDIA_REPORT, PIPELINE_STATE_DB
+from paths import MEDIA_REPORT, PIPELINE_STATE_DB, STAGING_DIR
 
 # Derived paths
 CONTROL_DIR = STAGING_DIR / "control"
@@ -41,7 +41,8 @@ def _get_pipeline_state() -> dict | None:
     db_path = str(PIPELINE_STATE_DB)
     if os.path.exists(db_path):
         try:
-            from pipeline.state import get_db, PipelineState
+            from pipeline.state import PipelineState
+
             state = PipelineState(db_path)
             data = state.data
             state.close()
@@ -55,36 +56,44 @@ def _get_pipeline_state() -> dict | None:
 def _get_state_db():
     """Get a raw SQLite connection for direct queries (reset-errors, compact, etc.)."""
     from pipeline.state import get_db
+
     return get_db(str(PIPELINE_STATE_DB))
 
 
 # --- Models ---
 
+
 class PauseRequest(BaseModel):
     type: str  # "all" | "fetch" | "encode"
 
+
 class PathListRequest(BaseModel):
     paths: list[str]
+
 
 class PriorityRequest(BaseModel):
     force: list[str] = []
     paths: list[str] = []
     patterns: list[str] = []
 
+
 class GentleRequest(BaseModel):
     paths: dict = {}
     patterns: dict = {}
     default_offset: int = 0
 
+
 class ReencodeRequest(BaseModel):
     files: dict = {}
     patterns: dict = {}
+
 
 class KeywordListRequest(BaseModel):
     keywords: list[str]
 
 
 # --- Control file helpers ---
+
 
 def drop_file(name: str, data: dict | None = None) -> Path:
     CONTROL_DIR.mkdir(parents=True, exist_ok=True)
@@ -181,20 +190,32 @@ PROCESS_CONFIGS = {
         "cwd": str(Path(__file__).parent.parent),
     },
     "plex_sync": {
-        "cmd": [sys.executable, "-c",
-                "import subprocess, sys; "
-                "print('Triggering Plex library scan...', flush=True); "
-                "subprocess.run([sys.executable, '-m', 'tools.plex_metadata', 'scan']); "
-                "print('Running metadata audit...', flush=True); "
-                "subprocess.run([sys.executable, '-m', 'tools.plex_metadata', 'audit', '--json', "
-                f"r'{STAGING_DIR / 'plex_audit.json'}']); "
-                "print('Applying rules...', flush=True); "
-                "subprocess.run([sys.executable, '-m', 'tools.plex_metadata', 'apply-rules', '--execute']); "
-                "print('Plex sync complete.', flush=True)"],
+        "cmd": [
+            sys.executable,
+            "-c",
+            "import subprocess, sys; "
+            "print('Triggering Plex library scan...', flush=True); "
+            "subprocess.run([sys.executable, '-m', 'tools.plex_metadata', 'scan']); "
+            "print('Running metadata audit...', flush=True); "
+            "subprocess.run([sys.executable, '-m', 'tools.plex_metadata', 'audit', '--json', "
+            f"r'{STAGING_DIR / 'plex_audit.json'}']); "
+            "print('Applying rules...', flush=True); "
+            "subprocess.run([sys.executable, '-m', 'tools.plex_metadata', 'apply-rules', '--execute']); "
+            "print('Plex sync complete.', flush=True)",
+        ],
         "cwd": str(Path(__file__).parent.parent),
     },
     "detect_languages": {
-        "cmd": [sys.executable, "-m", "tools.detect_languages", "--workers", "6", "--apply", "--min-confidence", "0.85"],
+        "cmd": [
+            sys.executable,
+            "-m",
+            "tools.detect_languages",
+            "--workers",
+            "6",
+            "--apply",
+            "--min-confidence",
+            "0.85",
+        ],
         "cwd": str(Path(__file__).parent.parent),
     },
     "detect_languages_whisper": {
@@ -202,7 +223,16 @@ PROCESS_CONFIGS = {
         "cwd": str(Path(__file__).parent.parent),
     },
     "detect_languages_retry": {
-        "cmd": [sys.executable, "-m", "tools.detect_languages", "--whisper", "--retry-unresolved", "--apply", "--min-confidence", "0.75"],
+        "cmd": [
+            sys.executable,
+            "-m",
+            "tools.detect_languages",
+            "--whisper",
+            "--retry-unresolved",
+            "--apply",
+            "--min-confidence",
+            "0.75",
+        ],
         "cwd": str(Path(__file__).parent.parent),
     },
     "detect_languages_spotcheck": {
@@ -296,6 +326,7 @@ class ProcessManager:
     def force_kill(self, name: str) -> dict:
         """Kill any OS process matching this pipeline command, even if not started by us."""
         import signal
+
         cfg = PROCESS_CONFIGS.get(name)
         if not cfg:
             raise ValueError(f"Unknown process: {name}")
@@ -309,9 +340,10 @@ class ProcessManager:
         try:
             # Use tasklist /v to find python processes, then filter by command line
             result = subprocess.run(
-                ["wmic", "process", "where", "name='python.exe'", "get",
-                 "processid,commandline", "/format:csv"],
-                capture_output=True, text=True, timeout=10,
+                ["wmic", "process", "where", "name='python.exe'", "get", "processid,commandline", "/format:csv"],
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
             my_pid = os.getpid()
             for line in result.stdout.strip().splitlines():
@@ -373,6 +405,7 @@ app = FastAPI(title="AV1 Pipeline Dashboard")
 
 # -- Read-only endpoints --
 
+
 @app.get("/api/pipeline")
 def get_pipeline():
     data = _get_pipeline_state()
@@ -411,7 +444,7 @@ def get_library_completion():
         "needs_audio": 0,
         "needs_subs": 0,
         "quick_wins_audio": [],  # AV1 files needing only audio fix
-        "quick_wins_subs": [],   # AV1 files needing only sub strip
+        "quick_wins_subs": [],  # AV1 files needing only sub strip
     }
 
     for f in files:
@@ -420,16 +453,21 @@ def get_library_completion():
 
         # Audio: all tracks are EAC-3 (regardless of video codec)
         audio_streams = f.get("audio_streams", [])
-        audio_codec_ok = all(
-            (a.get("codec_raw") or a.get("codec", "")).lower() in ("eac3", "e-ac-3")
-            for a in audio_streams
-        ) if audio_streams else True
+        audio_codec_ok = (
+            all((a.get("codec_raw") or a.get("codec", "")).lower() in ("eac3", "e-ac-3") for a in audio_streams)
+            if audio_streams
+            else True
+        )
 
         # Audio clean: only English/und/original tracks remain (no foreign dubs)
-        audio_clean = all(
-            i == 0 or (a.get("language") or a.get("detected_language") or "und").lower().strip() in keep_langs
-            for i, a in enumerate(audio_streams)
-        ) if audio_streams else True
+        audio_clean = (
+            all(
+                i == 0 or (a.get("language") or a.get("detected_language") or "und").lower().strip() in keep_langs
+                for i, a in enumerate(audio_streams)
+            )
+            if audio_streams
+            else True
+        )
 
         audio_ok = audio_codec_ok and audio_clean
 
@@ -437,14 +475,16 @@ def get_library_completion():
         eng_sub_langs = {"eng", "en", "english"}
         sub_streams = f.get("subtitle_streams", [])
         eng_sub_count = sum(
-            1 for s in sub_streams
+            1
+            for s in sub_streams
             if (s.get("language") or s.get("detected_language") or "").lower().strip() in eng_sub_langs
         )
         has_one_eng_sub = eng_sub_count == 1
 
         # Foreign subs: any non-English, non-und subs remaining
         non_eng_subs = sum(
-            1 for s in sub_streams
+            1
+            for s in sub_streams
             if (s.get("language") or s.get("detected_language") or "und").lower().strip() not in keep_langs
         )
         no_foreign_subs = non_eng_subs == 0
@@ -532,8 +572,9 @@ def get_library_completion():
 
     # Real gap fill count
     try:
-        from pipeline.gap_filler import analyse_gaps
         from pipeline.config import build_config as _bc
+        from pipeline.gap_filler import analyse_gaps
+
         _gap_config = _bc({})
         gap_count = 0
         for f in files:
@@ -554,14 +595,19 @@ def get_library_completion():
         is_av1 = codec == "av1"
 
         a_streams = f.get("audio_streams", [])
-        a_ok = all(
-            (a.get("codec_raw") or a.get("codec", "")).lower() in ("eac3", "e-ac-3")
-            for a in a_streams
-        ) if a_streams else True
-        a_clean = all(
-            i == 0 or (a.get("language") or a.get("detected_language") or "und").lower().strip() in keep_langs
-            for i, a in enumerate(a_streams)
-        ) if a_streams else True
+        a_ok = (
+            all((a.get("codec_raw") or a.get("codec", "")).lower() in ("eac3", "e-ac-3") for a in a_streams)
+            if a_streams
+            else True
+        )
+        a_clean = (
+            all(
+                i == 0 or (a.get("language") or a.get("detected_language") or "und").lower().strip() in keep_langs
+                for i, a in enumerate(a_streams)
+            )
+            if a_streams
+            else True
+        )
         s_ok = all(
             (s.get("language") or s.get("detected_language") or "und").lower().strip() in keep_langs
             for s in f.get("subtitle_streams", [])
@@ -584,7 +630,7 @@ def get_library_completion():
 
     counts["tiers"] = [
         {"name": name, "total": t["total"], "done": t["done"]}
-        for name, t in sorted(tiers.items(), key=lambda x: (-x[1]["total"]))
+        for name, t in sorted(tiers.items(), key=lambda x: -x[1]["total"])
     ]
 
     return counts
@@ -617,22 +663,41 @@ def get_completion_missing(category: str):
             hit = cr != "av1"
         elif category == "audio":
             if cr == "av1":
-                a_ok = all((a.get("codec_raw") or a.get("codec", "")).lower() in ("eac3", "e-ac-3")
-                           for a in f.get("audio_streams", [])) if f.get("audio_streams") else True
-                a_clean = all(i == 0 or (a.get("language") or a.get("detected_language") or "und").lower().strip() in keep_langs
-                              for i, a in enumerate(f.get("audio_streams", []))) if f.get("audio_streams") else True
+                a_ok = (
+                    all(
+                        (a.get("codec_raw") or a.get("codec", "")).lower() in ("eac3", "e-ac-3")
+                        for a in f.get("audio_streams", [])
+                    )
+                    if f.get("audio_streams")
+                    else True
+                )
+                a_clean = (
+                    all(
+                        i == 0
+                        or (a.get("language") or a.get("detected_language") or "und").lower().strip() in keep_langs
+                        for i, a in enumerate(f.get("audio_streams", []))
+                    )
+                    if f.get("audio_streams")
+                    else True
+                )
                 hit = not (a_ok and a_clean)
         elif category == "subs":
-            hit = not all((s.get("language") or s.get("detected_language") or "und").lower().strip() in keep_langs
-                          for s in f.get("subtitle_streams", []))
+            hit = not all(
+                (s.get("language") or s.get("detected_language") or "und").lower().strip() in keep_langs
+                for s in f.get("subtitle_streams", [])
+            )
         elif category == "tmdb":
             hit = not f.get("tmdb")
         elif category == "langs":
-            hit = any((a.get("language") or "und").lower().strip() in und_langs and not a.get("detected_language")
-                      for a in f.get("audio_streams", []))
+            hit = any(
+                (a.get("language") or "und").lower().strip() in und_langs and not a.get("detected_language")
+                for a in f.get("audio_streams", [])
+            )
             if not hit:
-                hit = any((s.get("language") or "und").lower().strip() in und_langs and not s.get("detected_language")
-                          for s in f.get("subtitle_streams", []))
+                hit = any(
+                    (s.get("language") or "und").lower().strip() in und_langs and not s.get("detected_language")
+                    for s in f.get("subtitle_streams", [])
+                )
         elif category == "filename":
             if _cf:
                 try:
@@ -646,19 +711,28 @@ def get_completion_missing(category: str):
             audio_tracks = []
             for i, a in enumerate(f.get("audio_streams", [])):
                 lang = a.get("language") or a.get("detected_language") or "und"
-                audio_tracks.append({
-                    "index": i, "codec": a.get("codec", "?"), "language": lang,
-                    "channels": a.get("channels", 0), "title": a.get("title", ""),
-                })
+                audio_tracks.append(
+                    {
+                        "index": i,
+                        "codec": a.get("codec", "?"),
+                        "language": lang,
+                        "channels": a.get("channels", 0),
+                        "title": a.get("title", ""),
+                    }
+                )
             entry["audio_tracks"] = audio_tracks
 
             sub_tracks = []
             for i, s in enumerate(f.get("subtitle_streams", [])):
                 lang = s.get("language") or s.get("detected_language") or "und"
-                sub_tracks.append({
-                    "index": i, "codec": s.get("codec", "?"), "language": lang,
-                    "title": s.get("title", ""),
-                })
+                sub_tracks.append(
+                    {
+                        "index": i,
+                        "codec": s.get("codec", "?"),
+                        "language": lang,
+                        "title": s.get("title", ""),
+                    }
+                )
             entry["sub_tracks"] = sub_tracks
 
             # Flag: no English audio at all (needs replacement, not just stripping)
@@ -707,6 +781,7 @@ def rename_file(req: dict):
         # Update media report
         try:
             from pipeline.report import update_entry
+
             update_entry(new_path, "movie" if "Movies" in new_path else "series")
         except Exception:
             pass
@@ -719,7 +794,8 @@ def rename_file(req: dict):
 def get_duplicates():
     """Find duplicate files using title+duration matching with quality scoring."""
     from collections import defaultdict
-    from tools.duplicates import find_title_duration_dupes, score_file, pick_best
+
+    from tools.duplicates import find_title_duration_dupes, pick_best, score_file
 
     data = read_json_safe(MEDIA_REPORT)
     if data is None:
@@ -749,23 +825,27 @@ def get_duplicates():
 
         members = []
         for rec in full_records:
-            members.append({
-                "filepath": rec["filepath"],
-                "filename": rec.get("filename", os.path.basename(rec["filepath"])),
-                "file_size_gb": rec.get("file_size_gb", 0),
-                "duration_seconds": rec.get("duration_seconds", 0),
-                "codec": rec.get("video", {}).get("codec", ""),
-                "resolution": rec.get("video", {}).get("resolution_class", ""),
-                "score": score_file(rec),
-                "keep": rec["filepath"] == keeper_path,
-            })
+            members.append(
+                {
+                    "filepath": rec["filepath"],
+                    "filename": rec.get("filename", os.path.basename(rec["filepath"])),
+                    "file_size_gb": rec.get("file_size_gb", 0),
+                    "duration_seconds": rec.get("duration_seconds", 0),
+                    "codec": rec.get("video", {}).get("codec", ""),
+                    "resolution": rec.get("video", {}).get("resolution_class", ""),
+                    "score": score_file(rec),
+                    "keep": rec["filepath"] == keeper_path,
+                }
+            )
         members.sort(key=lambda m: -m["score"])
-        groups.append({
-            "group_id": gid,
-            "title": rows[0].get("normalized_title", ""),
-            "members": members,
-            "wasted_gb": round(wasted, 3),
-        })
+        groups.append(
+            {
+                "group_id": gid,
+                "title": rows[0].get("normalized_title", ""),
+                "members": members,
+                "wasted_gb": round(wasted, 3),
+            }
+        )
 
     groups.sort(key=lambda g: -g["wasted_gb"])
     return {
@@ -858,6 +938,7 @@ def set_custom_tags(req: KeywordListRequest):
 
 # -- Write endpoints --
 
+
 @app.post("/api/control/pause")
 def pause_pipeline(req: PauseRequest):
     clear_all_pauses()
@@ -895,8 +976,12 @@ def set_priority(req: PriorityRequest):
         "patterns": req.patterns if req.patterns else current.get("patterns", []),
     }
     drop_file("priority.json", merged)
-    return {"ok": True, "force": len(merged["force"]), "paths": len(merged["paths"]),
-            "patterns": len(merged["patterns"])}
+    return {
+        "ok": True,
+        "force": len(merged["force"]),
+        "paths": len(merged["paths"]),
+        "patterns": len(merged["patterns"]),
+    }
 
 
 class ForceRequest(BaseModel):
@@ -947,14 +1032,19 @@ def quick_wins():
         if f.get("video", {}).get("codec_raw") != "av1":
             continue
         audio_streams = f.get("audio_streams", [])
-        audio_codec_ok = all(
-            (a.get("codec_raw") or a.get("codec", "")).lower() in ("eac3", "e-ac-3")
-            for a in audio_streams
-        ) if audio_streams else True
-        audio_clean = all(
-            i == 0 or (a.get("language") or a.get("detected_language") or "und").lower().strip() in keep_langs
-            for i, a in enumerate(audio_streams)
-        ) if audio_streams else True
+        audio_codec_ok = (
+            all((a.get("codec_raw") or a.get("codec", "")).lower() in ("eac3", "e-ac-3") for a in audio_streams)
+            if audio_streams
+            else True
+        )
+        audio_clean = (
+            all(
+                i == 0 or (a.get("language") or a.get("detected_language") or "und").lower().strip() in keep_langs
+                for i, a in enumerate(audio_streams)
+            )
+            if audio_streams
+            else True
+        )
         subs_ok = all(
             (s.get("language") or s.get("detected_language") or "und").lower().strip() in keep_langs
             for s in f.get("subtitle_streams", [])
@@ -983,11 +1073,14 @@ def quick_wins():
 
 @app.put("/api/control/gentle")
 def set_gentle(req: GentleRequest):
-    drop_file("gentle.json", {
-        "paths": req.paths,
-        "patterns": req.patterns,
-        "default_offset": req.default_offset,
-    })
+    drop_file(
+        "gentle.json",
+        {
+            "paths": req.paths,
+            "patterns": req.patterns,
+            "default_offset": req.default_offset,
+        },
+    )
     return {"ok": True}
 
 
@@ -1000,7 +1093,8 @@ def reset_errors():
         now = datetime.now().isoformat()
         cursor = conn.execute(
             "UPDATE pipeline_files SET status = 'pending', error = NULL, stage = NULL, "
-            "last_updated = ? WHERE status IN ('error', 'failed')", (now,)
+            "last_updated = ? WHERE status IN ('error', 'failed')",
+            (now,),
         )
         reset_count = cursor.rowcount
         if reset_count > 0:
@@ -1043,7 +1137,7 @@ def force_accept(req: dict):
         conn.execute(
             "UPDATE pipeline_files SET status = 'uploaded', error = NULL, stage = NULL, "
             "last_updated = ?, extras = ? WHERE filepath = ?",
-            (now, json.dumps(extras), path)
+            (now, json.dumps(extras), path),
         )
         conn.commit()
         conn.close()
@@ -1059,9 +1153,7 @@ def compact_state():
     """Remove REPLACED and SKIPPED entries from pipeline state."""
     try:
         conn = _get_state_db()
-        cursor = conn.execute(
-            "DELETE FROM pipeline_files WHERE status IN ('replaced', 'skipped')"
-        )
+        cursor = conn.execute("DELETE FROM pipeline_files WHERE status IN ('replaced', 'skipped')")
         removed = cursor.rowcount
         remaining = conn.execute("SELECT COUNT(*) FROM pipeline_files").fetchone()[0]
         if removed > 0:
@@ -1129,6 +1221,7 @@ def get_process_logs(name: str, last_n: int = 50):
 @app.get("/api/mkvpropedit-available")
 def mkvpropedit_available():
     from tools.detect_languages import _find_mkvpropedit
+
     found = _find_mkvpropedit()
     return {"available": found is not None, "path": found}
 
@@ -1167,11 +1260,15 @@ def _query_gpu() -> dict:
         return _gpu_cache
     try:
         result = subprocess.run(
-            ["nvidia-smi",
-             "--query-gpu=utilization.gpu,utilization.encoder,memory.used,memory.total,"
-             "temperature.gpu,power.draw,name",
-             "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, timeout=5,
+            [
+                "nvidia-smi",
+                "--query-gpu=utilization.gpu,utilization.encoder,memory.used,memory.total,"
+                "temperature.gpu,power.draw,name",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
         if result.returncode != 0:
             return {"available": False}
@@ -1272,6 +1369,7 @@ def get_health():
 
 # -- File detail --
 
+
 @app.get("/api/file-detail")
 def get_file_detail(path: str):
     """Cross-reference media report + pipeline state for a single file."""
@@ -1353,6 +1451,7 @@ def vmaf_check(req: VmafRequest):
     # Run VMAF (synchronous — can take a couple minutes)
     try:
         from tools.vmaf import run_vmaf
+
         result = run_vmaf(source, encoded, duration=req.duration)
         if "error" in result:
             raise HTTPException(500, result["error"])
@@ -1382,6 +1481,7 @@ def set_config(body: dict):
 
 
 # -- Encode history --
+
 
 def _read_history(days: int = 0, limit: int = 0) -> list[dict]:
     """Read encode history JSONL, optionally filtering by recency."""
@@ -1434,8 +1534,7 @@ def get_history_summary():
     for e in entries:
         day = e.get("timestamp", "")[:10]
         if day not in by_day:
-            by_day[day] = {"count": 0, "saved_bytes": 0, "input_bytes": 0, "output_bytes": 0,
-                           "encode_time_secs": 0}
+            by_day[day] = {"count": 0, "saved_bytes": 0, "input_bytes": 0, "output_bytes": 0, "encode_time_secs": 0}
         d = by_day[day]
         d["count"] += 1
         d["saved_bytes"] += e.get("saved_bytes", 0)
@@ -1445,8 +1544,14 @@ def get_history_summary():
 
         tier = e.get("res_key", "unknown")
         if tier not in by_tier:
-            by_tier[tier] = {"count": 0, "saved_bytes": 0, "input_bytes": 0, "output_bytes": 0,
-                             "encode_time_secs": 0, "total_compression_ratio": 0}
+            by_tier[tier] = {
+                "count": 0,
+                "saved_bytes": 0,
+                "input_bytes": 0,
+                "output_bytes": 0,
+                "encode_time_secs": 0,
+                "total_compression_ratio": 0,
+            }
         t = by_tier[tier]
         t["count"] += 1
         t["saved_bytes"] += e.get("saved_bytes", 0)
@@ -1481,7 +1586,8 @@ def get_history_summary():
         state_data = _get_pipeline_state()
         if state_data and "files" in state_data:
             remaining = sum(
-                1 for f in state_data["files"].values()
+                1
+                for f in state_data["files"].values()
                 if f.get("status") not in ("verified", "replaced", "skipped", "error")
             )
             if avg_per_day > 0 and remaining > 0:
@@ -1510,6 +1616,7 @@ def get_history_summary():
 
 
 # -- WebSocket for live updates --
+
 
 class ConnectionManager:
     """Manage WebSocket connections for live pipeline updates."""
@@ -1625,4 +1732,5 @@ if FRONTEND_DIST.is_dir():
 def run():
     """Entry point for `[project.scripts] dashboard = server:run`."""
     import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=8000)

@@ -22,8 +22,8 @@ class PipelineControl:
 
     # Friendly filename → (canonical name, implicit data to merge)
     _ALIASES = {
-        "pause_all.json":    ("pause.json", {"type": "all"}),
-        "pause_fetch.json":  ("pause.json", {"type": "fetch_only"}),
+        "pause_all.json": ("pause.json", {"type": "all"}),
+        "pause_fetch.json": ("pause.json", {"type": "fetch_only"}),
         "pause_encode.json": ("pause.json", {"type": "encode_only"}),
     }
 
@@ -398,9 +398,7 @@ class PipelineControl:
             norm = os.path.normpath(item["filepath"]).lower()
             if norm in force_set:
                 force_items.append(item)
-            elif norm in bump_set or any(
-                fnmatch.fnmatch(norm, pat.lower()) for pat in patterns
-            ):
+            elif norm in bump_set or any(fnmatch.fnmatch(norm, pat.lower()) for pat in patterns):
                 priority_items.append(item)
             else:
                 rest.append(item)

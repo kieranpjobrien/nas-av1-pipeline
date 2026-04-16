@@ -18,9 +18,13 @@ _update_lock = threading.Lock()
 def probe_file(filepath: str) -> Optional[dict]:
     """Run ffprobe on a file and return parsed JSON, or None on failure."""
     cmd = [
-        "ffprobe", "-v", "quiet",
-        "-print_format", "json",
-        "-show_format", "-show_streams",
+        "ffprobe",
+        "-v",
+        "quiet",
+        "-print_format",
+        "json",
+        "-show_format",
+        "-show_streams",
         filepath,
     ]
     try:
@@ -40,6 +44,7 @@ def build_file_entry(filepath: str, probe_data: dict, library_type: str) -> dict
     """
     # Import the existing extract_info from scanner — it already does this perfectly
     from tools.scanner import extract_info
+
     return extract_info(filepath, probe_data, library_type)
 
 
@@ -77,8 +82,12 @@ def update_entry(filepath: str, library_type: str = "") -> bool:
                         for j, s in enumerate(new_entry.get(stream_key, [])):
                             if j < len(old.get(stream_key, [])):
                                 old_s = old[stream_key][j]
-                                for field in ("detected_language", "detection_confidence",
-                                              "detection_method", "whisper_attempted"):
+                                for field in (
+                                    "detected_language",
+                                    "detection_confidence",
+                                    "detection_method",
+                                    "whisper_attempted",
+                                ):
                                     if old_s.get(field) and not s.get(field):
                                         s[field] = old_s[field]
                     files[i] = new_entry

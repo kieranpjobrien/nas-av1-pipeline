@@ -7,7 +7,7 @@ import logging
 import os
 import sys
 
-from paths import STAGING_DIR, MEDIA_REPORT
+from paths import MEDIA_REPORT, STAGING_DIR
 from pipeline.config import build_config
 from pipeline.control import PipelineControl
 from pipeline.state import PipelineState, migrate_from_json
@@ -32,9 +32,7 @@ def build_queues(report_path: str, config: dict, state: PipelineState, control: 
         report = json.load(f)
 
     from pipeline.gap_filler import analyse_gaps
-    from pipeline.ffmpeg import has_bulky_audio
 
-    keep_langs = {"eng", "en", "english", "und", ""}
     full_gamut_queue = []
     gap_filler_queue = []
 
@@ -63,7 +61,7 @@ def build_queues(report_path: str, config: dict, state: PipelineState, control: 
         else:
             # Needs full encode
             # Assign priority tier
-            from pipeline.config import get_res_key
+
             res = video.get("resolution_class", "")
             codec = video.get("codec", codec_raw)
             bitrate = entry.get("overall_bitrate_kbps", 0) or 0
@@ -75,31 +73,33 @@ def build_queues(report_path: str, config: dict, state: PipelineState, control: 
                 tier_res = tier.get("resolution")
                 min_br = tier.get("min_bitrate_kbps", 0)
                 max_br = tier.get("max_bitrate_kbps", float("inf"))
-                if (tier_codec is None or tier_codec.lower() in codec_raw.lower() or tier_codec.lower() in codec.lower()):
+                if tier_codec is None or tier_codec.lower() in codec_raw.lower() or tier_codec.lower() in codec.lower():
                     if tier_res is None or tier_res.lower() == res.lower():
                         if min_br <= bitrate <= max_br:
                             tier_idx = idx
                             tier_name = tier.get("name", tier_name)
                             break
 
-            full_gamut_queue.append({
-                "filepath": filepath,
-                "filename": entry["filename"],
-                "file_size_bytes": entry.get("file_size_bytes", 0),
-                "file_size_gb": entry.get("file_size_gb", 0),
-                "duration_seconds": entry.get("duration_seconds", 0),
-                "video_codec": codec,
-                "resolution": res,
-                "bitrate_kbps": bitrate,
-                "hdr": video.get("hdr", False),
-                "bit_depth": video.get("bit_depth", 8),
-                "audio_streams": entry.get("audio_streams", []),
-                "subtitle_streams": entry.get("subtitle_streams", []),
-                "subtitle_count": entry.get("subtitle_count", 0),
-                "library_type": entry.get("library_type", ""),
-                "priority_tier": tier_idx,
-                "tier_name": tier_name,
-            })
+            full_gamut_queue.append(
+                {
+                    "filepath": filepath,
+                    "filename": entry["filename"],
+                    "file_size_bytes": entry.get("file_size_bytes", 0),
+                    "file_size_gb": entry.get("file_size_gb", 0),
+                    "duration_seconds": entry.get("duration_seconds", 0),
+                    "video_codec": codec,
+                    "resolution": res,
+                    "bitrate_kbps": bitrate,
+                    "hdr": video.get("hdr", False),
+                    "bit_depth": video.get("bit_depth", 8),
+                    "audio_streams": entry.get("audio_streams", []),
+                    "subtitle_streams": entry.get("subtitle_streams", []),
+                    "subtitle_count": entry.get("subtitle_count", 0),
+                    "library_type": entry.get("library_type", ""),
+                    "priority_tier": tier_idx,
+                    "tier_name": tier_name,
+                }
+            )
 
     # Sort: full_gamut by priority tier then size desc
     full_gamut_queue.sort(key=lambda x: (x["priority_tier"], -x["file_size_bytes"]))
@@ -109,6 +109,7 @@ def build_queues(report_path: str, config: dict, state: PipelineState, control: 
     def _gap_sort_key(entry):
         gaps = analyse_gaps(entry, config)
         return (1 if gaps.needs_fetch else 0, entry.get("file_size_bytes", 0))
+
     gap_filler_queue.sort(key=_gap_sort_key)
 
     return full_gamut_queue, gap_filler_queue
@@ -122,10 +123,10 @@ def main():
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--no-replace", action="store_true")
-    parser.add_argument("--no-gap-filler", action="store_true",
-                        help="Disable gap filler (GPU encodes only, no cleanup)")
-    parser.add_argument("--gap-filler-only", action="store_true",
-                        help="Run gap filler only (no GPU encodes)")
+    parser.add_argument(
+        "--no-gap-filler", action="store_true", help="Disable gap filler (GPU encodes only, no cleanup)"
+    )
+    parser.add_argument("--gap-filler-only", action="store_true", help="Run gap filler only (no GPU encodes)")
     parser.add_argument("--max-staging-gb", type=int, default=None)
     parser.add_argument("--max-fetch-gb", type=int, default=None)
     args = parser.parse_args()
@@ -184,6 +185,7 @@ def main():
             logging.info(f"  ... and {len(full_gamut_queue) - 20} more")
         logging.info("\nDRY RUN -- gap filler queue:")
         from pipeline.gap_filler import analyse_gaps
+
         for entry in gap_filler_queue[:20]:
             gaps = analyse_gaps(entry, config)
             logging.info(f"  {gaps.describe():30s} {entry['filename']}")
@@ -197,13 +199,13 @@ def main():
 
     # Run orchestrator
     from pipeline.orchestrator import Orchestrator
+
     orchestrator = Orchestrator(config, state, args.staging, control)
 
     if args.gap_filler_only:
         orchestrator.run([], gap_filler_queue, enable_gap_filler=True)
     else:
-        orchestrator.run(full_gamut_queue, gap_filler_queue,
-                         enable_gap_filler=not args.no_gap_filler)
+        orchestrator.run(full_gamut_queue, gap_filler_queue, enable_gap_filler=not args.no_gap_filler)
 
 
 if __name__ == "__main__":

@@ -338,7 +338,7 @@ def _pick_best_tv(results: list[dict], title: str) -> dict | None:
 
     for r in results[:10]:
         score = 0.0
-        r_name = (r.get("name") or "")
+        r_name = r.get("name") or ""
         r_norm = norm(r_name)
 
         if r_norm == title_norm:
@@ -380,8 +380,7 @@ def _find_mkvpropedit() -> str | None:
     found = shutil.which("mkvpropedit")
     if found:
         return found
-    for path in (r"C:\Program Files\MKVToolNix\mkvpropedit.exe",
-                 r"C:\Program Files (x86)\MKVToolNix\mkvpropedit.exe"):
+    for path in (r"C:\Program Files\MKVToolNix\mkvpropedit.exe", r"C:\Program Files (x86)\MKVToolNix\mkvpropedit.exe"):
         if os.path.isfile(path):
             return path
     return None
@@ -412,7 +411,7 @@ def write_tmdb_to_mkv(filepath: str, tmdb: dict) -> bool:
     tags = []
 
     def add_tag(name: str, value: str) -> None:
-        tags.append(f'    <Simple><Name>{name}</Name><String>{_xml_escape(value)}</String></Simple>')
+        tags.append(f"    <Simple><Name>{name}</Name><String>{_xml_escape(value)}</String></Simple>")
 
     if tmdb.get("director"):
         add_tag("DIRECTOR", tmdb["director"])
@@ -450,13 +449,14 @@ def write_tmdb_to_mkv(filepath: str, tmdb: dict) -> bool:
     if not tags:
         return False
 
-    xml = ('<?xml version="1.0" encoding="UTF-8"?>\n'
-           '<Tags>\n'
-           '  <Tag>\n'
-           '    <Targets><TargetTypeValue>50</TargetTypeValue></Targets>\n'
-           + "\n".join(tags) + "\n"
-           '  </Tag>\n'
-           '</Tags>\n')
+    xml = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        "<Tags>\n"
+        "  <Tag>\n"
+        "    <Targets><TargetTypeValue>50</TargetTypeValue></Targets>\n" + "\n".join(tags) + "\n"
+        "  </Tag>\n"
+        "</Tags>\n"
+    )
 
     # Write XML to temp file, run mkvpropedit
     tmp_xml = os.path.join(tempfile.gettempdir(), f"tmdb_tags_{os.getpid()}.xml")
@@ -466,7 +466,9 @@ def write_tmdb_to_mkv(filepath: str, tmdb: dict) -> bool:
 
         result = subprocess.run(
             [mkvprop, filepath, "--tags", f"global:{tmp_xml}"],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True,
+            text=True,
+            timeout=30,
         )
         if result.returncode != 0:
             logging.debug(f"mkvpropedit failed for {os.path.basename(filepath)}: {result.stderr[:200]}")

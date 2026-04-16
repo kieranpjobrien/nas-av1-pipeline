@@ -17,16 +17,25 @@ import json
 import os
 import subprocess
 import sys
-import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-from paths import NAS_MOVIES, NAS_SERIES, MEDIA_REPORT
+from paths import MEDIA_REPORT, NAS_MOVIES, NAS_SERIES
 
 VIDEO_EXTENSIONS = {
-    ".mkv", ".mp4", ".avi", ".m4v", ".wmv", ".flv",
-    ".mov", ".ts", ".webm", ".mpg", ".mpeg", ".m2ts",
+    ".mkv",
+    ".mp4",
+    ".avi",
+    ".m4v",
+    ".wmv",
+    ".flv",
+    ".mov",
+    ".ts",
+    ".webm",
+    ".mpg",
+    ".mpeg",
+    ".m2ts",
 }
 
 
@@ -35,15 +44,15 @@ def probe_file(filepath: str) -> dict | None:
     try:
         cmd = [
             "ffprobe",
-            "-v", "quiet",
-            "-print_format", "json",
+            "-v",
+            "quiet",
+            "-print_format",
+            "json",
             "-show_format",
             "-show_streams",
             str(filepath),
         ]
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=30, encoding="utf-8", errors="replace"
-        )
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, encoding="utf-8", errors="replace")
         if result.returncode != 0:
             return None
         return json.loads(result.stdout)
@@ -176,28 +185,32 @@ def extract_info(filepath: str, probe_data: dict, library_type: str) -> dict:
         lang = a.get("tags", {}).get("language", "und")
         title = a.get("tags", {}).get("title", "")
 
-        audio_info.append({
-            "codec": codec_display,
-            "codec_raw": codec,
-            "lossless": is_lossless,
-            "channels": channels,
-            "channel_layout": channel_layout,
-            "bitrate_kbps": a_bitrate,
-            "language": lang,
-            "title": title,
-            "profile": profile,
-        })
+        audio_info.append(
+            {
+                "codec": codec_display,
+                "codec_raw": codec,
+                "lossless": is_lossless,
+                "channels": channels,
+                "channel_layout": channel_layout,
+                "bitrate_kbps": a_bitrate,
+                "language": lang,
+                "title": title,
+                "profile": profile,
+            }
+        )
 
     subtitle_info = []
     for s in subtitle_streams:
         lang = s.get("tags", {}).get("language", "und")
         title = s.get("tags", {}).get("title", "")
         codec = s.get("codec_name", "unknown")
-        subtitle_info.append({
-            "codec": codec,
-            "language": lang,
-            "title": title,
-        })
+        subtitle_info.append(
+            {
+                "codec": codec,
+                "language": lang,
+                "title": title,
+            }
+        )
 
     try:
         file_mtime = os.path.getmtime(filepath)
@@ -289,13 +302,9 @@ def update_report_entry(filepath: str, report_path: str, library_type: str) -> b
         summary["total_size_gb"] = round(total_size / 1024**3, 2)
         summary["total_size_tb"] = round(total_size / 1024**4, 3)
         summary.setdefault("movies", {})["count"] = len(movie_files)
-        summary["movies"]["size_gb"] = round(
-            sum(e.get("file_size_bytes", 0) for e in movie_files) / 1024**3, 2
-        )
+        summary["movies"]["size_gb"] = round(sum(e.get("file_size_bytes", 0) for e in movie_files) / 1024**3, 2)
         summary.setdefault("series", {})["count"] = len(series_files)
-        summary["series"]["size_gb"] = round(
-            sum(e.get("file_size_bytes", 0) for e in series_files) / 1024**3, 2
-        )
+        summary["series"]["size_gb"] = round(sum(e.get("file_size_bytes", 0) for e in series_files) / 1024**3, 2)
 
     try:
         patch_report(_patch)
@@ -326,12 +335,14 @@ def write_non_english_csv(report: dict, csv_path: str) -> int:
         if _has_english_audio(f):
             continue
         langs = {(s.get("language") or "und") for s in f.get("audio_streams", [])}
-        rows.append({
-            "path": f["filepath"],
-            "file": f["filename"],
-            "audio_languages": ",".join(sorted(langs)),
-            "audio_stream_count": f["audio_stream_count"],
-        })
+        rows.append(
+            {
+                "path": f["filepath"],
+                "file": f["filename"],
+                "audio_languages": ",".join(sorted(langs)),
+                "audio_stream_count": f["audio_stream_count"],
+            }
+        )
 
     with open(csv_path, "w", newline="", encoding="utf-8") as fh:
         w = csv.DictWriter(fh, fieldnames=["path", "file", "audio_languages", "audio_stream_count"])
@@ -364,13 +375,15 @@ def write_missing_subs_csv(report: dict, csv_path: str) -> int:
         else:
             continue
         sub_langs = {(s.get("language") or "und") for s in f.get("subtitle_streams", [])}
-        rows.append({
-            "path": f["filepath"],
-            "file": f["filename"],
-            "reason": reason,
-            "subtitle_count": sub_count,
-            "subtitle_languages": ",".join(sorted(sub_langs)) if sub_langs else "",
-        })
+        rows.append(
+            {
+                "path": f["filepath"],
+                "file": f["filename"],
+                "reason": reason,
+                "subtitle_count": sub_count,
+                "subtitle_languages": ",".join(sorted(sub_langs)) if sub_langs else "",
+            }
+        )
 
     with open(csv_path, "w", newline="", encoding="utf-8") as fh:
         w = csv.DictWriter(fh, fieldnames=["path", "file", "reason", "subtitle_count", "subtitle_languages"])
@@ -384,22 +397,26 @@ def main():
     sys.stdout.reconfigure(line_buffering=True)
 
     parser = argparse.ArgumentParser(description="Scan media library and produce analysis report")
-    parser.add_argument("--movies", type=str, default=str(NAS_MOVIES),
-                        help="Path to movies directory")
-    parser.add_argument("--series", type=str, default=str(NAS_SERIES),
-                        help="Path to series directory")
-    parser.add_argument("--output", type=str, default=str(MEDIA_REPORT),
-                        help="Output JSON file")
-    parser.add_argument("--workers", type=int, default=4,
-                        help="Parallel ffprobe workers")
-    parser.add_argument("--full", action="store_true",
-                        help="Force full rescan (ignore cached results)")
-    parser.add_argument("--limit", type=int, default=0,
-                        help="Limit files to scan (0 = all, useful for testing)")
-    parser.add_argument("--non-english-csv", type=str, default=None, metavar="PATH",
-                        help="After scan, write CSV of files missing English audio")
-    parser.add_argument("--missing-subs-csv", type=str, default=None, metavar="PATH",
-                        help="After scan, write CSV of files missing subtitles or English subs")
+    parser.add_argument("--movies", type=str, default=str(NAS_MOVIES), help="Path to movies directory")
+    parser.add_argument("--series", type=str, default=str(NAS_SERIES), help="Path to series directory")
+    parser.add_argument("--output", type=str, default=str(MEDIA_REPORT), help="Output JSON file")
+    parser.add_argument("--workers", type=int, default=4, help="Parallel ffprobe workers")
+    parser.add_argument("--full", action="store_true", help="Force full rescan (ignore cached results)")
+    parser.add_argument("--limit", type=int, default=0, help="Limit files to scan (0 = all, useful for testing)")
+    parser.add_argument(
+        "--non-english-csv",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help="After scan, write CSV of files missing English audio",
+    )
+    parser.add_argument(
+        "--missing-subs-csv",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help="After scan, write CSV of files missing subtitles or English subs",
+    )
     args = parser.parse_args()
 
     all_files = []
@@ -413,7 +430,7 @@ def main():
             print(f"WARNING: Path not found: {path}")
 
     if args.limit > 0:
-        all_files = all_files[:args.limit]
+        all_files = all_files[: args.limit]
 
     # Incremental scan: reuse results from existing report for unchanged files.
     # A file is "unchanged" if its filepath, size, and mtime all match.
@@ -476,7 +493,7 @@ def main():
         for future in as_completed(futures):
             completed += 1
             if total_to_probe > 0 and (completed % 50 == 0 or completed == total_to_probe):
-                print(f"  Progress: {completed}/{total_to_probe} ({100*completed/total_to_probe:.1f}%)")
+                print(f"  Progress: {completed}/{total_to_probe} ({100 * completed / total_to_probe:.1f}%)")
 
             result, error_path = future.result()
             if result:
@@ -535,18 +552,19 @@ def main():
 
     # Write report atomically using the shared lock
     from tools.report_lock import write_report
+
     write_report(report)
     output_path = args.output
 
-    print(f"\n{'='*60}")
-    print(f"Scan complete!")
+    print(f"\n{'=' * 60}")
+    print("Scan complete!")
     print(f"  Total files: {summary['total_files']}")
     print(f"  Total size:  {summary['total_size_tb']} TB ({summary['total_size_gb']} GB)")
     print(f"  Movies:      {summary['movies']['count']} ({summary['movies']['size_gb']} GB)")
     print(f"  Series:      {summary['series']['count']} ({summary['series']['size_gb']} GB)")
     print(f"  Errors:      {summary['errors']}")
     print(f"  Report:      {output_path}")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     # Non-English CSV (uses the already-scanned report, no extra ffprobe calls)
     if args.non_english_csv:

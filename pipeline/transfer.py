@@ -32,8 +32,7 @@ def get_free_space(path: str) -> int:
     return shutil.disk_usage(path).free
 
 
-def fetch_file(item: dict, staging_dir: str, config: dict, state: PipelineState,
-               force: bool = False) -> Optional[str]:
+def fetch_file(item: dict, staging_dir: str, config: dict, state: PipelineState, force: bool = False) -> Optional[str]:
     """Copy file from NAS to local staging. Returns local path or None on failure."""
     source = item["filepath"]
     # Mirror directory structure under staging/fetch/
@@ -106,10 +105,15 @@ def fetch_file(item: dict, staging_dir: str, config: dict, state: PipelineState,
             return None
         speed = file_size / elapsed / (1024**2) if elapsed > 0 else 0
         logging.info(f"Fetched in {format_duration(elapsed)} ({speed:.0f} MB/s)")
-        state.set_file(source, FileStatus.PROCESSING, local_path=local_path,
-                       input_size_bytes=file_size,
-                       fetch_start=start, fetch_end=time.time(),
-                       fetch_time_secs=round(elapsed, 1))
+        state.set_file(
+            source,
+            FileStatus.PROCESSING,
+            local_path=local_path,
+            input_size_bytes=file_size,
+            fetch_start=start,
+            fetch_end=time.time(),
+            fetch_time_secs=round(elapsed, 1),
+        )
         return local_path
     except Exception as e:
         logging.error(f"Fetch failed: {e}")
@@ -123,8 +127,7 @@ def fetch_file(item: dict, staging_dir: str, config: dict, state: PipelineState,
         return None
 
 
-def upload_file(source_filepath: str, item: dict, staging_dir: str,
-                config: dict, state: PipelineState) -> bool:
+def upload_file(source_filepath: str, item: dict, staging_dir: str, config: dict, state: PipelineState) -> bool:
     """Copy encoded file back to NAS alongside the original."""
     file_info = state.get_file(source_filepath)
     if not file_info:
@@ -144,16 +147,14 @@ def upload_file(source_filepath: str, item: dict, staging_dir: str,
 
     if os.path.exists(dest_path) and not config["overwrite_existing"]:
         logging.warning(f"Destination exists, skipping: {dest_path}")
-        state.set_file(source_filepath, FileStatus.DONE,
-                       reason="destination exists", dest_path=dest_path)
+        state.set_file(source_filepath, FileStatus.DONE, reason="destination exists", dest_path=dest_path)
         # Clean up local encoded file
         if os.path.exists(output_path):
             os.remove(output_path)
         return True
 
     upload_start = time.time()
-    state.set_file(source_filepath, FileStatus.UPLOADING, dest_path=dest_path,
-                   upload_start=upload_start)
+    state.set_file(source_filepath, FileStatus.UPLOADING, dest_path=dest_path, upload_start=upload_start)
     logging.info(f"Uploading: {dest_filename} -> {source_dir}")
 
     max_retries = 5
@@ -166,8 +167,13 @@ def upload_file(source_filepath: str, item: dict, staging_dir: str,
             speed = output_size / elapsed / (1024**2) if elapsed > 0 else 0
             logging.info(f"Uploaded in {format_duration(elapsed)} ({speed:.0f} MB/s)")
 
-            state.set_file(source_filepath, FileStatus.UPLOADED, dest_path=dest_path,
-                           upload_end=time.time(), upload_time_secs=round(elapsed, 1))
+            state.set_file(
+                source_filepath,
+                FileStatus.UPLOADED,
+                dest_path=dest_path,
+                upload_end=time.time(),
+                upload_time_secs=round(elapsed, 1),
+            )
 
             # Clean up local encoded file (non-fatal if locked; will be swept up later)
             try:
@@ -207,8 +213,7 @@ def verify_file(source_filepath: str, item: dict, config: dict, state: PipelineS
     dest_path = file_info.get("dest_path")
     if not dest_path or not os.path.exists(dest_path):
         logging.error(f"Destination file missing: {dest_path}")
-        state.set_file(source_filepath, FileStatus.ERROR,
-                       error="dest file missing after upload", stage="verify")
+        state.set_file(source_filepath, FileStatus.ERROR, error="dest file missing after upload", stage="verify")
         return False
 
     # Check duration
@@ -218,32 +223,37 @@ def verify_file(source_filepath: str, item: dict, config: dict, state: PipelineS
 
     if source_duration > 0 and abs(source_duration - dest_duration) > tolerance:
         if file_info.get("skip_duration_check"):
-            logging.warning(f"Duration mismatch overridden by user "
-                            f"(source={source_duration:.1f}s, dest={dest_duration:.1f}s)")
+            logging.warning(
+                f"Duration mismatch overridden by user (source={source_duration:.1f}s, dest={dest_duration:.1f}s)"
+            )
         else:
-            logging.error(f"Verification failed: duration mismatch "
-                          f"(source={source_duration:.1f}s, dest={dest_duration:.1f}s)")
-            state.set_file(source_filepath, FileStatus.ERROR,
-                           error="duration mismatch", stage="verify")
+            logging.error(
+                f"Verification failed: duration mismatch (source={source_duration:.1f}s, dest={dest_duration:.1f}s)"
+            )
+            state.set_file(source_filepath, FileStatus.ERROR, error="duration mismatch", stage="verify")
             return False
 
     dest_size = os.path.getsize(dest_path)
     source_size = item["file_size_bytes"]
     saved = source_size - dest_size
 
-    state.set_file(source_filepath, FileStatus.VERIFIED,
-                   dest_path=dest_path,
-                   dest_size_bytes=dest_size,
-                   bytes_saved=saved,
-                   verify_end=time.time())
+    state.set_file(
+        source_filepath,
+        FileStatus.VERIFIED,
+        dest_path=dest_path,
+        dest_size_bytes=dest_size,
+        bytes_saved=saved,
+        verify_end=time.time(),
+    )
 
     logging.info(f"Verified: {item['filename']} -> saved {format_bytes(saved)}")
 
     return True
 
 
-def replace_original(source_filepath: str, item: dict, config: dict, state: PipelineState,
-                     clean_filename: str | None = None) -> bool:
+def replace_original(
+    source_filepath: str, item: dict, config: dict, state: PipelineState, clean_filename: str | None = None
+) -> bool:
     """Replace original file on NAS with the AV1 version. Crash-safe via rename sequence.
 
     Sequence: original -> .original.bak -> rename .av1.mkv -> original name (.mkv) -> delete .bak
@@ -259,8 +269,7 @@ def replace_original(source_filepath: str, item: dict, config: dict, state: Pipe
     dest_path = file_info.get("dest_path")  # the .av1.mkv on NAS
     if not dest_path or not os.path.exists(dest_path):
         logging.error(f"AV1 file missing for replace: {dest_path}")
-        state.set_file(source_filepath, FileStatus.ERROR,
-                       error="av1 file missing for replace", stage="replace")
+        state.set_file(source_filepath, FileStatus.ERROR, error="av1 file missing for replace", stage="replace")
         return False
 
     # Target: original filename but with .mkv extension (or clean_filename if provided)
@@ -272,8 +281,9 @@ def replace_original(source_filepath: str, item: dict, config: dict, state: Pipe
     final_path = os.path.join(source_dir, final_name)
     backup_path = source_filepath + ".original.bak"
 
-    state.set_file(source_filepath, FileStatus.REPLACING,
-                   dest_path=dest_path, final_path=final_path, backup_path=backup_path)
+    state.set_file(
+        source_filepath, FileStatus.REPLACING, dest_path=dest_path, final_path=final_path, backup_path=backup_path
+    )
 
     max_retries = 5
     for attempt in range(max_retries):
@@ -294,10 +304,9 @@ def replace_original(source_filepath: str, item: dict, config: dict, state: Pipe
             # Step 3: Delete backup
             if os.path.exists(backup_path):
                 os.remove(backup_path)
-                logging.info(f"  Deleted original backup")
+                logging.info("  Deleted original backup")
 
-            state.set_file(source_filepath, FileStatus.REPLACED, final_path=final_path,
-                           replace_end=time.time())
+            state.set_file(source_filepath, FileStatus.REPLACED, final_path=final_path, replace_end=time.time())
             logging.info(f"Replaced: {item['filename']} -> {final_name}")
 
             return True

@@ -36,13 +36,18 @@ def get_duration(filepath: str) -> Optional[float]:
     """Get file duration via ffprobe."""
     try:
         cmd = [
-            "ffprobe", "-v", "quiet", "-print_format", "json",
-            "-show_format", str(filepath),
+            "ffprobe",
+            "-v",
+            "quiet",
+            "-print_format",
+            "json",
+            "-show_format",
+            str(filepath),
         ]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30,
-                                encoding="utf-8", errors="replace")
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, encoding="utf-8", errors="replace")
         if result.returncode == 0:
             import json
+
             data = json.loads(result.stdout)
             return float(data.get("format", {}).get("duration", 0))
     except Exception:
@@ -99,8 +104,9 @@ def _select_audio_streams(item: dict, config: dict) -> list[int] | None:
 
     kept = sorted(keep)
     stripped = len(audio_streams) - len(kept)
-    logging.info(f"  Keeping {len(kept)} of {len(audio_streams)} audio streams "
-                 f"(stripped {stripped} non-English tracks)")
+    logging.info(
+        f"  Keeping {len(kept)} of {len(audio_streams)} audio streams (stripped {stripped} non-English tracks)"
+    )
     return kept
 
 
@@ -151,31 +157,94 @@ def _parse_sub_language(filepath: str) -> str:
     Returns ISO 639 code or 'eng' as default.
     """
     from pathlib import Path
+
     stem = Path(filepath).stem  # e.g. "Movie (2020).en.hi"
     parts = stem.rsplit(".", 3)
     # Walk backwards through dot-separated parts looking for a 2-3 char lang code
-    lang_codes = {"en", "eng", "fr", "fre", "de", "deu", "ger", "es", "spa", "it", "ita",
-                  "pt", "por", "nl", "nld", "dut", "ja", "jpn", "ko", "kor", "zh", "zho",
-                  "chi", "ru", "rus", "ar", "ara", "hi", "hin", "sv", "swe", "no", "nor",
-                  "da", "dan", "fi", "fin", "pl", "pol", "tr", "tur", "cs", "ces", "cze",
-                  "hu", "hun", "ro", "ron", "rum", "el", "ell", "gre", "he", "heb",
-                  "th", "tha", "vi", "vie", "id", "ind", "ms", "msa", "may"}
-    forced = False
-    hi = False
+    lang_codes = {
+        "en",
+        "eng",
+        "fr",
+        "fre",
+        "de",
+        "deu",
+        "ger",
+        "es",
+        "spa",
+        "it",
+        "ita",
+        "pt",
+        "por",
+        "nl",
+        "nld",
+        "dut",
+        "ja",
+        "jpn",
+        "ko",
+        "kor",
+        "zh",
+        "zho",
+        "chi",
+        "ru",
+        "rus",
+        "ar",
+        "ara",
+        "hi",
+        "hin",
+        "sv",
+        "swe",
+        "no",
+        "nor",
+        "da",
+        "dan",
+        "fi",
+        "fin",
+        "pl",
+        "pol",
+        "tr",
+        "tur",
+        "cs",
+        "ces",
+        "cze",
+        "hu",
+        "hun",
+        "ro",
+        "ron",
+        "rum",
+        "el",
+        "ell",
+        "gre",
+        "he",
+        "heb",
+        "th",
+        "tha",
+        "vi",
+        "vie",
+        "id",
+        "ind",
+        "ms",
+        "msa",
+        "may",
+    }
     for part in reversed(parts[1:]):  # skip the main title
         p = part.lower()
         if p == "hi" or p == "sdh":
-            hi = True
+            pass
         elif p == "forced":
-            forced = True
+            pass
         elif p in lang_codes:
             return p
     return "eng"
 
 
-def build_ffmpeg_cmd(input_path: str, output_path: str, item: dict, config: dict,
-                     include_subs: bool = True,
-                     external_subs: list[str] | None = None) -> list[str]:
+def build_ffmpeg_cmd(
+    input_path: str,
+    output_path: str,
+    item: dict,
+    config: dict,
+    include_subs: bool = True,
+    external_subs: list[str] | None = None,
+) -> list[str]:
     """Build the ffmpeg command for NVENC AV1 encoding."""
     is_hdr = item.get("hdr", False)
     params = resolve_encode_params(config, item)
@@ -187,9 +256,12 @@ def build_ffmpeg_cmd(input_path: str, output_path: str, item: dict, config: dict
     audio_keep = _select_audio_streams(item, config)
 
     cmd = [
-        "ffmpeg", "-y",
-        "-err_detect", "ignore_err",  # continue past corrupt data in input
-        "-i", input_path,
+        "ffmpeg",
+        "-y",
+        "-err_detect",
+        "ignore_err",  # continue past corrupt data in input
+        "-i",
+        input_path,
     ]
 
     # Add external subtitle files as additional inputs
@@ -216,15 +288,24 @@ def build_ffmpeg_cmd(input_path: str, output_path: str, item: dict, config: dict
             cmd.extend(["-map", f"{i + 1}:s"])
 
     # Video: NVENC AV1
-    cmd.extend([
-        "-c:v", config["video_codec"],
-        "-cq", str(params["cq"]),
-        "-preset", params["preset"],
-        "-tune", "hq",
-        "-rc", "vbr",
-        "-b:v", "0",
-        "-pix_fmt", pix_fmt,
-    ])
+    cmd.extend(
+        [
+            "-c:v",
+            config["video_codec"],
+            "-cq",
+            str(params["cq"]),
+            "-preset",
+            params["preset"],
+            "-tune",
+            "hq",
+            "-rc",
+            "vbr",
+            "-b:v",
+            "0",
+            "-pix_fmt",
+            pix_fmt,
+        ]
+    )
 
     # Multipass
     if params["multipass"] != "disabled":
@@ -251,20 +332,31 @@ def build_ffmpeg_cmd(input_path: str, output_path: str, item: dict, config: dict
     do_tonemap = is_hdr and params.get("profile") == "tonemap"
     if do_tonemap:
         # HDR->SDR tone-mapping: BT.2020 PQ -> BT.709 with Hable curve
-        cmd.extend([
-            "-vf", "zscale=t=linear:npl=100,format=gbrpf32le,"
-                   "zscale=p=bt709,tonemap=hable:desat=0,"
-                   "zscale=t=bt709:m=bt709:r=tv,format=yuv420p10le",
-            "-color_primaries", "bt709",
-            "-color_trc", "bt709",
-            "-colorspace", "bt709",
-        ])
+        cmd.extend(
+            [
+                "-vf",
+                "zscale=t=linear:npl=100,format=gbrpf32le,"
+                "zscale=p=bt709,tonemap=hable:desat=0,"
+                "zscale=t=bt709:m=bt709:r=tv,format=yuv420p10le",
+                "-color_primaries",
+                "bt709",
+                "-color_trc",
+                "bt709",
+                "-colorspace",
+                "bt709",
+            ]
+        )
     elif is_hdr:
-        cmd.extend([
-            "-color_primaries", "bt2020",
-            "-color_trc", "smpte2084",
-            "-colorspace", "bt2020nc",
-        ])
+        cmd.extend(
+            [
+                "-color_primaries",
+                "bt2020",
+                "-color_trc",
+                "smpte2084",
+                "-colorspace",
+                "bt2020nc",
+            ]
+        )
 
     # Audio handling — codec settings use OUTPUT stream indices (which differ from
     # input indices when non-English audio streams have been stripped)
@@ -277,18 +369,25 @@ def build_ffmpeg_cmd(input_path: str, output_path: str, item: dict, config: dict
         else:
             loudnorm = config.get("audio_loudnorm", False)
             # Iterate over the streams we're actually keeping
-            kept_streams = [(idx, audio_streams[idx]) for idx in audio_keep] if audio_keep else list(enumerate(audio_streams))
+            kept_streams = (
+                [(idx, audio_streams[idx]) for idx in audio_keep] if audio_keep else list(enumerate(audio_streams))
+            )
             for out_idx, (_, audio) in enumerate(kept_streams):
                 if _should_transcode_audio(audio, config):
                     channels = audio.get("channels", 2)
-                    bitrate = (config["audio_eac3_surround_bitrate"] if channels > 2
-                               else config["audio_eac3_stereo_bitrate"])
+                    bitrate = (
+                        config["audio_eac3_surround_bitrate"] if channels > 2 else config["audio_eac3_stereo_bitrate"]
+                    )
                     if loudnorm:
                         cmd.extend([f"-filter:a:{out_idx}", "loudnorm=I=-24:LRA=7:TP=-2"])
-                    cmd.extend([
-                        f"-c:a:{out_idx}", "eac3",
-                        f"-b:a:{out_idx}", bitrate,
-                    ])
+                    cmd.extend(
+                        [
+                            f"-c:a:{out_idx}",
+                            "eac3",
+                            f"-b:a:{out_idx}",
+                            bitrate,
+                        ]
+                    )
                 else:
                     cmd.extend([f"-c:a:{out_idx}", "copy"])
 
@@ -318,15 +417,19 @@ def build_ffmpeg_cmd(input_path: str, output_path: str, item: dict, config: dict
     return cmd
 
 
-def build_audio_remux_cmd(input_path: str, output_path: str, item: dict,
-                          config: dict, include_subs: bool = True) -> list[str]:
+def build_audio_remux_cmd(
+    input_path: str, output_path: str, item: dict, config: dict, include_subs: bool = True
+) -> list[str]:
     """Build ffmpeg command that copies video but transcodes bulky audio to EAC-3."""
     audio_keep = _select_audio_streams(item, config)
 
     cmd = [
-        "ffmpeg", "-y",
-        "-i", input_path,
-        "-map", "0:v:0",
+        "ffmpeg",
+        "-y",
+        "-i",
+        input_path,
+        "-map",
+        "0:v:0",
     ]
     if audio_keep is not None:
         for idx in audio_keep:
@@ -346,18 +449,23 @@ def build_audio_remux_cmd(input_path: str, output_path: str, item: dict,
         cmd.extend(["-c:a", "copy"])
     else:
         loudnorm = config.get("audio_loudnorm", False)
-        kept_streams = [(idx, audio_streams[idx]) for idx in audio_keep] if audio_keep else list(enumerate(audio_streams))
+        kept_streams = (
+            [(idx, audio_streams[idx]) for idx in audio_keep] if audio_keep else list(enumerate(audio_streams))
+        )
         for out_idx, (_, audio) in enumerate(kept_streams):
             if _should_transcode_audio(audio, config):
                 channels = audio.get("channels", 2)
-                bitrate = (config["audio_eac3_surround_bitrate"] if channels > 2
-                           else config["audio_eac3_stereo_bitrate"])
+                bitrate = config["audio_eac3_surround_bitrate"] if channels > 2 else config["audio_eac3_stereo_bitrate"]
                 if loudnorm:
                     cmd.extend([f"-filter:a:{out_idx}", "loudnorm=I=-24:LRA=7:TP=-2"])
-                cmd.extend([
-                    f"-c:a:{out_idx}", "eac3",
-                    f"-b:a:{out_idx}", bitrate,
-                ])
+                cmd.extend(
+                    [
+                        f"-c:a:{out_idx}",
+                        "eac3",
+                        f"-b:a:{out_idx}",
+                        bitrate,
+                    ]
+                )
             else:
                 cmd.extend([f"-c:a:{out_idx}", "copy"])
 
@@ -386,8 +494,7 @@ def _remux_to_mkv(input_path: str) -> Optional[str]:
         # First video + all audio + all subs (skips data streams, cover art)
         (base_cmd + ["-map", "0:v:0", "-map", "0:a", "-map", "0:s?", "-c", "copy", remuxed_path], None),
         # Drop subs too (handles mov_text / other incompatible sub formats)
-        (base_cmd + ["-map", "0:v:0", "-map", "0:a", "-c", "copy", remuxed_path],
-         "retrying without subtitles"),
+        (base_cmd + ["-map", "0:v:0", "-map", "0:a", "-c", "copy", remuxed_path], "retrying without subtitles"),
     ]
 
     logging.info(f"Remuxing to MKV: {os.path.basename(input_path)}")
@@ -398,7 +505,11 @@ def _remux_to_mkv(input_path: str) -> Optional[str]:
             logging.info(f"  {retry_msg}")
         try:
             result = subprocess.run(
-                cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
             )
             if result.returncode == 0:
                 logging.info(f"Remuxed: {format_bytes(os.path.getsize(remuxed_path))}")

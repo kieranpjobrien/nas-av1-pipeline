@@ -24,6 +24,7 @@ class FileStatus(str, Enum):
     Each file is owned by one thread start to finish. No handoffs.
     The 'stage' field in the DB tracks which substep is active.
     """
+
     PENDING = "pending"
     FETCHING = "fetching"
     PROCESSING = "processing"
@@ -47,9 +48,21 @@ _LEGACY_STATUS_MAP = {
 
 # Columns stored directly (not in extras JSON) for efficient queries
 _DIRECT_COLS = {
-    "status", "mode", "added", "last_updated", "tier", "audio_only", "cleanup_strip",
-    "local_path", "output_path", "dest_path", "error", "stage", "reason",
-    "res_key", "sub_strip",
+    "status",
+    "mode",
+    "added",
+    "last_updated",
+    "tier",
+    "audio_only",
+    "cleanup_strip",
+    "local_path",
+    "output_path",
+    "dest_path",
+    "error",
+    "stage",
+    "reason",
+    "res_key",
+    "sub_strip",
 }
 
 
@@ -103,9 +116,21 @@ def _init_tables(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_files_status ON pipeline_files(status);
     """)
     # Ensure stats row exists
-    conn.execute("INSERT OR IGNORE INTO pipeline_stats (id, data) VALUES (1, ?)",
-                 (json.dumps({"total_files": 0, "completed": 0, "skipped": 0,
-                              "errors": 0, "bytes_saved": 0, "total_encode_time_secs": 0}),))
+    conn.execute(
+        "INSERT OR IGNORE INTO pipeline_stats (id, data) VALUES (1, ?)",
+        (
+            json.dumps(
+                {
+                    "total_files": 0,
+                    "completed": 0,
+                    "skipped": 0,
+                    "errors": 0,
+                    "bytes_saved": 0,
+                    "total_encode_time_secs": 0,
+                }
+            ),
+        ),
+    )
 
     # Add mode column if missing (migration from pre-rewrite schema)
     try:
@@ -127,7 +152,7 @@ def migrate_from_json(json_path: str, db_path: str) -> None:
     if os.path.exists(db_path):
         return  # already migrated
 
-    logging.info(f"Migrating pipeline state from JSON to SQLite...")
+    logging.info("Migrating pipeline state from JSON to SQLite...")
     with open(json_path, "r", encoding="utf-8") as f:
         data = json.load(f)
 
@@ -195,17 +220,14 @@ class PipelineState:
         """Flush stats to the database. Always writes since callers mutate the dict directly."""
         with self._lock:
             if self._stats_cache is not None:
-                self._conn.execute("UPDATE pipeline_stats SET data = ? WHERE id = 1",
-                                   (json.dumps(self._stats_cache),))
+                self._conn.execute("UPDATE pipeline_stats SET data = ? WHERE id = 1", (json.dumps(self._stats_cache),))
                 self._conn.commit()
                 self._stats_dirty = False
 
     def get_file(self, filepath: str) -> Optional[dict]:
         """Get file entry as a dict, or None if not tracked."""
         with self._lock:
-            row = self._conn.execute(
-                "SELECT * FROM pipeline_files WHERE filepath = ?", (filepath,)
-            ).fetchone()
+            row = self._conn.execute("SELECT * FROM pipeline_files WHERE filepath = ?", (filepath,)).fetchone()
             if not row:
                 return None
             return self._row_to_dict(row)
@@ -220,9 +242,7 @@ class PipelineState:
             now = datetime.now().isoformat()
 
             # Read existing entry to preserve fields not being updated
-            existing_row = self._conn.execute(
-                "SELECT * FROM pipeline_files WHERE filepath = ?", (filepath,)
-            ).fetchone()
+            existing_row = self._conn.execute("SELECT * FROM pipeline_files WHERE filepath = ?", (filepath,)).fetchone()
 
             all_data = {"status": status.value, "last_updated": now}
             if not existing_row:
@@ -282,10 +302,18 @@ class PipelineState:
         if self._stats_cache is None:
             with self._lock:
                 row = self._conn.execute("SELECT data FROM pipeline_stats WHERE id = 1").fetchone()
-                self._stats_cache = json.loads(row[0]) if row else {
-                    "total_files": 0, "completed": 0, "skipped": 0,
-                    "errors": 0, "bytes_saved": 0, "total_encode_time_secs": 0,
-                }
+                self._stats_cache = (
+                    json.loads(row[0])
+                    if row
+                    else {
+                        "total_files": 0,
+                        "completed": 0,
+                        "skipped": 0,
+                        "errors": 0,
+                        "bytes_saved": 0,
+                        "total_encode_time_secs": 0,
+                    }
+                )
         return self._stats_cache
 
     @stats.setter
@@ -300,14 +328,10 @@ class PipelineState:
     def compact(self) -> int:
         """Remove REPLACED and SKIPPED entries."""
         with self._lock:
-            cursor = self._conn.execute(
-                "SELECT COUNT(*) FROM pipeline_files WHERE status IN ('replaced', 'skipped')"
-            )
+            cursor = self._conn.execute("SELECT COUNT(*) FROM pipeline_files WHERE status IN ('replaced', 'skipped')")
             count = cursor.fetchone()[0]
             if count > 0:
-                self._conn.execute(
-                    "DELETE FROM pipeline_files WHERE status IN ('replaced', 'skipped')"
-                )
+                self._conn.execute("DELETE FROM pipeline_files WHERE status IN ('replaced', 'skipped')")
                 self._conn.commit()
                 self.stats["archived_count"] = self.stats.get("archived_count", 0) + count
                 self._stats_dirty = True
@@ -325,7 +349,7 @@ class PipelineState:
     def _row_to_dict(self, row: sqlite3.Row) -> dict:
         """Convert a SQLite row to the dict format callers expect."""
         d = dict(row)
-        filepath = d.pop("filepath", None)
+        d.pop("filepath", None)
         # Merge extras into the main dict
         extras_raw = d.pop("extras", "{}")
         extras = json.loads(extras_raw) if extras_raw else {}
@@ -365,9 +389,7 @@ class PipelineState:
         """Set a metadata key (created, config, last_updated, etc.)."""
         val_str = json.dumps(value) if isinstance(value, (dict, list)) else str(value)
         with self._lock:
-            self._conn.execute(
-                "INSERT OR REPLACE INTO pipeline_meta (key, value) VALUES (?, ?)", (key, val_str)
-            )
+            self._conn.execute("INSERT OR REPLACE INTO pipeline_meta (key, value) VALUES (?, ?)", (key, val_str))
             self._conn.commit()
 
     def close(self):

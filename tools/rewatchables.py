@@ -14,15 +14,13 @@ import json
 import re
 import sys
 import time
-from pathlib import Path
-from urllib.error import URLError, HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 from xml.etree import ElementTree
 
-from paths import MEDIA_REPORT, PLEX_URL, PLEX_TOKEN, STAGING_DIR
-
-from tools.tmdb import search_movie, _rate_limit
+from paths import MEDIA_REPORT, PLEX_TOKEN, PLEX_URL, STAGING_DIR
+from tools.tmdb import search_movie
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -54,6 +52,7 @@ _QUOTE_RE = re.compile(r"[\u2018\u2019''](.+?)[\u2018\u2019'']")
 # ---------------------------------------------------------------------------
 # RSS parsing
 # ---------------------------------------------------------------------------
+
 
 def fetch_rss() -> ElementTree.Element:
     """Fetch and parse the RSS feed, trying multiple URLs."""
@@ -116,11 +115,13 @@ def parse_rss(root: ElementTree.Element) -> list[dict]:
             continue
         seen_titles.add(title_key)
 
-        episodes.append({
-            "title": movie_title,
-            "episode_title": ep_title,
-            "pub_date": pub_date_el.text.strip() if pub_date_el is not None and pub_date_el.text else "",
-        })
+        episodes.append(
+            {
+                "title": movie_title,
+                "episode_title": ep_title,
+                "pub_date": pub_date_el.text.strip() if pub_date_el is not None and pub_date_el.text else "",
+            }
+        )
 
     return episodes
 
@@ -128,6 +129,7 @@ def parse_rss(root: ElementTree.Element) -> list[dict]:
 # ---------------------------------------------------------------------------
 # TMDb matching
 # ---------------------------------------------------------------------------
+
 
 def _load_cache() -> dict:
     """Load the TMDb lookup cache."""
@@ -193,6 +195,7 @@ def match_tmdb(episodes: list[dict]) -> list[dict]:
 # Library matching
 # ---------------------------------------------------------------------------
 
+
 def _load_library_tmdb_ids() -> set[int]:
     """Load all TMDb IDs from media_report.json."""
     if not MEDIA_REPORT.exists():
@@ -222,6 +225,7 @@ def match_library(episodes: list[dict]) -> list[dict]:
 # Plex collection management
 # ---------------------------------------------------------------------------
 
+
 def _plex_get(endpoint: str) -> ElementTree.Element:
     """Authenticated GET to Plex."""
     url = f"{PLEX_URL}{endpoint}"
@@ -234,7 +238,7 @@ def _plex_put(endpoint: str) -> None:
     """Authenticated PUT to Plex."""
     url = f"{PLEX_URL}{endpoint}"
     req = Request(url, headers={"X-Plex-Token": PLEX_TOKEN}, method="PUT")
-    with urlopen(req, timeout=30) as resp:
+    with urlopen(req, timeout=30):
         pass
 
 
@@ -253,7 +257,7 @@ def _plex_delete(endpoint: str) -> None:
     """Authenticated DELETE to Plex."""
     url = f"{PLEX_URL}{endpoint}"
     req = Request(url, headers={"X-Plex-Token": PLEX_TOKEN}, method="DELETE")
-    with urlopen(req, timeout=30) as resp:
+    with urlopen(req, timeout=30):
         pass
 
 
@@ -397,6 +401,7 @@ def sync_plex_collection(
 # State persistence
 # ---------------------------------------------------------------------------
 
+
 def _save_state(episodes: list[dict], sync_result: dict) -> None:
     """Save full state to rewatchables.json."""
     CONTROL_DIR.mkdir(parents=True, exist_ok=True)
@@ -416,6 +421,7 @@ def _save_state(episodes: list[dict], sync_result: dict) -> None:
 # ---------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------
+
 
 def cmd_list(episodes: list[dict]) -> None:
     """Print all Rewatchables movies and their library status."""
@@ -456,7 +462,7 @@ def cmd_sync(episodes: list[dict], dry_run: bool = False) -> None:
         print(f"  Error: {result['error']}", file=sys.stderr)
         return
 
-    print(f"\n  Summary:")
+    print("\n  Summary:")
     print(f"    Rewatchables movies in library: {result['wanted']}")
     print(f"    Already in collection:          {result['already_in_collection']}")
     print(f"    Added:                          {result['added']}")
@@ -470,6 +476,7 @@ def cmd_sync(episodes: list[dict], dry_run: bool = False) -> None:
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
+
 
 def main() -> None:
     if sys.stdout.encoding != "utf-8":

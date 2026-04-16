@@ -17,13 +17,12 @@ Usage:
 import argparse
 import json
 import sys
-from pathlib import Path
 from urllib.error import URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 from xml.etree import ElementTree
 
-from paths import PLEX_URL, PLEX_TOKEN, STAGING_DIR
+from paths import PLEX_TOKEN, PLEX_URL, STAGING_DIR
 
 RULES_FILE = STAGING_DIR / "control" / "plex_rules.json"
 
@@ -72,7 +71,7 @@ def _plex_put(endpoint: str) -> None:
     """Make an authenticated PUT request to the Plex API."""
     url = f"{PLEX_URL}{endpoint}"
     req = Request(url, headers={"X-Plex-Token": PLEX_TOKEN}, method="PUT")
-    with urlopen(req, timeout=30) as resp:
+    with urlopen(req, timeout=30):
         pass
 
 
@@ -81,11 +80,13 @@ def _get_library_sections() -> list[dict]:
     root = _plex_get("/library/sections")
     sections = []
     for directory in root.findall(".//Directory"):
-        sections.append({
-            "key": directory.get("key"),
-            "title": directory.get("title"),
-            "type": directory.get("type"),
-        })
+        sections.append(
+            {
+                "key": directory.get("key"),
+                "title": directory.get("title"),
+                "type": directory.get("type"),
+            }
+        )
     return sections
 
 
@@ -103,25 +104,24 @@ def _get_all_movies(section_key: str) -> list[dict]:
         collections = [c.get("tag", "") for c in video.findall("Collection")]
         studio = video.get("studio", "")
 
-        movies.append({
-            "rating_key": video.get("ratingKey"),
-            "title": video.get("title", ""),
-            "year": video.get("year", ""),
-            "studio": studio,
-            "genres": genres,
-            "collections": collections,
-            "content_rating": video.get("contentRating", ""),
-        })
+        movies.append(
+            {
+                "rating_key": video.get("ratingKey"),
+                "title": video.get("title", ""),
+                "year": video.get("year", ""),
+                "studio": studio,
+                "genres": genres,
+                "collections": collections,
+                "content_rating": video.get("contentRating", ""),
+            }
+        )
     return movies
 
 
 def _get_existing_collections(section_key: str) -> dict[str, str]:
     """Get existing collections in a section. Returns {name: ratingKey}."""
     root = _plex_get(f"/library/sections/{section_key}/collections")
-    return {
-        c.get("title", ""): c.get("ratingKey", "")
-        for c in root.findall(".//Directory")
-    }
+    return {c.get("title", ""): c.get("ratingKey", "") for c in root.findall(".//Directory")}
 
 
 def _add_to_collection(section_key: str, rating_key: str, collection_name: str) -> None:
@@ -253,11 +253,13 @@ def cmd_missing_genres(rules: dict) -> None:
                             reasons.append(f"title match '{pattern}'")
 
             if expected_collections:
-                issues.append({
-                    "movie": movie,
-                    "missing_collections": sorted(expected_collections),
-                    "reasons": list(set(reasons)),
-                })
+                issues.append(
+                    {
+                        "movie": movie,
+                        "missing_collections": sorted(expected_collections),
+                        "reasons": list(set(reasons)),
+                    }
+                )
 
         if issues:
             print(f"  {len(issues)} movies missing expected collections:")
@@ -336,8 +338,7 @@ def main() -> None:
     subparsers.add_parser("missing-genres", help="Find items missing expected genres/collections")
 
     apply_parser = subparsers.add_parser("apply-rules", help="Apply collection rules to library")
-    apply_parser.add_argument("--execute", action="store_true",
-                              help="Actually apply changes (default is dry-run)")
+    apply_parser.add_argument("--execute", action="store_true", help="Actually apply changes (default is dry-run)")
 
     args = parser.parse_args()
     rules = load_rules()

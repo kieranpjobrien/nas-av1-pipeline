@@ -10,7 +10,6 @@ from pathlib import Path
 
 from paths import STAGING_DIR
 
-
 VMAF_RESULTS_DIR = STAGING_DIR / "vmaf_results"
 
 
@@ -19,7 +18,9 @@ def get_duration(filepath: str) -> float:
     try:
         result = subprocess.run(
             ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", str(filepath)],
-            capture_output=True, text=True, timeout=15,
+            capture_output=True,
+            text=True,
+            timeout=15,
         )
         data = json.loads(result.stdout)
         return float(data.get("format", {}).get("duration", 0))
@@ -63,14 +64,27 @@ def run_vmaf(source: str, encoded: str, duration: int = 30, offset: str = "auto"
 
     try:
         cmd = [
-            "ffmpeg", "-y",
-            "-ss", str(offset_secs), "-t", str(duration), "-i", source,
-            "-ss", str(offset_secs), "-t", str(duration), "-i", encoded,
+            "ffmpeg",
+            "-y",
+            "-ss",
+            str(offset_secs),
+            "-t",
+            str(duration),
+            "-i",
+            source,
+            "-ss",
+            str(offset_secs),
+            "-t",
+            str(duration),
+            "-i",
+            encoded,
             "-filter_complex",
             f"[0:v:0]scale=1920:-1:flags=bicubic[ref];"
             f"[1:v:0]scale=1920:-1:flags=bicubic[dist];"
             f"[dist][ref]libvmaf=log_fmt=json:log_path={vmaf_log}:n_threads=4",
-            "-f", "null", "-",
+            "-f",
+            "null",
+            "-",
         ]
 
         print(f"Running VMAF check ({duration}s segment at {offset_secs}s offset)...")

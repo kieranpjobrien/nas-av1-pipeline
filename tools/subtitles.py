@@ -20,7 +20,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from paths import NAS_MOVIES, NAS_SERIES, MEDIA_REPORT
+from paths import MEDIA_REPORT, NAS_MOVIES, NAS_SERIES
 
 VIDEO_EXTS = {".mkv", ".mp4", ".avi", ".m4v", ".wmv", ".mov", ".ts", ".webm"}
 SUBTITLE_EXTS = {".srt", ".ass", ".ssa", ".sub", ".sup", ".idx", ".vtt"}
@@ -33,13 +33,23 @@ def _probe_subtitles(filepath: str) -> list[dict]:
     """Extract subtitle stream info from a media file via ffprobe."""
     try:
         cmd = [
-            "ffprobe", "-v", "quiet", "-print_format", "json",
-            "-show_streams", "-select_streams", "s",
+            "ffprobe",
+            "-v",
+            "quiet",
+            "-print_format",
+            "json",
+            "-show_streams",
+            "-select_streams",
+            "s",
             str(filepath),
         ]
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=30,
-            encoding="utf-8", errors="replace",
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            encoding="utf-8",
+            errors="replace",
         )
         if result.returncode != 0:
             return []
@@ -94,8 +104,7 @@ def _has_english_external(external_subs: list[Path]) -> bool:
     return False
 
 
-def scan_directory(root: Path, library_type: str, report_data: dict | None = None,
-                   workers: int = 8) -> list[dict]:
+def scan_directory(root: Path, library_type: str, report_data: dict | None = None, workers: int = 8) -> list[dict]:
     """Scan a directory for files missing English subtitles.
 
     If report_data is provided, uses it instead of re-probing (much faster).
@@ -113,26 +122,23 @@ def scan_directory(root: Path, library_type: str, report_data: dict | None = Non
                 continue
 
             sub_streams = entry.get("subtitle_streams", [])
-            has_eng_embedded = any(
-                (s.get("language", "") or "").lower().strip() in ENGLISH_CODES
-                for s in sub_streams
-            )
+            has_eng_embedded = any((s.get("language", "") or "").lower().strip() in ENGLISH_CODES for s in sub_streams)
             external = _find_external_subs(video_path)
             has_eng_external = _has_english_external(external)
 
-            results.append({
-                "filepath": filepath,
-                "filename": entry["filename"],
-                "library_type": library_type,
-                "embedded_sub_count": len(sub_streams),
-                "embedded_languages": [
-                    (s.get("language", "") or "unknown").lower() for s in sub_streams
-                ],
-                "external_sub_files": [str(s.name) for s in external],
-                "has_english_embedded": has_eng_embedded,
-                "has_english_external": has_eng_external,
-                "has_english_any": has_eng_embedded or has_eng_external,
-            })
+            results.append(
+                {
+                    "filepath": filepath,
+                    "filename": entry["filename"],
+                    "library_type": library_type,
+                    "embedded_sub_count": len(sub_streams),
+                    "embedded_languages": [(s.get("language", "") or "unknown").lower() for s in sub_streams],
+                    "external_sub_files": [str(s.name) for s in external],
+                    "has_english_embedded": has_eng_embedded,
+                    "has_english_external": has_eng_external,
+                    "has_english_any": has_eng_embedded or has_eng_external,
+                }
+            )
         return results
 
     # No report — scan with ffprobe
@@ -169,6 +175,7 @@ def scan_directory(root: Path, library_type: str, report_data: dict | None = Non
         }
 
     import time as _time
+
     completed = 0
     start = _time.monotonic()
     total = len(video_files)
@@ -187,8 +194,7 @@ def scan_directory(root: Path, library_type: str, report_data: dict | None = Non
                     eta = f"~{remaining / 60:.0f}m" if remaining >= 60 else f"~{remaining:.0f}s"
                 else:
                     eta = "..."
-                print(f"  Progress: {completed}/{total} ({100 * completed / total:.0f}%) "
-                      f"ETA: {eta}", flush=True)
+                print(f"  Progress: {completed}/{total} ({100 * completed / total:.0f}%) ETA: {eta}", flush=True)
 
     return results
 
@@ -201,7 +207,7 @@ def print_report(results: list[dict]) -> None:
     no_subs_at_all = [r for r in results if r["embedded_sub_count"] == 0 and not r["external_sub_files"]]
 
     print(f"\n{'=' * 70}")
-    print(f"  Subtitle Report")
+    print("  Subtitle Report")
     print(f"{'=' * 70}")
     print(f"  Total files scanned:          {total}")
     print(f"  With English subtitles:       {has_eng} ({100 * has_eng / total:.1f}%)" if total else "")
@@ -231,17 +237,18 @@ def export_csv(results: list[dict], csv_path: str) -> None:
     missing = [r for r in results if not r["has_english_any"]]
     with open(csv_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow(["filepath", "filename", "library_type", "embedded_languages",
-                         "external_subs", "has_any_subs"])
+        writer.writerow(["filepath", "filename", "library_type", "embedded_languages", "external_subs", "has_any_subs"])
         for r in sorted(missing, key=lambda x: x["filepath"]):
-            writer.writerow([
-                r["filepath"],
-                r["filename"],
-                r["library_type"],
-                "; ".join(r["embedded_languages"]),
-                "; ".join(r["external_sub_files"]),
-                "yes" if r["embedded_sub_count"] > 0 or r["external_sub_files"] else "no",
-            ])
+            writer.writerow(
+                [
+                    r["filepath"],
+                    r["filename"],
+                    r["library_type"],
+                    "; ".join(r["embedded_languages"]),
+                    "; ".join(r["external_sub_files"]),
+                    "yes" if r["embedded_sub_count"] > 0 or r["external_sub_files"] else "no",
+                ]
+            )
     print(f"\nExported {len(missing)} entries to {csv_path}")
 
 
@@ -250,8 +257,9 @@ def main() -> None:
     parser.add_argument("--movies-only", action="store_true", help="Scan movies only")
     parser.add_argument("--series-only", action="store_true", help="Scan series only")
     parser.add_argument("--root", type=str, default=None, help="Custom root directory")
-    parser.add_argument("--report", type=str, default=None,
-                        help="Use existing media_report.json (faster, skips ffprobe)")
+    parser.add_argument(
+        "--report", type=str, default=None, help="Use existing media_report.json (faster, skips ffprobe)"
+    )
     parser.add_argument("--csv", type=str, default=None, help="Export missing subs to CSV")
     parser.add_argument("--workers", type=int, default=8, help="Thread pool size for ffprobe")
     args = parser.parse_args()

@@ -20,14 +20,12 @@ Requires:
 """
 
 import argparse
-import json
 import logging
 import os
 import re
 import shutil
 import subprocess
 import sys
-import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
@@ -50,7 +48,8 @@ def _find_mkvpropedit() -> Optional[str]:
             return path
     return None
 
-from paths import MEDIA_REPORT, STAGING_DIR
+
+from paths import MEDIA_REPORT, STAGING_DIR  # noqa: E402
 
 TEXT_SUB_CODECS = {"subrip", "srt", "ass", "ssa", "webvtt", "mov_text", "text", "microdvd"}
 BITMAP_SUB_CODECS = {"dvd_subtitle", "hdmv_pgs_subtitle", "dvbsub", "xsub", "pgssub"}
@@ -73,31 +72,119 @@ def _find_tesseract() -> Optional[str]:
             return path
     return None
 
+
 # ISO 639-1 (2-letter) → ISO 639-2/B (3-letter) — what MKV/mkvpropedit expects
 _ISO1_TO_ISO2 = {
-    "af": "afr", "ar": "ara", "az": "aze", "be": "bel", "bg": "bul",
-    "bn": "ben", "bs": "bos", "ca": "cat", "cs": "ces", "cy": "wel",
-    "da": "dan", "de": "deu", "el": "ell", "en": "eng", "eo": "epo",
-    "es": "spa", "et": "est", "eu": "baq", "fa": "per", "fi": "fin",
-    "fr": "fra", "ga": "gle", "gl": "glg", "gu": "guj", "he": "heb",
-    "hi": "hin", "hr": "hrv", "hu": "hun", "hy": "arm", "id": "ind",
-    "is": "ice", "it": "ita", "ja": "jpn", "ka": "geo", "kk": "kaz",
-    "km": "khm", "kn": "kan", "ko": "kor", "lt": "lit", "lv": "lav",
-    "mk": "mac", "ml": "mal", "mn": "mon", "mr": "mar", "ms": "may",
-    "mt": "mlt", "my": "bur", "nb": "nob", "ne": "nep", "nl": "dut",
-    "no": "nor", "pa": "pan", "pl": "pol", "pt": "por", "ro": "ron",
-    "ru": "rus", "sk": "slk", "sl": "slv", "so": "som", "sq": "alb",
-    "sr": "srp", "sv": "swe", "sw": "swa", "ta": "tam", "te": "tel",
-    "th": "tha", "tl": "tgl", "tr": "tur", "uk": "ukr", "ur": "urd",
-    "uz": "uzb", "vi": "vie", "zh": "zho", "zh-cn": "chi", "zh-tw": "chi",
+    "af": "afr",
+    "ar": "ara",
+    "az": "aze",
+    "be": "bel",
+    "bg": "bul",
+    "bn": "ben",
+    "bs": "bos",
+    "ca": "cat",
+    "cs": "ces",
+    "cy": "wel",
+    "da": "dan",
+    "de": "deu",
+    "el": "ell",
+    "en": "eng",
+    "eo": "epo",
+    "es": "spa",
+    "et": "est",
+    "eu": "baq",
+    "fa": "per",
+    "fi": "fin",
+    "fr": "fra",
+    "ga": "gle",
+    "gl": "glg",
+    "gu": "guj",
+    "he": "heb",
+    "hi": "hin",
+    "hr": "hrv",
+    "hu": "hun",
+    "hy": "arm",
+    "id": "ind",
+    "is": "ice",
+    "it": "ita",
+    "ja": "jpn",
+    "ka": "geo",
+    "kk": "kaz",
+    "km": "khm",
+    "kn": "kan",
+    "ko": "kor",
+    "lt": "lit",
+    "lv": "lav",
+    "mk": "mac",
+    "ml": "mal",
+    "mn": "mon",
+    "mr": "mar",
+    "ms": "may",
+    "mt": "mlt",
+    "my": "bur",
+    "nb": "nob",
+    "ne": "nep",
+    "nl": "dut",
+    "no": "nor",
+    "pa": "pan",
+    "pl": "pol",
+    "pt": "por",
+    "ro": "ron",
+    "ru": "rus",
+    "sk": "slk",
+    "sl": "slv",
+    "so": "som",
+    "sq": "alb",
+    "sr": "srp",
+    "sv": "swe",
+    "sw": "swa",
+    "ta": "tam",
+    "te": "tel",
+    "th": "tha",
+    "tl": "tgl",
+    "tr": "tur",
+    "uk": "ukr",
+    "ur": "urd",
+    "uz": "uzb",
+    "vi": "vie",
+    "zh": "zho",
+    "zh-cn": "chi",
+    "zh-tw": "chi",
     # already 3-letter pass-throughs (from heuristic inference copying media_report codes)
-    "eng": "eng", "fre": "fra", "ger": "deu", "chi": "chi", "spa": "spa",
-    "por": "por", "ita": "ita", "jpn": "jpn", "kor": "kor", "rus": "rus",
-    "ara": "ara", "dut": "dut", "swe": "swe", "nor": "nor", "dan": "dan",
-    "fin": "fin", "pol": "pol", "hun": "hun", "ces": "ces", "ron": "ron",
-    "tur": "tur", "ell": "ell", "heb": "heb", "hin": "hin", "tha": "tha",
-    "vie": "vie", "ind": "ind", "hrv": "hrv", "ukr": "ukr", "slk": "slk",
-    "slv": "slv", "bul": "bul", "srp": "srp", "nob": "nob",
+    "eng": "eng",
+    "fre": "fra",
+    "ger": "deu",
+    "chi": "chi",
+    "spa": "spa",
+    "por": "por",
+    "ita": "ita",
+    "jpn": "jpn",
+    "kor": "kor",
+    "rus": "rus",
+    "ara": "ara",
+    "dut": "dut",
+    "swe": "swe",
+    "nor": "nor",
+    "dan": "dan",
+    "fin": "fin",
+    "pol": "pol",
+    "hun": "hun",
+    "ces": "ces",
+    "ron": "ron",
+    "tur": "tur",
+    "ell": "ell",
+    "heb": "heb",
+    "hin": "hin",
+    "tha": "tha",
+    "vie": "vie",
+    "ind": "ind",
+    "hrv": "hrv",
+    "ukr": "ukr",
+    "slk": "slk",
+    "slv": "slv",
+    "bul": "bul",
+    "srp": "srp",
+    "nob": "nob",
 }
 
 
@@ -106,10 +193,10 @@ def to_iso2(lang: str) -> str:
     return _ISO1_TO_ISO2.get(lang.lower(), lang.lower())
 
 
-
 # ---------------------------------------------------------------------------
 # Subtitle text extraction
 # ---------------------------------------------------------------------------
+
 
 def extract_subtitle_text(filepath: str, sub_stream_index: int, max_chars: int = 4000) -> Optional[str]:
     """Extract plain text from a subtitle stream via ffmpeg.
@@ -120,11 +207,18 @@ def extract_subtitle_text(filepath: str, sub_stream_index: int, max_chars: int =
     Returns stripped text or None on failure.
     """
     cmd = [
-        "ffmpeg", "-hide_banner", "-loglevel", "error",
-        "-i", filepath,
-        "-map", f"0:s:{sub_stream_index}",
-        "-t", "300",   # first 5 minutes is enough for language detection
-        "-f", "srt",
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        filepath,
+        "-map",
+        f"0:s:{sub_stream_index}",
+        "-t",
+        "300",  # first 5 minutes is enough for language detection
+        "-f",
+        "srt",
         "pipe:1",
     ]
     try:
@@ -165,6 +259,7 @@ def extract_bitmap_subtitle_text(
         return None
 
     import uuid
+
     tmp_dir = os.path.join(str(STAGING_DIR), "ocr_tmp", f"{uuid.uuid4().hex[:8]}_{sub_stream_index}")
     os.makedirs(tmp_dir, exist_ok=True)
 
@@ -182,12 +277,20 @@ def extract_bitmap_subtitle_text(
         for win_idx, (offset, win_dur) in enumerate(windows):
             pattern = os.path.join(tmp_dir, f"sub_w{win_idx}_%04d.png")
             cmd = [
-                "ffmpeg", "-hide_banner", "-loglevel", "error",
-                "-ss", str(offset),
-                "-i", filepath,
-                "-map", f"0:s:{sub_stream_index}",
-                "-t", str(win_dur),
-                "-frames:v", str(frames_per_window),
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-ss",
+                str(offset),
+                "-i",
+                filepath,
+                "-map",
+                f"0:s:{sub_stream_index}",
+                "-t",
+                str(win_dur),
+                "-frames:v",
+                str(frames_per_window),
                 pattern,
             ]
             try:
@@ -234,6 +337,7 @@ def extract_bitmap_subtitle_text(
 # Language detection
 # ---------------------------------------------------------------------------
 
+
 def _cjk_language_from_script(text: str) -> Optional[tuple[str, float]]:
     """Reliably identify CJK languages using Unicode block proportions.
 
@@ -246,10 +350,10 @@ def _cjk_language_from_script(text: str) -> Optional[tuple[str, float]]:
     if total == 0:
         return None
 
-    hangul = sum(1 for c in text if "\uAC00" <= c <= "\uD7AF" or "\u1100" <= c <= "\u11FF")
-    hiragana = sum(1 for c in text if "\u3040" <= c <= "\u309F")
-    katakana = sum(1 for c in text if "\u30A0" <= c <= "\u30FF")
-    cjk_unified = sum(1 for c in text if "\u4E00" <= c <= "\u9FFF" or "\u3400" <= c <= "\u4DBF")
+    hangul = sum(1 for c in text if "\uac00" <= c <= "\ud7af" or "\u1100" <= c <= "\u11ff")
+    hiragana = sum(1 for c in text if "\u3040" <= c <= "\u309f")
+    katakana = sum(1 for c in text if "\u30a0" <= c <= "\u30ff")
+    cjk_unified = sum(1 for c in text if "\u4e00" <= c <= "\u9fff" or "\u3400" <= c <= "\u4dbf")
     kana = hiragana + katakana
 
     # Korean: significant Hangul, no/minimal kana
@@ -283,6 +387,7 @@ def detect_language(text: str) -> tuple[str, float]:
 
     try:
         from langdetect import detect_langs
+
         results = detect_langs(text)
         if results:
             best = results[0]
@@ -307,14 +412,37 @@ def infer_audio_language(file_entry: dict, audio_idx: int) -> tuple[Optional[str
     track = streams[audio_idx]
     title = (track.get("title") or "").lower()
     TITLE_HINTS = {
-        "english": "en", "eng": "en", "french": "fr", "français": "fr",
-        "spanish": "es", "español": "es", "german": "de", "deutsch": "de",
-        "italian": "it", "italiano": "it", "japanese": "ja", "chinese": "zh",
-        "portuguese": "pt", "russian": "ru", "korean": "ko", "dutch": "nl",
-        "arabic": "ar", "hindi": "hi", "swedish": "sv", "norwegian": "no",
-        "danish": "da", "finnish": "fi", "polish": "pl", "czech": "cs",
-        "hungarian": "hu", "romanian": "ro", "turkish": "tr", "greek": "el",
-        "hebrew": "he", "thai": "th", "vietnamese": "vi",
+        "english": "en",
+        "eng": "en",
+        "french": "fr",
+        "français": "fr",
+        "spanish": "es",
+        "español": "es",
+        "german": "de",
+        "deutsch": "de",
+        "italian": "it",
+        "italiano": "it",
+        "japanese": "ja",
+        "chinese": "zh",
+        "portuguese": "pt",
+        "russian": "ru",
+        "korean": "ko",
+        "dutch": "nl",
+        "arabic": "ar",
+        "hindi": "hi",
+        "swedish": "sv",
+        "norwegian": "no",
+        "danish": "da",
+        "finnish": "fi",
+        "polish": "pl",
+        "czech": "cs",
+        "hungarian": "hu",
+        "romanian": "ro",
+        "turkish": "tr",
+        "greek": "el",
+        "hebrew": "he",
+        "thai": "th",
+        "vietnamese": "vi",
     }
     for hint, code in TITLE_HINTS.items():
         if hint in title:
@@ -323,9 +451,7 @@ def infer_audio_language(file_entry: dict, audio_idx: int) -> tuple[Optional[str
     # If only one audio track and all identified subtitle tracks agree on a language
     if len(streams) == 1:
         sub_langs = {
-            s.get("language", "und").lower()
-            for s in subs
-            if s.get("language", "und").lower() not in UND_LANGS
+            s.get("language", "und").lower() for s in subs if s.get("language", "und").lower() not in UND_LANGS
         }
         if len(sub_langs) == 1:
             lang = next(iter(sub_langs))
@@ -361,7 +487,9 @@ def _get_whisper_model(size: str = "tiny"):
 
     try:
         # Add NVIDIA dll directories so CUDA runtime libraries are found
-        venv_nvidia = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".venv", "Lib", "site-packages", "nvidia")
+        venv_nvidia = os.path.join(
+            os.path.dirname(os.path.dirname(__file__)), ".venv", "Lib", "site-packages", "nvidia"
+        )
         if os.path.isdir(venv_nvidia):
             for subdir in ("cublas", "cudnn", "cuda_nvrtc"):
                 bin_dir = os.path.join(venv_nvidia, subdir, "bin")
@@ -369,6 +497,7 @@ def _get_whisper_model(size: str = "tiny"):
                     os.add_dll_directory(bin_dir)
 
         from faster_whisper import WhisperModel
+
         try:
             model = WhisperModel(size, device="cuda", compute_type="float16")
             logging.info(f"Loaded faster-whisper model ({size}, cuda/float16)")
@@ -400,6 +529,7 @@ def _extract_all_audio_samples(
     tmp_dir = os.path.join(str(STAGING_DIR), "whisper_tmp")
     os.makedirs(tmp_dir, exist_ok=True)
     import threading
+
     base = f"{os.getpid()}_{threading.current_thread().ident}"
 
     total = max(duration_secs, 120)
@@ -427,13 +557,22 @@ def _extract_all_audio_samples(
         for si, offset in enumerate(offsets):
             wav_path = os.path.join(tmp_dir, f"{base}_a{aidx}_s{si}.wav")
             paths.append(wav_path)
-            cmd.extend([
-                "-ss", str(offset),
-                "-t", str(sample_duration),
-                "-map", f"0:a:{aidx}",
-                "-ac", "1", "-ar", "16000",
-                "-y", wav_path,
-            ])
+            cmd.extend(
+                [
+                    "-ss",
+                    str(offset),
+                    "-t",
+                    str(sample_duration),
+                    "-map",
+                    f"0:a:{aidx}",
+                    "-ac",
+                    "1",
+                    "-ar",
+                    "16000",
+                    "-y",
+                    wav_path,
+                ]
+            )
         result[aidx] = paths
 
     try:
@@ -454,8 +593,7 @@ def _whisper_detect_one(model, wav_path: str) -> tuple[Optional[str], float]:
     Uses transcribe with early break — on CPU with tiny model this takes ~0.35s per sample.
     """
     try:
-        segments, info = model.transcribe(wav_path, beam_size=1, best_of=1,
-                                          language=None, without_timestamps=True)
+        segments, info = model.transcribe(wav_path, beam_size=1, best_of=1, language=None, without_timestamps=True)
         for _ in segments:
             break
         if info.language and info.language_probability > 0.1:
@@ -473,6 +611,7 @@ def _majority_vote(detections: list[tuple[str, float]]) -> tuple[Optional[str], 
         return detections[0]
 
     from collections import Counter
+
     lang_counts = Counter(lang for lang, _ in detections)
     majority_lang, majority_count = lang_counts.most_common(1)[0]
 
@@ -610,6 +749,7 @@ def detect_audio_languages_for_file(
 # Per-file processing
 # ---------------------------------------------------------------------------
 
+
 def _infer_pgs_from_siblings(
     file_entry: dict,
     detected_text_langs: dict[int, str],
@@ -661,10 +801,7 @@ def _infer_pgs_from_siblings(
         return inferred
 
     # Strategy 2: positional mapping — known text subs and bitmap subs in matching count
-    known_text_idxs = sorted(
-        idx for idx in known_langs
-        if (subs[idx].get("codec") or "").lower() in TEXT_SUB_CODECS
-    )
+    known_text_idxs = sorted(idx for idx in known_langs if (subs[idx].get("codec") or "").lower() in TEXT_SUB_CODECS)
     if len(known_text_idxs) == len(und_bitmap_idxs):
         for text_idx, bmp_idx in zip(known_text_idxs, und_bitmap_idxs):
             lang = known_langs[text_idx]
@@ -698,6 +835,7 @@ def _infer_audio_from_sub_majority(
         return None, "insufficient context"
 
     from collections import Counter
+
     counts = Counter(known_langs)
     top_lang, top_count = counts.most_common(1)[0]
     ratio = top_count / len(known_langs)
@@ -747,16 +885,18 @@ def process_file(
                 else:
                     # OCR/text extraction found nothing — leave as und,
                     # gap filler will strip if non-English
-                    text_results.append({
-                        "filepath": filepath,
-                        "track_type": "subtitle",
-                        "stream_index": sub_all_idx,
-                        "codec": codec,
-                        "detected_language": None,
-                        "confidence": 0.0,
-                        "method": "text_extraction_empty",
-                        "chars_sampled": 0,
-                    })
+                    text_results.append(
+                        {
+                            "filepath": filepath,
+                            "track_type": "subtitle",
+                            "stream_index": sub_all_idx,
+                            "codec": codec,
+                            "detected_language": None,
+                            "confidence": 0.0,
+                            "method": "text_extraction_empty",
+                            "chars_sampled": 0,
+                        }
+                    )
 
         results.extend(text_results)
 
@@ -775,42 +915,48 @@ def process_file(
                 detected, confidence = detect_language(ocr_text)
                 if detected and detected != "und" and confidence >= 0.5:
                     detected_text_langs[sub_all_idx] = detected
-                    results.append({
-                        "filepath": filepath,
-                        "track_type": "subtitle",
-                        "stream_index": sub_all_idx,
-                        "codec": codec,
-                        "detected_language": detected,
-                        "confidence": confidence,
-                        "method": "ocr_extraction",
-                        "chars_sampled": len(ocr_text),
-                    })
+                    results.append(
+                        {
+                            "filepath": filepath,
+                            "track_type": "subtitle",
+                            "stream_index": sub_all_idx,
+                            "codec": codec,
+                            "detected_language": detected,
+                            "confidence": confidence,
+                            "method": "ocr_extraction",
+                            "chars_sampled": len(ocr_text),
+                        }
+                    )
                     continue
 
             # Fall back to sibling inference
             if sub_all_idx in pgs_inferred:
                 inferred_lang, reason = pgs_inferred[sub_all_idx]
-                results.append({
-                    "filepath": filepath,
-                    "track_type": "subtitle",
-                    "stream_index": sub_all_idx,
-                    "codec": codec,
-                    "detected_language": inferred_lang,
-                    "confidence": 0.85,
-                    "method": "sibling_inference",
-                    "reason": reason,
-                })
+                results.append(
+                    {
+                        "filepath": filepath,
+                        "track_type": "subtitle",
+                        "stream_index": sub_all_idx,
+                        "codec": codec,
+                        "detected_language": inferred_lang,
+                        "confidence": 0.85,
+                        "method": "sibling_inference",
+                        "reason": reason,
+                    }
+                )
             else:
-                results.append({
-                    "filepath": filepath,
-                    "track_type": "subtitle",
-                    "stream_index": sub_all_idx,
-                    "codec": codec,
-                    "detected_language": None,
-                    "confidence": 0.0,
-                    "method": "bitmap_no_match",
-                "chars_sampled": 0,
-            })
+                results.append(
+                    {
+                        "filepath": filepath,
+                        "track_type": "subtitle",
+                        "stream_index": sub_all_idx,
+                        "codec": codec,
+                        "detected_language": None,
+                        "confidence": 0.0,
+                        "method": "bitmap_no_match",
+                        "chars_sampled": 0,
+                    }
+                )
 
     # --- Pass 3: Audio tracks (heuristics → subtitle majority → whisper) ---
     # Collect which tracks need whisper so we can batch-extract all at once
@@ -835,7 +981,9 @@ def process_file(
             detected, reason = infer_audio_language(file_entry, audio_idx)
             if not detected:
                 detected, reason = _infer_audio_from_sub_majority(
-                    file_entry, audio_idx, detected_text_langs,
+                    file_entry,
+                    audio_idx,
+                    detected_text_langs,
                 )
             conf = 0.9 if detected and "majority" not in reason else (0.8 if detected else 0.0)
 
@@ -852,11 +1000,12 @@ def process_file(
         # Check if any candidate was previously attempted (has whisper_attempted marker)
         audio_streams = file_entry.get("audio_streams", [])
         previously_failed = any(
-            audio_streams[i].get("whisper_attempted") for i in whisper_candidates
-            if i < len(audio_streams)
+            audio_streams[i].get("whisper_attempted") for i in whisper_candidates if i < len(audio_streams)
         )
         whisper_results = detect_audio_languages_for_file(
-            filepath, whisper_candidates, file_entry.get("duration_seconds", 0),
+            filepath,
+            whisper_candidates,
+            file_entry.get("duration_seconds", 0),
             aggressive=previously_failed,
         )
 
@@ -877,29 +1026,35 @@ def process_file(
 
         audio_codec = audio_streams[audio_idx].get("codec", "") if audio_idx < len(audio_streams) else ""
         if detected:
-            results.append({
-                "filepath": filepath,
-                "track_type": "audio",
-                "stream_index": audio_idx,
-                "codec": audio_codec,
-                "detected_language": detected,
-                "confidence": conf,
-                "method": method,
-                "reason": reason,
-            })
-        else:
-            lang = (audio_streams[audio_idx].get("language") or "und").lower() if audio_idx < len(audio_streams) else "und"
-            if lang in UND_LANGS:
-                results.append({
+            results.append(
+                {
                     "filepath": filepath,
                     "track_type": "audio",
                     "stream_index": audio_idx,
                     "codec": audio_codec,
-                    "detected_language": None,
-                    "confidence": 0.0,
+                    "detected_language": detected,
+                    "confidence": conf,
                     "method": method,
                     "reason": reason,
-                })
+                }
+            )
+        else:
+            lang = (
+                (audio_streams[audio_idx].get("language") or "und").lower() if audio_idx < len(audio_streams) else "und"
+            )
+            if lang in UND_LANGS:
+                results.append(
+                    {
+                        "filepath": filepath,
+                        "track_type": "audio",
+                        "stream_index": audio_idx,
+                        "codec": audio_codec,
+                        "detected_language": None,
+                        "confidence": 0.0,
+                        "method": method,
+                        "reason": reason,
+                    }
+                )
 
     return results
 
@@ -910,10 +1065,14 @@ def process_file(
 
 
 def _extract_single_sample(
-    filepath: str, audio_index: int, offset_secs: int, duration: int = 30,
+    filepath: str,
+    audio_index: int,
+    offset_secs: int,
+    duration: int = 30,
 ) -> Optional[str]:
     """Extract one audio sample. Fast — single seek, single output."""
     import threading
+
     tmp_dir = os.path.join(str(STAGING_DIR), "whisper_tmp")
     os.makedirs(tmp_dir, exist_ok=True)
     base = f"{os.getpid()}_{threading.current_thread().ident}"
@@ -921,11 +1080,28 @@ def _extract_single_sample(
 
     try:
         subprocess.run(
-            ["ffmpeg", "-hide_banner", "-loglevel", "error",
-             "-ss", str(offset_secs), "-i", filepath,
-             "-t", str(duration), "-map", f"0:a:{audio_index}",
-             "-ac", "1", "-ar", "16000", "-y", wav_path],
-            capture_output=True, timeout=120,
+            [
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-ss",
+                str(offset_secs),
+                "-i",
+                filepath,
+                "-t",
+                str(duration),
+                "-map",
+                f"0:a:{audio_index}",
+                "-ac",
+                "1",
+                "-ar",
+                "16000",
+                "-y",
+                wav_path,
+            ],
+            capture_output=True,
+            timeout=120,
         )
     except (subprocess.TimeoutExpired, FileNotFoundError):
         return None
@@ -957,7 +1133,7 @@ def _escalating_whisper_detect(
 
     Returns (language, confidence) or (None, 0.0).
     """
-    fn = os.path.basename(filepath)
+    os.path.basename(filepath)
 
     # Phase 1: Quick check — 1 sample, tiny
     wav = _extract_single_sample(filepath, aidx, int(max(30, duration * 0.2)))
@@ -1102,12 +1278,17 @@ def _run_whisper_parallel(
 
             filepath = entry["filepath"]
             duration = entry.get("duration_seconds", 0) or 120
-            filename = entry.get("filename", "?")
+            entry.get("filename", "?")
             results = {}
 
             for aidx in audio_indices:
                 lang, conf = _escalating_whisper_detect(
-                    filepath, aidx, duration, tiny, small, min_confidence,
+                    filepath,
+                    aidx,
+                    duration,
+                    tiny,
+                    small,
+                    min_confidence,
                 )
                 results[aidx] = (lang, conf)
 
@@ -1122,12 +1303,14 @@ def _run_whisper_parallel(
                             streams[aidx]["detection_confidence"] = round(conf, 3)
                             streams[aidx]["detection_method"] = "whisper"
                             stats["detected"] = stats.get("detected", 0) + 1
-                            apply_detections.append({
-                                "track_type": "audio",
-                                "stream_index": aidx,
-                                "detected_language": lang,
-                                "confidence": conf,
-                            })
+                            apply_detections.append(
+                                {
+                                    "track_type": "audio",
+                                    "stream_index": aidx,
+                                    "detected_language": lang,
+                                    "confidence": conf,
+                                }
+                            )
                         else:
                             streams[aidx]["whisper_attempted"] = True
                             stats["failed"] = stats.get("failed", 0) + 1
@@ -1144,8 +1327,10 @@ def _run_whisper_parallel(
                     pass
 
             if c % 5 == 0 or c == actual_total:
-                logging.info(f"  Whisper: {c}/{actual_total} "
-                             f"({stats.get('detected', 0)} detected, {stats.get('failed', 0)} unresolved)")
+                logging.info(
+                    f"  Whisper: {c}/{actual_total} "
+                    f"({stats.get('detected', 0)} detected, {stats.get('failed', 0)} unresolved)"
+                )
 
             # Save report after EVERY file — never lose progress
             with save_lock:
@@ -1166,6 +1351,7 @@ def _run_whisper_parallel(
 # ---------------------------------------------------------------------------
 # Enriching media report in-place
 # ---------------------------------------------------------------------------
+
 
 def enrich_report(
     report: dict,
@@ -1233,8 +1419,15 @@ def enrich_report(
 
     if use_whisper:
         logging.info("  Whisper: parallel mode (extract threads + GPU/CPU inference)")
-        _run_whisper_parallel(to_process, whisper_all, min_confidence, detection_stats,
-                              report, SAVE_INTERVAL, retry_unresolved=retry_unresolved)
+        _run_whisper_parallel(
+            to_process,
+            whisper_all,
+            min_confidence,
+            detection_stats,
+            report,
+            SAVE_INTERVAL,
+            retry_unresolved=retry_unresolved,
+        )
     else:
         with ThreadPoolExecutor(max_workers=workers) as executor:
             futures = {executor.submit(process_file, entry): entry for entry in to_process}
@@ -1249,8 +1442,9 @@ def enrich_report(
                 except Exception as e:
                     logging.warning(f"  Language detection error: {e}")
 
-    logging.info(f"  Language detection complete: {detection_stats['detected']} detected, "
-                 f"{detection_stats['failed']} unresolved")
+    logging.info(
+        f"  Language detection complete: {detection_stats['detected']} detected, {detection_stats['failed']} unresolved"
+    )
 
     # Final save — merge all our changes into the current report on disk
     _incremental_save(report, to_process)
@@ -1306,18 +1500,23 @@ def _incremental_save(our_report: dict, processed_entries: list[dict]) -> None:
 
 
 def _apply_detections_to_entry(
-    entry: dict, use_whisper: bool, whisper_all: bool,
-    min_confidence: float, stats: dict,
+    entry: dict,
+    use_whisper: bool,
+    whisper_all: bool,
+    min_confidence: float,
+    stats: dict,
 ) -> None:
     """Process a single file entry and patch detection results in-place (whisper mode)."""
     # When running whisper, skip subtitle work entirely — audio only
-    results = process_file(entry, use_whisper=use_whisper, whisper_all=whisper_all,
-                           audio_only=use_whisper)
+    results = process_file(entry, use_whisper=use_whisper, whisper_all=whisper_all, audio_only=use_whisper)
     _patch_entry_from_results(entry, results, min_confidence, stats)
 
 
 def _patch_entry_from_results(
-    entry: dict, results: list[dict], min_confidence: float, stats: dict,
+    entry: dict,
+    results: list[dict],
+    min_confidence: float,
+    stats: dict,
 ) -> None:
     """Patch detection results directly onto the stream dicts in the entry."""
     for det in results:
@@ -1345,6 +1544,7 @@ def _patch_entry_from_results(
 # ---------------------------------------------------------------------------
 # Applying detections back to files
 # ---------------------------------------------------------------------------
+
 
 def _apply_file_mkvpropedit(filepath: str, detections: list[dict]) -> tuple[int, int]:
     """Apply all language detections for a file in a single mkvpropedit call.
@@ -1437,7 +1637,8 @@ def apply_detections_for_file(
     """
     # Filter to actionable detections
     actionable = [
-        d for d in detections
+        d
+        for d in detections
         if d.get("detected_language")
         and d.get("confidence", 0) >= min_confidence
         and d.get("method") not in ("bitmap_skipped", "text_extraction_failed")
@@ -1471,25 +1672,37 @@ def apply_detections_for_file(
 # Main
 # ---------------------------------------------------------------------------
 
+
 def main():
     sys.stdout.reconfigure(line_buffering=True)
     logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
 
     parser = argparse.ArgumentParser(description="Detect languages for undetermined subtitle/audio tracks")
-    parser.add_argument("--apply", action="store_true",
-                        help="Write detected languages back to MKV files using mkvpropedit/ffmpeg")
-    parser.add_argument("--min-confidence", type=float, default=0.85,
-                        help="Minimum confidence to apply a detection (default: 0.85)")
-    parser.add_argument("--whisper", action="store_true",
-                        help="Use faster-whisper for audio tracks that heuristics can't resolve")
-    parser.add_argument("--whisper-all", action="store_true",
-                        help="Run whisper on ALL audio tracks (verify existing tags)")
-    parser.add_argument("--retry-unresolved", action="store_true",
-                        help="Retry previously unresolved whisper tracks with longer samples at different offsets")
-    parser.add_argument("--spot-check", type=int, default=0, metavar="N",
-                        help="Whisper spot-check: verify N random already-tagged tracks (e.g. --spot-check 200)")
-    parser.add_argument("--workers", type=int, default=6,
-                        help="Parallel workers for subtitle extraction (default: 6)")
+    parser.add_argument(
+        "--apply", action="store_true", help="Write detected languages back to MKV files using mkvpropedit/ffmpeg"
+    )
+    parser.add_argument(
+        "--min-confidence", type=float, default=0.85, help="Minimum confidence to apply a detection (default: 0.85)"
+    )
+    parser.add_argument(
+        "--whisper", action="store_true", help="Use faster-whisper for audio tracks that heuristics can't resolve"
+    )
+    parser.add_argument(
+        "--whisper-all", action="store_true", help="Run whisper on ALL audio tracks (verify existing tags)"
+    )
+    parser.add_argument(
+        "--retry-unresolved",
+        action="store_true",
+        help="Retry previously unresolved whisper tracks with longer samples at different offsets",
+    )
+    parser.add_argument(
+        "--spot-check",
+        type=int,
+        default=0,
+        metavar="N",
+        help="Whisper spot-check: verify N random already-tagged tracks (e.g. --spot-check 200)",
+    )
+    parser.add_argument("--workers", type=int, default=6, help="Parallel workers for subtitle extraction (default: 6)")
     args = parser.parse_args()
 
     use_whisper = args.whisper or args.whisper_all or args.spot_check > 0 or args.retry_unresolved
@@ -1497,10 +1710,12 @@ def main():
     # Check pipeline isn't encoding (whisper competes for GPU)
     if use_whisper:
         from paths import PIPELINE_STATE_DB
+
         db_path = str(PIPELINE_STATE_DB)
         if os.path.exists(db_path):
             try:
                 import sqlite3
+
                 conn = sqlite3.connect(db_path, timeout=5)
                 conn.execute("PRAGMA journal_mode=WAL")
                 encoding = conn.execute(
@@ -1544,27 +1759,33 @@ def main():
             if (idx + 1) % 20 == 0 or idx + 1 == sample_size:
                 logging.info(f"  Progress: {idx + 1}/{sample_size} ({len(mismatches)} mismatches)")
             w_lang, w_conf = detect_audio_language_whisper(
-                entry["filepath"], audio_idx, entry.get("duration_seconds", 0),
+                entry["filepath"],
+                audio_idx,
+                entry.get("duration_seconds", 0),
             )
             if w_lang and w_conf >= 0.5:
                 w_iso = to_iso2(w_lang)
                 existing_iso = to_iso2(existing_tag)
                 if w_iso != existing_iso:
-                    mismatches.append({
-                        "filename": entry["filename"],
-                        "track": audio_idx,
-                        "tagged_as": existing_tag,
-                        "whisper_says": w_lang,
-                        "confidence": w_conf,
-                    })
+                    mismatches.append(
+                        {
+                            "filename": entry["filename"],
+                            "track": audio_idx,
+                            "tagged_as": existing_tag,
+                            "whisper_says": w_lang,
+                            "confidence": w_conf,
+                        }
+                    )
 
         logging.info(f"\nSpot-check complete: {len(mismatches)} mismatches out of {sample_size}")
         if mismatches:
-            logging.info(f"\nMismatched tracks:")
+            logging.info("\nMismatched tracks:")
             for m in mismatches:
-                logging.info(f"  {m['filename']} track {m['track']}: "
-                             f"tagged '{m['tagged_as']}' but whisper says '{m['whisper_says']}' "
-                             f"(conf={m['confidence']:.2f})")
+                logging.info(
+                    f"  {m['filename']} track {m['track']}: "
+                    f"tagged '{m['tagged_as']}' but whisper says '{m['whisper_says']}' "
+                    f"(conf={m['confidence']:.2f})"
+                )
         else:
             logging.info("All spot-checked tags match whisper detection.")
         return
@@ -1584,7 +1805,7 @@ def main():
         report = read_report()
 
         # Step 2: Apply detections to files
-        logging.info(f"Applying detections to files via mkvpropedit/ffmpeg...")
+        logging.info("Applying detections to files via mkvpropedit/ffmpeg...")
         if _find_mkvpropedit():
             logging.info(f"  mkvpropedit: {_find_mkvpropedit()}")
         else:
@@ -1598,22 +1819,26 @@ def main():
             detections = []
             for i, s in enumerate(entry.get("subtitle_streams", [])):
                 if s.get("detected_language"):
-                    detections.append({
-                        "track_type": "subtitle",
-                        "stream_index": i,
-                        "detected_language": s["detected_language"],
-                        "confidence": s.get("detection_confidence", 0),
-                        "method": s.get("detection_method", ""),
-                    })
+                    detections.append(
+                        {
+                            "track_type": "subtitle",
+                            "stream_index": i,
+                            "detected_language": s["detected_language"],
+                            "confidence": s.get("detection_confidence", 0),
+                            "method": s.get("detection_method", ""),
+                        }
+                    )
             for i, a in enumerate(entry.get("audio_streams", [])):
                 if a.get("detected_language"):
-                    detections.append({
-                        "track_type": "audio",
-                        "stream_index": i,
-                        "detected_language": a["detected_language"],
-                        "confidence": a.get("detection_confidence", 0),
-                        "method": a.get("detection_method", ""),
-                    })
+                    detections.append(
+                        {
+                            "track_type": "audio",
+                            "stream_index": i,
+                            "detected_language": a["detected_language"],
+                            "confidence": a.get("detection_confidence", 0),
+                            "method": a.get("detection_method", ""),
+                        }
+                    )
 
             if not detections:
                 continue
@@ -1622,7 +1847,9 @@ def main():
             if file_count % 50 == 0 or file_count == 1:
                 logging.info(f"  Progress: {file_count} files processed")
             applied, failed_count = apply_detections_for_file(
-                entry["filepath"], detections, args.min_confidence,
+                entry["filepath"],
+                detections,
+                args.min_confidence,
             )
             total_applied += applied
             total_failed += failed_count
@@ -1643,7 +1870,7 @@ def main():
         # Save updated report (languages promoted, detection fields cleared)
         write_report(report)
         logging.info(f"Applied: {total_applied}  Failed: {total_failed}")
-        logging.info(f"Report updated")
+        logging.info("Report updated")
     else:
         # Detection mode: run language detection (saves incrementally via _incremental_save)
         enrich_report(

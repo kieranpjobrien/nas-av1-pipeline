@@ -9,12 +9,10 @@ Intelligently chooses the cheapest method:
 Most operations need NO FETCH — they work directly on the NAS file.
 """
 
-import json
 import logging
 import os
 import shutil
 import subprocess
-import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -22,11 +20,12 @@ from typing import Optional
 
 from paths import STAGING_DIR
 from pipeline.ffmpeg import (
-    _should_transcode_audio, format_bytes, format_duration,
+    _should_transcode_audio,
+    format_bytes,
+    format_duration,
 )
 from pipeline.report import update_entry
 from pipeline.state import FileStatus, PipelineState
-
 
 _KEEP_LANGS = {"eng", "en", "english", "und", ""}
 
@@ -51,11 +50,10 @@ def _find_tool(name: str, search_paths: list[str]) -> Optional[str]:
     return None
 
 
-
-
 @dataclass
 class GapAnalysis:
     """What a file needs to be fully 'done'."""
+
     needs_track_removal: bool = False
     needs_audio_transcode: bool = False
     needs_metadata: bool = False
@@ -77,10 +75,15 @@ class GapAnalysis:
 
     @property
     def needs_anything(self) -> bool:
-        return (self.needs_track_removal or self.needs_audio_transcode or
-                self.needs_metadata or self.needs_filename_clean or
-                self.needs_language_detect or self.needs_sub_mux or
-                self.needs_foreign_sub_cleanup)
+        return (
+            self.needs_track_removal
+            or self.needs_audio_transcode
+            or self.needs_metadata
+            or self.needs_filename_clean
+            or self.needs_language_detect
+            or self.needs_sub_mux
+            or self.needs_foreign_sub_cleanup
+        )
 
     def describe(self) -> str:
         parts = []
@@ -190,6 +193,7 @@ def analyse_gaps(file_entry: dict, config: dict) -> GapAnalysis:
     # Filename check
     try:
         from pipeline.filename import clean_filename
+
         clean = clean_filename(file_entry["filepath"], file_entry.get("library_type", ""))
         if clean and clean != file_entry["filename"]:
             gaps.needs_filename_clean = True
@@ -250,7 +254,7 @@ def gap_fill(
             return True
 
     # Deferred external sub check (avoids slow NAS scans during queue building)
-    if getattr(gaps, '_check_external_subs', False):
+    if getattr(gaps, "_check_external_subs", False):
         _scan_external_subs(filepath, gaps)
 
     if not gaps.needs_anything:
@@ -265,6 +269,7 @@ def gap_fill(
         if gaps.needs_language_detect:
             try:
                 from pipeline.language import detect_all_languages
+
                 enriched = detect_all_languages(file_entry, use_whisper=False)
                 if enriched:
                     file_entry.update(enriched)
@@ -276,7 +281,7 @@ def gap_fill(
 
         # Track removal and/or sub muxing (remote mkvmerge — no SMB transfer)
         if (gaps.needs_track_removal or gaps.needs_sub_mux) and not gaps.needs_audio_transcode:
-            machine = getattr(gaps, '_remote_machine', None)
+            machine = getattr(gaps, "_remote_machine", None)
             success = _strip_tracks_on_nas(filepath, gaps, machine=machine)
             if not success:
                 state.set_file(filepath, FileStatus.ERROR, error="track strip failed", stage="gap_fill")
@@ -315,9 +320,10 @@ def gap_fill(
         if gaps.needs_metadata:
             try:
                 from pipeline.metadata import enrich_and_tag
+
                 tmdb_data = enrich_and_tag(filepath, os.path.basename(filepath), library_type)
                 if tmdb_data:
-                    logging.info(f"  TMDb: written")
+                    logging.info("  TMDb: written")
             except (ImportError, Exception) as e:
                 logging.debug(f"  TMDb skipped: {e}")
 
@@ -339,16 +345,17 @@ def gap_fill(
         return False
 
 
-def _strip_tracks_on_nas(filepath: str, gaps: GapAnalysis,
-                         machine: dict | None = None) -> bool:
+def _strip_tracks_on_nas(filepath: str, gaps: GapAnalysis, machine: dict | None = None) -> bool:
     """Remove foreign audio/subtitle tracks via remote mkvmerge on NAS or media server.
 
     Runs mkvmerge inside a Docker container on the target machine via SSH.
     No SMB transfer — direct local/NFS disk I/O. 100x faster.
     """
     from pipeline.nas_worker import (
-        unc_to_container_path, remote_identify, remote_strip_and_mux,
-        SERVER, NAS,
+        SERVER,
+        remote_identify,
+        remote_strip_and_mux,
+        unc_to_container_path,
     )
 
     if machine is None:
@@ -411,7 +418,9 @@ def _strip_tracks_on_nas(filepath: str, gaps: GapAnalysis,
 
     # Run remote mkvmerge
     result = remote_strip_and_mux(
-        machine, container_path, tmp_path,
+        machine,
+        container_path,
+        tmp_path,
         audio_keep_ids=audio_keep_ids,
         sub_keep_ids=sub_keep_ids,
         no_subs=no_subs,
@@ -432,7 +441,7 @@ def _strip_tracks_on_nas(filepath: str, gaps: GapAnalysis,
             break
         time.sleep(1)
     if not os.path.exists(tmp_unc):
-        logging.error(f"  Output file not found after remote mkvmerge")
+        logging.error("  Output file not found after remote mkvmerge")
         return False
 
     tmp_unc = filepath + ".gapfill_tmp.mkv"
@@ -445,8 +454,10 @@ def _strip_tracks_on_nas(filepath: str, gaps: GapAnalysis,
 
         os.replace(tmp_unc, filepath)
         saved = src_size - dst_size
-        logging.info(f"  Stripped ({machine['label']}): {format_bytes(src_size)} -> {format_bytes(dst_size)} "
-                     f"({format_bytes(abs(saved))} {'saved' if saved > 0 else 'added'})")
+        logging.info(
+            f"  Stripped ({machine['label']}): {format_bytes(src_size)} -> {format_bytes(dst_size)} "
+            f"({format_bytes(abs(saved))} {'saved' if saved > 0 else 'added'})"
+        )
         return True
     except Exception as e:
         logging.error(f"  Replace failed: {e}")
@@ -467,8 +478,9 @@ def _audio_transcode(
     state: PipelineState,
 ) -> bool:
     """Transcode audio codecs to EAC-3. Requires fetch to local + upload back."""
-    from pipeline.ffmpeg import build_audio_remux_cmd
     import hashlib
+
+    from pipeline.ffmpeg import build_audio_remux_cmd
 
     staging_dir = str(STAGING_DIR)
     fetch_dir = os.path.join(staging_dir, "fetch")
@@ -483,7 +495,7 @@ def _audio_transcode(
     try:
         # Fetch
         state.set_file(filepath, FileStatus.FETCHING, stage="fetch")
-        logging.info(f"  Fetching for audio transcode...")
+        logging.info("  Fetching for audio transcode...")
         shutil.copy2(filepath, local_path)
 
         # Build remux command (copy video, transcode audio, strip foreign tracks)
@@ -492,15 +504,17 @@ def _audio_transcode(
         # Execute
         state.set_file(filepath, FileStatus.PROCESSING, stage="audio_transcode")
         start = time.time()
-        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                   encoding="utf-8", errors="replace")
+        process = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding="utf-8", errors="replace"
+        )
         _, stderr = process.communicate()
         elapsed = time.time() - start
 
         if process.returncode != 0:
             logging.error(f"  Audio transcode failed (exit {process.returncode})")
-            state.set_file(filepath, FileStatus.ERROR, error=f"ffmpeg exit {process.returncode}",
-                           stage="audio_transcode")
+            state.set_file(
+                filepath, FileStatus.ERROR, error=f"ffmpeg exit {process.returncode}", stage="audio_transcode"
+            )
             return False
 
         if not os.path.exists(output_path):
@@ -509,15 +523,17 @@ def _audio_transcode(
 
         output_size = os.path.getsize(output_path)
         input_size = os.path.getsize(local_path)
-        logging.info(f"  Audio transcode in {format_duration(elapsed)}: "
-                     f"{format_bytes(input_size)} -> {format_bytes(output_size)}")
+        logging.info(
+            f"  Audio transcode in {format_duration(elapsed)}: "
+            f"{format_bytes(input_size)} -> {format_bytes(output_size)}"
+        )
 
         # Upload back to NAS (replace original)
         state.set_file(filepath, FileStatus.UPLOADING, stage="upload")
         tmp_path = filepath + ".audiotrans_tmp.mkv"
         shutil.copy2(output_path, tmp_path)
         os.replace(tmp_path, filepath)
-        logging.info(f"  Uploaded and replaced")
+        logging.info("  Uploaded and replaced")
 
         return True
 

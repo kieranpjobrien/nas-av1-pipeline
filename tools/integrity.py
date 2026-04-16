@@ -31,8 +31,18 @@ STATE_FILE = STAGING_DIR / "pipeline_state.json"
 CACHE_FILE = STAGING_DIR / "integrity_cache.json"
 
 VIDEO_EXTENSIONS = {
-    ".mkv", ".mp4", ".avi", ".m4v", ".wmv", ".flv",
-    ".mov", ".ts", ".webm", ".mpg", ".mpeg", ".m2ts",
+    ".mkv",
+    ".mp4",
+    ".avi",
+    ".m4v",
+    ".wmv",
+    ".flv",
+    ".mov",
+    ".ts",
+    ".webm",
+    ".mpg",
+    ".mpeg",
+    ".m2ts",
 }
 
 
@@ -41,8 +51,11 @@ def _probe_duration(filepath: str) -> float | None:
     try:
         result = subprocess.run(
             ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", filepath],
-            capture_output=True, text=True, timeout=30,
-            encoding="utf-8", errors="replace",
+            capture_output=True,
+            text=True,
+            timeout=30,
+            encoding="utf-8",
+            errors="replace",
         )
         data = json.loads(result.stdout)
         return float(data["format"]["duration"])
@@ -53,18 +66,29 @@ def _probe_duration(filepath: str) -> float | None:
 def _decode_segment(filepath: str, start_secs: float, duration_secs: float) -> str | None:
     """Decode a segment of a file. Returns error output or None if clean."""
     cmd = [
-        "ffmpeg", "-v", "error",
-        "-hwaccel", "none",
-        "-ss", str(start_secs),
-        "-t", str(duration_secs),
-        "-i", filepath,
-        "-f", "null", "-",
+        "ffmpeg",
+        "-v",
+        "error",
+        "-hwaccel",
+        "none",
+        "-ss",
+        str(start_secs),
+        "-t",
+        str(duration_secs),
+        "-i",
+        filepath,
+        "-f",
+        "null",
+        "-",
     ]
     try:
         result = subprocess.run(
-            cmd, capture_output=True, text=True,
+            cmd,
+            capture_output=True,
+            text=True,
             timeout=300,  # 5 min max per segment
-            encoding="utf-8", errors="replace",
+            encoding="utf-8",
+            errors="replace",
         )
         stderr = result.stderr.strip()
         return stderr if stderr else None
@@ -77,16 +101,25 @@ def _decode_segment(filepath: str, start_secs: float, duration_secs: float) -> s
 def _full_decode(filepath: str) -> str | None:
     """Full decode of entire file. Slow but thorough."""
     cmd = [
-        "ffmpeg", "-v", "error",
-        "-hwaccel", "none",
-        "-i", filepath,
-        "-f", "null", "-",
+        "ffmpeg",
+        "-v",
+        "error",
+        "-hwaccel",
+        "none",
+        "-i",
+        filepath,
+        "-f",
+        "null",
+        "-",
     ]
     try:
         result = subprocess.run(
-            cmd, capture_output=True, text=True,
+            cmd,
+            capture_output=True,
+            text=True,
             timeout=7200,
-            encoding="utf-8", errors="replace",
+            encoding="utf-8",
+            errors="replace",
         )
         stderr = result.stderr.strip()
         return stderr if stderr else None
@@ -112,10 +145,21 @@ def _preflight(filepath: str) -> str | None:
     # Quick ffprobe to check container is readable
     try:
         result = subprocess.run(
-            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-             "-of", "default=noprint_wrappers=1:nokey=1", filepath],
-            capture_output=True, text=True, timeout=30,
-            encoding="utf-8", errors="replace",
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                filepath,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            encoding="utf-8",
+            errors="replace",
         )
         if result.returncode != 0:
             stderr = result.stderr.strip()
@@ -240,6 +284,7 @@ def scan_directory(directory: str) -> list[str]:
 
 # -- Cache -------------------------------------------------------------------
 
+
 def _load_cache(cache_path: Path) -> dict:
     """Load integrity cache: {filepath: {"mtime": float, "status": str}}."""
     if not cache_path.exists():
@@ -277,6 +322,7 @@ def _filter_cached(files: list[str], cache: dict) -> list[str]:
 
 # -- ETA / formatting -------------------------------------------------------
 
+
 def _format_eta(elapsed: float, completed: int, total: int) -> str:
     if completed <= 0 or elapsed <= 0:
         return "calculating..."
@@ -290,25 +336,20 @@ def _format_eta(elapsed: float, completed: int, total: int) -> str:
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Spot-check video files for corruption (start/middle/end decode)")
+    parser = argparse.ArgumentParser(description="Spot-check video files for corruption (start/middle/end decode)")
     group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument("--from-state", action="store_true",
-                       help="Check all 'replaced' files from pipeline_state.json")
-    group.add_argument("--directory", type=str, metavar="PATH",
-                       help="Check all video files in this directory")
-    parser.add_argument("--output", type=str, default="integrity_check.csv",
-                        help="Output CSV file (default: integrity_check.csv)")
-    parser.add_argument("--workers", type=int, default=0,
-                        help="Parallel workers (default: half CPU cores)")
-    parser.add_argument("--full", action="store_true",
-                        help="Full decode instead of spot-check (very slow)")
-    parser.add_argument("--recheck", action="store_true",
-                        help="Ignore cache, recheck all files")
-    parser.add_argument("--state-file", type=str, default=str(STATE_FILE),
-                        help="Path to pipeline_state.json (for --from-state)")
-    parser.add_argument("--cache-file", type=str, default=str(CACHE_FILE),
-                        help="Path to integrity cache file")
+    group.add_argument("--from-state", action="store_true", help="Check all 'replaced' files from pipeline_state.json")
+    group.add_argument("--directory", type=str, metavar="PATH", help="Check all video files in this directory")
+    parser.add_argument(
+        "--output", type=str, default="integrity_check.csv", help="Output CSV file (default: integrity_check.csv)"
+    )
+    parser.add_argument("--workers", type=int, default=0, help="Parallel workers (default: half CPU cores)")
+    parser.add_argument("--full", action="store_true", help="Full decode instead of spot-check (very slow)")
+    parser.add_argument("--recheck", action="store_true", help="Ignore cache, recheck all files")
+    parser.add_argument(
+        "--state-file", type=str, default=str(STATE_FILE), help="Path to pipeline_state.json (for --from-state)"
+    )
+    parser.add_argument("--cache-file", type=str, default=str(CACHE_FILE), help="Path to integrity cache file")
     args = parser.parse_args()
 
     if args.workers <= 0:
@@ -377,8 +418,10 @@ def main():
             pct = 100 * completed / len(files)
             err_str = f", {errors_found} errors" if errors_found else ""
             status_icon = "✗" if entry["status"] == "error" else "✓"
-            print(f"  [{completed}/{len(files)} {pct:.0f}% ETA:{eta}{err_str}] "
-                  f"{status_icon} {entry['filename']}", flush=True)
+            print(
+                f"  [{completed}/{len(files)} {pct:.0f}% ETA:{eta}{err_str}] {status_icon} {entry['filename']}",
+                flush=True,
+            )
 
     # Save cache
     _save_cache(cache_path, cache)

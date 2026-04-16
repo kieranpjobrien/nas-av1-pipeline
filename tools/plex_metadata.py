@@ -19,13 +19,12 @@ Usage:
 import argparse
 import json
 import sys
-from pathlib import Path
 from urllib.error import URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 from xml.etree import ElementTree
 
-from paths import PLEX_URL, PLEX_TOKEN, STAGING_DIR
+from paths import PLEX_TOKEN, PLEX_URL, STAGING_DIR
 
 RULES_FILE = STAGING_DIR / "control" / "plex_rules.json"
 
@@ -98,6 +97,7 @@ DEFAULT_RULES = {
 # Plex API helpers
 # ---------------------------------------------------------------------------
 
+
 def _plex_get(endpoint: str) -> ElementTree.Element:
     """Make an authenticated GET request to the Plex API."""
     url = f"{PLEX_URL}{endpoint}"
@@ -110,7 +110,7 @@ def _plex_put(endpoint: str) -> None:
     """Make an authenticated PUT request to the Plex API."""
     url = f"{PLEX_URL}{endpoint}"
     req = Request(url, headers={"X-Plex-Token": PLEX_TOKEN}, method="PUT")
-    with urlopen(req, timeout=30) as resp:
+    with urlopen(req, timeout=30):
         pass
 
 
@@ -118,7 +118,7 @@ def _plex_post(endpoint: str) -> None:
     """Make an authenticated POST request to the Plex API (e.g. scan refresh)."""
     url = f"{PLEX_URL}{endpoint}"
     req = Request(url, headers={"X-Plex-Token": PLEX_TOKEN}, method="POST")
-    with urlopen(req, timeout=30) as resp:
+    with urlopen(req, timeout=30):
         pass
 
 
@@ -136,11 +136,13 @@ def _get_library_sections() -> list[dict]:
     root = _plex_get("/library/sections")
     sections = []
     for directory in root.findall(".//Directory"):
-        sections.append({
-            "key": directory.get("key"),
-            "title": directory.get("title"),
-            "type": directory.get("type"),
-        })
+        sections.append(
+            {
+                "key": directory.get("key"),
+                "title": directory.get("title"),
+                "type": directory.get("type"),
+            }
+        )
     return sections
 
 
@@ -162,16 +164,18 @@ def _get_all_shows(section_key: str) -> list[dict]:
         genres = [g.get("tag", "") for g in directory.findall("Genre")]
         collections = [c.get("tag", "") for c in directory.findall("Collection")]
         labels = [lb.get("tag", "") for lb in directory.findall("Label")]
-        shows.append({
-            "rating_key": directory.get("ratingKey"),
-            "title": directory.get("title", ""),
-            "year": directory.get("year", ""),
-            "studio": directory.get("studio", ""),
-            "genres": genres,
-            "collections": collections,
-            "labels": labels,
-            "content_rating": directory.get("contentRating", ""),
-        })
+        shows.append(
+            {
+                "rating_key": directory.get("ratingKey"),
+                "title": directory.get("title", ""),
+                "year": directory.get("year", ""),
+                "studio": directory.get("studio", ""),
+                "genres": genres,
+                "collections": collections,
+                "labels": labels,
+                "content_rating": directory.get("contentRating", ""),
+            }
+        )
     return shows
 
 
@@ -184,31 +188,31 @@ def _get_all_movies(section_key: str) -> list[dict]:
         collections = [c.get("tag", "") for c in video.findall("Collection")]
         labels = [l.get("tag", "") for l in video.findall("Label")]
 
-        movies.append({
-            "rating_key": video.get("ratingKey"),
-            "title": video.get("title", ""),
-            "year": video.get("year", ""),
-            "studio": video.get("studio", ""),
-            "genres": genres,
-            "collections": collections,
-            "labels": labels,
-            "content_rating": video.get("contentRating", ""),
-        })
+        movies.append(
+            {
+                "rating_key": video.get("ratingKey"),
+                "title": video.get("title", ""),
+                "year": video.get("year", ""),
+                "studio": video.get("studio", ""),
+                "genres": genres,
+                "collections": collections,
+                "labels": labels,
+                "content_rating": video.get("contentRating", ""),
+            }
+        )
     return movies
 
 
 def _get_existing_collections(section_key: str) -> dict[str, str]:
     """Get existing collections in a section. Returns {name: ratingKey}."""
     root = _plex_get(f"/library/sections/{section_key}/collections")
-    return {
-        c.get("title", ""): c.get("ratingKey", "")
-        for c in root.findall(".//Directory")
-    }
+    return {c.get("title", ""): c.get("ratingKey", "") for c in root.findall(".//Directory")}
 
 
 # ---------------------------------------------------------------------------
 # Plex API write operations
 # ---------------------------------------------------------------------------
+
 
 def _add_to_collection(section_key: str, rating_key: str, collection_name: str) -> None:
     """Add a movie to a collection (creates the collection if needed)."""
@@ -269,6 +273,7 @@ def _add_label(section_key: str, rating_key: str, label_name: str) -> None:
 # Rules
 # ---------------------------------------------------------------------------
 
+
 def load_rules() -> dict:
     """Load rules from control file, or create defaults."""
     if RULES_FILE.exists():
@@ -289,6 +294,7 @@ def load_rules() -> dict:
 # ---------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------
+
 
 def _audit_items(items: list[dict], section: dict, section_type: str) -> dict:
     """Build audit dict for a list of movies or shows."""
@@ -388,6 +394,7 @@ def cmd_audit(json_path: str | None = None) -> None:
     # Write JSON if requested
     if json_path and all_audit_data:
         import json
+
         with open(json_path, "w", encoding="utf-8") as f:
             json.dump({"sections": all_audit_data}, f, indent=2, ensure_ascii=False)
         print(f"\nJSON audit written to {json_path}")
@@ -458,11 +465,11 @@ def cmd_report(rules: dict) -> None:
 
         # Summary
         total = len(movies)
-        print(f"\n  Summary:")
+        print("\n  Summary:")
         print(f"    Total:       {total}")
-        print(f"    Unrated:     {len(unrated)} ({len(unrated)/total*100:.1f}%)" if total else "")
-        print(f"    No genres:   {len(no_genre)} ({len(no_genre)/total*100:.1f}%)" if total else "")
-        print(f"    No collect.: {len(no_coll)} ({len(no_coll)/total*100:.1f}%)" if total else "")
+        print(f"    Unrated:     {len(unrated)} ({len(unrated) / total * 100:.1f}%)" if total else "")
+        print(f"    No genres:   {len(no_genre)} ({len(no_genre) / total * 100:.1f}%)" if total else "")
+        print(f"    No collect.: {len(no_coll)} ({len(no_coll) / total * 100:.1f}%)" if total else "")
         print(f"    Alias fixes: {len(alias_issues)}")
 
 
@@ -504,11 +511,13 @@ def cmd_missing_genres(rules: dict) -> None:
                             reasons.append(f"title match '{pattern}'")
 
             if expected_collections:
-                issues.append({
-                    "movie": movie,
-                    "missing_collections": sorted(expected_collections),
-                    "reasons": list(set(reasons)),
-                })
+                issues.append(
+                    {
+                        "movie": movie,
+                        "missing_collections": sorted(expected_collections),
+                        "reasons": list(set(reasons)),
+                    }
+                )
 
         if issues:
             print(f"  {len(issues)} movies missing expected collections:")
@@ -559,7 +568,13 @@ def cmd_apply_rules(rules: dict, dry_run: bool = True) -> None:
                             collections_to_add.add(c)
 
             for coll in sorted(collections_to_add):
-                changes.append(("collection", f"+collection [{coll}]", lambda sk=section["key"], rk=movie["rating_key"], cn=coll: _add_to_collection(sk, rk, cn)))
+                changes.append(
+                    (
+                        "collection",
+                        f"+collection [{coll}]",
+                        lambda sk=section["key"], rk=movie["rating_key"], cn=coll: _add_to_collection(sk, rk, cn),
+                    )
+                )
 
             # --- Genre additions (if has X, also add Y) ---
             genres_to_add = set()
@@ -569,13 +584,25 @@ def cmd_apply_rules(rules: dict, dry_run: bool = True) -> None:
                         if g not in movie["genres"]:
                             genres_to_add.add(g)
             for genre in sorted(genres_to_add):
-                changes.append(("genre", f'+genre [{genre}]', lambda sk=section["key"], rk=movie["rating_key"], gn=genre: _add_genre(sk, rk, gn)))
+                changes.append(
+                    (
+                        "genre",
+                        f"+genre [{genre}]",
+                        lambda sk=section["key"], rk=movie["rating_key"], gn=genre: _add_genre(sk, rk, gn),
+                    )
+                )
 
             # --- Genre removals (junk categories) ---
             removal_list = rules.get("genre_removals", {}).get("genres", [])
             for bad_genre in removal_list:
                 if bad_genre in movie["genres"]:
-                    changes.append(("genre", f'-genre [{bad_genre}]', lambda sk=section["key"], rk=movie["rating_key"], bg=bad_genre: _remove_genre(sk, rk, bg)))
+                    changes.append(
+                        (
+                            "genre",
+                            f"-genre [{bad_genre}]",
+                            lambda sk=section["key"], rk=movie["rating_key"], bg=bad_genre: _remove_genre(sk, rk, bg),
+                        )
+                    )
 
             # --- Genre alias fixes ---
             aliases = rules.get("genre_aliases", {})
@@ -583,7 +610,13 @@ def cmd_apply_rules(rules: dict, dry_run: bool = True) -> None:
                 if old_genre in aliases:
                     new_genre = aliases[old_genre]
                     if new_genre not in movie["genres"]:
-                        changes.append(("genre", f'genre "{old_genre}" -> "{new_genre}"', lambda sk=section["key"], rk=movie["rating_key"], ng=new_genre: _add_genre(sk, rk, ng)))
+                        changes.append(
+                            (
+                                "genre",
+                                f'genre "{old_genre}" -> "{new_genre}"',
+                                lambda sk=section["key"], rk=movie["rating_key"], ng=new_genre: _add_genre(sk, rk, ng),
+                            )
+                        )
 
             # --- Content rating rules ---
             cr_rules = rules.get("content_rating_rules", {})
@@ -591,14 +624,30 @@ def cmd_apply_rules(rules: dict, dry_run: bool = True) -> None:
                 # Try to infer rating from studio
                 for studio_pattern, rating in cr_rules.get("by_studio", {}).items():
                     if studio_pattern.lower() in movie["studio"].lower():
-                        changes.append(("rating", f"+contentRating [{rating}]", lambda sk=section["key"], rk=movie["rating_key"], r=rating: _set_content_rating(sk, rk, r)))
+                        changes.append(
+                            (
+                                "rating",
+                                f"+contentRating [{rating}]",
+                                lambda sk=section["key"], rk=movie["rating_key"], r=rating: _set_content_rating(
+                                    sk, rk, r
+                                ),
+                            )
+                        )
                         break
 
                 # Try to infer from collection
                 if not any(c[0] == "rating" for c in changes):
                     for coll_name, rating in cr_rules.get("by_collection", {}).items():
                         if coll_name in movie["collections"] or coll_name in collections_to_add:
-                            changes.append(("rating", f"+contentRating [{rating}] (via collection {coll_name})", lambda sk=section["key"], rk=movie["rating_key"], r=rating: _set_content_rating(sk, rk, r)))
+                            changes.append(
+                                (
+                                    "rating",
+                                    f"+contentRating [{rating}] (via collection {coll_name})",
+                                    lambda sk=section["key"], rk=movie["rating_key"], r=rating: _set_content_rating(
+                                        sk, rk, r
+                                    ),
+                                )
+                            )
                             break
 
             # --- Label rules ---
@@ -631,7 +680,13 @@ def cmd_apply_rules(rules: dict, dry_run: bool = True) -> None:
                 labels_to_add.discard("Kid Safe")
 
             for label in sorted(labels_to_add):
-                changes.append(("label", f"+label [{label}]", lambda sk=section["key"], rk=movie["rating_key"], ln=label: _add_label(sk, rk, ln)))
+                changes.append(
+                    (
+                        "label",
+                        f"+label [{label}]",
+                        lambda sk=section["key"], rk=movie["rating_key"], ln=label: _add_label(sk, rk, ln),
+                    )
+                )
 
             # --- Apply or report ---
             if changes:
@@ -658,6 +713,7 @@ def cmd_apply_rules(rules: dict, dry_run: bool = True) -> None:
 # CLI
 # ---------------------------------------------------------------------------
 
+
 def main() -> None:
     # Ensure UTF-8 output on Windows (avoids cp1252 encoding errors with non-Latin titles)
     if sys.stdout.encoding != "utf-8":
@@ -674,14 +730,14 @@ def main() -> None:
 
     subparsers.add_parser("scan", help="Trigger library scan (refresh) on all sections")
     audit_parser = subparsers.add_parser("audit", help="Show full metadata statistics")
-    audit_parser.add_argument("--json", type=str, default=None, metavar="PATH",
-                              help="Write structured JSON audit output to file")
+    audit_parser.add_argument(
+        "--json", type=str, default=None, metavar="PATH", help="Write structured JSON audit output to file"
+    )
     subparsers.add_parser("report", help="Metadata health report (gaps and issues)")
     subparsers.add_parser("missing-genres", help="Find items missing expected genres/collections")
 
     apply_parser = subparsers.add_parser("apply-rules", help="Apply all metadata rules")
-    apply_parser.add_argument("--execute", action="store_true",
-                              help="Actually apply changes (default is dry-run)")
+    apply_parser.add_argument("--execute", action="store_true", help="Actually apply changes (default is dry-run)")
 
     args = parser.parse_args()
     rules = load_rules()

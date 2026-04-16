@@ -7,7 +7,6 @@ import os
 import re
 import shutil
 import subprocess
-import tempfile
 from typing import Optional
 
 from paths import STAGING_DIR
@@ -22,29 +21,116 @@ UND_LANGS = {"und", "unk", ""}
 
 # ISO 639-1 (2-letter) -> ISO 639-2/B (3-letter) — what MKV/mkvpropedit expects
 _ISO1_TO_ISO2 = {
-    "af": "afr", "ar": "ara", "az": "aze", "be": "bel", "bg": "bul",
-    "bn": "ben", "bs": "bos", "ca": "cat", "cs": "ces", "cy": "wel",
-    "da": "dan", "de": "deu", "el": "ell", "en": "eng", "eo": "epo",
-    "es": "spa", "et": "est", "eu": "baq", "fa": "per", "fi": "fin",
-    "fr": "fra", "ga": "gle", "gl": "glg", "gu": "guj", "he": "heb",
-    "hi": "hin", "hr": "hrv", "hu": "hun", "hy": "arm", "id": "ind",
-    "is": "ice", "it": "ita", "ja": "jpn", "ka": "geo", "kk": "kaz",
-    "km": "khm", "kn": "kan", "ko": "kor", "lt": "lit", "lv": "lav",
-    "mk": "mac", "ml": "mal", "mn": "mon", "mr": "mar", "ms": "may",
-    "mt": "mlt", "my": "bur", "nb": "nob", "ne": "nep", "nl": "dut",
-    "no": "nor", "pa": "pan", "pl": "pol", "pt": "por", "ro": "ron",
-    "ru": "rus", "sk": "slk", "sl": "slv", "so": "som", "sq": "alb",
-    "sr": "srp", "sv": "swe", "sw": "swa", "ta": "tam", "te": "tel",
-    "th": "tha", "tl": "tgl", "tr": "tur", "uk": "ukr", "ur": "urd",
-    "uz": "uzb", "vi": "vie", "zh": "zho", "zh-cn": "chi", "zh-tw": "chi",
+    "af": "afr",
+    "ar": "ara",
+    "az": "aze",
+    "be": "bel",
+    "bg": "bul",
+    "bn": "ben",
+    "bs": "bos",
+    "ca": "cat",
+    "cs": "ces",
+    "cy": "wel",
+    "da": "dan",
+    "de": "deu",
+    "el": "ell",
+    "en": "eng",
+    "eo": "epo",
+    "es": "spa",
+    "et": "est",
+    "eu": "baq",
+    "fa": "per",
+    "fi": "fin",
+    "fr": "fra",
+    "ga": "gle",
+    "gl": "glg",
+    "gu": "guj",
+    "he": "heb",
+    "hi": "hin",
+    "hr": "hrv",
+    "hu": "hun",
+    "hy": "arm",
+    "id": "ind",
+    "is": "ice",
+    "it": "ita",
+    "ja": "jpn",
+    "ka": "geo",
+    "kk": "kaz",
+    "km": "khm",
+    "kn": "kan",
+    "ko": "kor",
+    "lt": "lit",
+    "lv": "lav",
+    "mk": "mac",
+    "ml": "mal",
+    "mn": "mon",
+    "mr": "mar",
+    "ms": "may",
+    "mt": "mlt",
+    "my": "bur",
+    "nb": "nob",
+    "ne": "nep",
+    "nl": "dut",
+    "no": "nor",
+    "pa": "pan",
+    "pl": "pol",
+    "pt": "por",
+    "ro": "ron",
+    "ru": "rus",
+    "sk": "slk",
+    "sl": "slv",
+    "so": "som",
+    "sq": "alb",
+    "sr": "srp",
+    "sv": "swe",
+    "sw": "swa",
+    "ta": "tam",
+    "te": "tel",
+    "th": "tha",
+    "tl": "tgl",
+    "tr": "tur",
+    "uk": "ukr",
+    "ur": "urd",
+    "uz": "uzb",
+    "vi": "vie",
+    "zh": "zho",
+    "zh-cn": "chi",
+    "zh-tw": "chi",
     # already 3-letter pass-throughs (from heuristic inference copying media_report codes)
-    "eng": "eng", "fre": "fra", "ger": "deu", "chi": "chi", "spa": "spa",
-    "por": "por", "ita": "ita", "jpn": "jpn", "kor": "kor", "rus": "rus",
-    "ara": "ara", "dut": "dut", "swe": "swe", "nor": "nor", "dan": "dan",
-    "fin": "fin", "pol": "pol", "hun": "hun", "ces": "ces", "ron": "ron",
-    "tur": "tur", "ell": "ell", "heb": "heb", "hin": "hin", "tha": "tha",
-    "vie": "vie", "ind": "ind", "hrv": "hrv", "ukr": "ukr", "slk": "slk",
-    "slv": "slv", "bul": "bul", "srp": "srp", "nob": "nob",
+    "eng": "eng",
+    "fre": "fra",
+    "ger": "deu",
+    "chi": "chi",
+    "spa": "spa",
+    "por": "por",
+    "ita": "ita",
+    "jpn": "jpn",
+    "kor": "kor",
+    "rus": "rus",
+    "ara": "ara",
+    "dut": "dut",
+    "swe": "swe",
+    "nor": "nor",
+    "dan": "dan",
+    "fin": "fin",
+    "pol": "pol",
+    "hun": "hun",
+    "ces": "ces",
+    "ron": "ron",
+    "tur": "tur",
+    "ell": "ell",
+    "heb": "heb",
+    "hin": "hin",
+    "tha": "tha",
+    "vie": "vie",
+    "ind": "ind",
+    "hrv": "hrv",
+    "ukr": "ukr",
+    "slk": "slk",
+    "slv": "slv",
+    "bul": "bul",
+    "srp": "srp",
+    "nob": "nob",
 }
 
 # Tesseract common install locations
@@ -89,11 +175,18 @@ def extract_subtitle_text(filepath: str, sub_stream_index: int, max_chars: int =
     Returns stripped text or None on failure.
     """
     cmd = [
-        "ffmpeg", "-hide_banner", "-loglevel", "error",
-        "-i", filepath,
-        "-map", f"0:s:{sub_stream_index}",
-        "-t", "300",   # first 5 minutes is enough for language detection
-        "-f", "srt",
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        filepath,
+        "-map",
+        f"0:s:{sub_stream_index}",
+        "-t",
+        "300",  # first 5 minutes is enough for language detection
+        "-f",
+        "srt",
         "pipe:1",
     ]
     try:
@@ -135,6 +228,7 @@ def extract_bitmap_subtitle_text(
         return None
 
     import uuid
+
     tmp_dir = os.path.join(str(STAGING_DIR), "ocr_tmp", f"{uuid.uuid4().hex[:8]}_{sub_stream_index}")
     os.makedirs(tmp_dir, exist_ok=True)
 
@@ -142,11 +236,18 @@ def extract_bitmap_subtitle_text(
         # Extract subtitle frames as images
         pattern = os.path.join(tmp_dir, "sub_%04d.png")
         cmd = [
-            "ffmpeg", "-hide_banner", "-loglevel", "error",
-            "-i", filepath,
-            "-map", f"0:s:{sub_stream_index}",
-            "-t", "300",   # first 5 minutes
-            "-frames:v", str(sample_frames),
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            filepath,
+            "-map",
+            f"0:s:{sub_stream_index}",
+            "-t",
+            "300",  # first 5 minutes
+            "-frames:v",
+            str(sample_frames),
             pattern,
         ]
         try:
@@ -155,9 +256,7 @@ def extract_bitmap_subtitle_text(
             return None
 
         # Find extracted images
-        images = sorted(
-            f for f in os.listdir(tmp_dir) if f.endswith(".png")
-        )[:sample_frames]
+        images = sorted(f for f in os.listdir(tmp_dir) if f.endswith(".png"))[:sample_frames]
 
         if not images:
             return None
@@ -210,10 +309,10 @@ def _cjk_language_from_script(text: str) -> Optional[tuple[str, float]]:
     if total == 0:
         return None
 
-    hangul = sum(1 for c in text if "\uAC00" <= c <= "\uD7AF" or "\u1100" <= c <= "\u11FF")
-    hiragana = sum(1 for c in text if "\u3040" <= c <= "\u309F")
-    katakana = sum(1 for c in text if "\u30A0" <= c <= "\u30FF")
-    cjk_unified = sum(1 for c in text if "\u4E00" <= c <= "\u9FFF" or "\u3400" <= c <= "\u4DBF")
+    hangul = sum(1 for c in text if "\uac00" <= c <= "\ud7af" or "\u1100" <= c <= "\u11ff")
+    hiragana = sum(1 for c in text if "\u3040" <= c <= "\u309f")
+    katakana = sum(1 for c in text if "\u30a0" <= c <= "\u30ff")
+    cjk_unified = sum(1 for c in text if "\u4e00" <= c <= "\u9fff" or "\u3400" <= c <= "\u4dbf")
     kana = hiragana + katakana
 
     # Korean: significant Hangul, no/minimal kana
@@ -247,6 +346,7 @@ def detect_language(text: str) -> tuple[str, float]:
 
     try:
         from langdetect import detect_langs
+
         results = detect_langs(text)
         if results:
             best = results[0]
@@ -273,12 +373,14 @@ def _get_whisper_model(size: str = "tiny"):
 
     try:
         from faster_whisper import WhisperModel
+
         model = WhisperModel(size, device="cuda", compute_type="float16")
         logging.info(f"Loaded faster-whisper model ({size}, cuda/float16)")
     except Exception as e:
         logging.warning(f"Whisper GPU failed, falling back to CPU: {e}")
         try:
             from faster_whisper import WhisperModel
+
             model = WhisperModel(size, device="cpu", compute_type="int8")
             logging.info(f"Loaded faster-whisper model ({size}, cpu/int8)")
         except Exception as e2:
@@ -324,13 +426,22 @@ def _extract_all_audio_samples(
         for si, offset in enumerate(offsets):
             wav_path = os.path.join(tmp_dir, f"{base}_a{aidx}_s{si}.wav")
             paths.append(wav_path)
-            cmd.extend([
-                "-ss", str(offset),
-                "-t", str(sample_duration),
-                "-map", f"0:a:{aidx}",
-                "-ac", "1", "-ar", "16000",
-                "-y", wav_path,
-            ])
+            cmd.extend(
+                [
+                    "-ss",
+                    str(offset),
+                    "-t",
+                    str(sample_duration),
+                    "-map",
+                    f"0:a:{aidx}",
+                    "-ac",
+                    "1",
+                    "-ar",
+                    "16000",
+                    "-y",
+                    wav_path,
+                ]
+            )
         result[aidx] = paths
 
     try:
@@ -351,8 +462,7 @@ def _whisper_detect_one(model, wav_path: str) -> tuple[Optional[str], float]:
     Uses transcribe with early break — on CPU with tiny model this takes ~0.35s per sample.
     """
     try:
-        segments, info = model.transcribe(wav_path, beam_size=1, best_of=1,
-                                          language=None, without_timestamps=True)
+        segments, info = model.transcribe(wav_path, beam_size=1, best_of=1, language=None, without_timestamps=True)
         for _ in segments:
             break
         if info.language and info.language_probability > 0.1:
@@ -370,6 +480,7 @@ def _majority_vote(detections: list[tuple[str, float]]) -> tuple[Optional[str], 
         return detections[0]
 
     from collections import Counter
+
     lang_counts = Counter(lang for lang, _ in detections)
     majority_lang, majority_count = lang_counts.most_common(1)[0]
 
@@ -443,6 +554,7 @@ def detect_all_languages(file_entry: dict, use_whisper: bool = False) -> dict:
     containing detected_language, detection_confidence, detection_method fields.
     """
     import copy
+
     entry = copy.deepcopy(file_entry)
     filepath = entry["filepath"]
 
@@ -484,14 +596,37 @@ def detect_all_languages(file_entry: dict, use_whisper: bool = False) -> dict:
         # Heuristic: track title hints
         title = (stream.get("title") or "").lower()
         _TITLE_HINTS = {
-            "english": "en", "eng": "en", "french": "fr", "français": "fr",
-            "spanish": "es", "español": "es", "german": "de", "deutsch": "de",
-            "italian": "it", "italiano": "it", "japanese": "ja", "chinese": "zh",
-            "portuguese": "pt", "russian": "ru", "korean": "ko", "dutch": "nl",
-            "arabic": "ar", "hindi": "hi", "swedish": "sv", "norwegian": "no",
-            "danish": "da", "finnish": "fi", "polish": "pl", "czech": "cs",
-            "hungarian": "hu", "romanian": "ro", "turkish": "tr", "greek": "el",
-            "hebrew": "he", "thai": "th", "vietnamese": "vi",
+            "english": "en",
+            "eng": "en",
+            "french": "fr",
+            "français": "fr",
+            "spanish": "es",
+            "español": "es",
+            "german": "de",
+            "deutsch": "de",
+            "italian": "it",
+            "italiano": "it",
+            "japanese": "ja",
+            "chinese": "zh",
+            "portuguese": "pt",
+            "russian": "ru",
+            "korean": "ko",
+            "dutch": "nl",
+            "arabic": "ar",
+            "hindi": "hi",
+            "swedish": "sv",
+            "norwegian": "no",
+            "danish": "da",
+            "finnish": "fi",
+            "polish": "pl",
+            "czech": "cs",
+            "hungarian": "hu",
+            "romanian": "ro",
+            "turkish": "tr",
+            "greek": "el",
+            "hebrew": "he",
+            "thai": "th",
+            "vietnamese": "vi",
         }
         detected_from_title = None
         for hint, code in _TITLE_HINTS.items():
@@ -525,9 +660,7 @@ def detect_all_languages(file_entry: dict, use_whisper: bool = False) -> dict:
 
         # Whisper fallback
         if use_whisper:
-            w_lang, w_conf = detect_audio_language_whisper(
-                filepath, audio_idx, entry.get("duration_seconds", 0)
-            )
+            w_lang, w_conf = detect_audio_language_whisper(filepath, audio_idx, entry.get("duration_seconds", 0))
             if w_lang and w_conf > 0.5:
                 stream["detected_language"] = w_lang
                 stream["detection_confidence"] = w_conf

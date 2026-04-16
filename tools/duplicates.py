@@ -58,7 +58,8 @@ def normalize_title(filename: str) -> str:
 
     # Also try strip_tags cleaner — if it produces a shorter, cleaner title, use that
     try:
-        from tools.strip_tags import clean_series_name, clean_movie_name
+        from tools.strip_tags import clean_movie_name, clean_series_name
+
         stripped = clean_series_name(stem) or clean_movie_name(stem)
         if stripped:
             alt = " ".join(stripped.lower().split())
@@ -115,17 +116,19 @@ def find_title_duration_dupes(
         for cluster in clusters:
             group_id += 1
             for f in cluster:
-                groups.append({
-                    "group_id": group_id,
-                    "mode": "title",
-                    "normalized_title": title,
-                    "filepath": f["filepath"],
-                    "filename": f["filename"],
-                    "resolution": f.get("video", {}).get("resolution_class", ""),
-                    "codec": f.get("video", {}).get("codec", ""),
-                    "duration": round(f.get("duration_seconds", 0), 1),
-                    "file_size_gb": f.get("file_size_gb", 0),
-                })
+                groups.append(
+                    {
+                        "group_id": group_id,
+                        "mode": "title",
+                        "normalized_title": title,
+                        "filepath": f["filepath"],
+                        "filename": f["filename"],
+                        "resolution": f.get("video", {}).get("resolution_class", ""),
+                        "codec": f.get("video", {}).get("codec", ""),
+                        "duration": round(f.get("duration_seconds", 0), 1),
+                        "file_size_gb": f.get("file_size_gb", 0),
+                    }
+                )
     return groups
 
 
@@ -148,8 +151,10 @@ def find_duration_resolution_dupes(files: list[dict], duration_tolerance: float 
             cluster = [items_sorted[i]]
             j = i + 1
             while j < len(items_sorted):
-                if abs(items_sorted[j].get("duration_seconds", 0) -
-                       cluster[-1].get("duration_seconds", 0)) <= duration_tolerance:
+                if (
+                    abs(items_sorted[j].get("duration_seconds", 0) - cluster[-1].get("duration_seconds", 0))
+                    <= duration_tolerance
+                ):
                     cluster.append(items_sorted[j])
                     j += 1
                 else:
@@ -160,16 +165,18 @@ def find_duration_resolution_dupes(files: list[dict], duration_tolerance: float 
                 if len(unique_dirs) >= 2 or len(cluster) >= 2:
                     group_id += 1
                     for f in cluster:
-                        groups.append({
-                            "group_id": group_id,
-                            "mode": "duration",
-                            "filepath": f["filepath"],
-                            "filename": f["filename"],
-                            "resolution": res,
-                            "codec": f.get("video", {}).get("codec", ""),
-                            "duration": round(f.get("duration_seconds", 0), 1),
-                            "file_size_gb": f.get("file_size_gb", 0),
-                        })
+                        groups.append(
+                            {
+                                "group_id": group_id,
+                                "mode": "duration",
+                                "filepath": f["filepath"],
+                                "filename": f["filename"],
+                                "resolution": res,
+                                "codec": f.get("video", {}).get("codec", ""),
+                                "duration": round(f.get("duration_seconds", 0), 1),
+                                "file_size_gb": f.get("file_size_gb", 0),
+                            }
+                        )
             i = j
     return groups
 
@@ -237,16 +244,17 @@ def pick_best(group: list[dict]) -> tuple[dict, list[dict]]:
 
 def main():
     parser = argparse.ArgumentParser(description="Find potential duplicate files in media report")
-    parser.add_argument("--report", type=str, default=str(MEDIA_REPORT),
-                        help="Path to media_report.json")
-    parser.add_argument("--output", type=str, default="duplicates.csv",
-                        help="Output CSV file")
-    parser.add_argument("--mode", choices=["title", "duration", "both"], default="both",
-                        help="Detection mode (default: both)")
-    parser.add_argument("--delete", action="store_true",
-                        help="Score duplicates and show keep/delete recommendations (dry-run)")
-    parser.add_argument("--execute", action="store_true",
-                        help="Actually delete lower-scored copies (requires --delete)")
+    parser.add_argument("--report", type=str, default=str(MEDIA_REPORT), help="Path to media_report.json")
+    parser.add_argument("--output", type=str, default="duplicates.csv", help="Output CSV file")
+    parser.add_argument(
+        "--mode", choices=["title", "duration", "both"], default="both", help="Detection mode (default: both)"
+    )
+    parser.add_argument(
+        "--delete", action="store_true", help="Score duplicates and show keep/delete recommendations (dry-run)"
+    )
+    parser.add_argument(
+        "--execute", action="store_true", help="Actually delete lower-scored copies (requires --delete)"
+    )
     args = parser.parse_args()
 
     if args.execute and not args.delete:
@@ -334,7 +342,7 @@ def main():
             if args.execute:
                 try:
                     os.remove(d["filepath"])
-                    print(f"        -> DELETED")
+                    print("        -> DELETED")
                     total_deleted += 1
                 except OSError as e:
                     print(f"        -> FAILED: {e}")

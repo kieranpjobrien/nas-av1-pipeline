@@ -15,15 +15,19 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
-from paths import PLEX_URL, PLEX_TOKEN
-from pipeline.config import get_res_key, resolve_encode_params, REMUX_EXTENSIONS
+
+from paths import PLEX_TOKEN, PLEX_URL
+from pipeline.config import REMUX_EXTENSIONS, get_res_key, resolve_encode_params
 from pipeline.ffmpeg import (
-    build_ffmpeg_cmd, format_bytes, format_duration, get_duration, _remux_to_mkv,
+    _remux_to_mkv,
+    build_ffmpeg_cmd,
+    format_bytes,
+    format_duration,
+    get_duration,
 )
 from pipeline.language import detect_all_languages
 from pipeline.report import update_entry
 from pipeline.state import FileStatus, PipelineState
-from pipeline.transfer import fetch_file
 
 
 def full_gamut(
@@ -80,6 +84,7 @@ def full_gamut(
         # === STEP 2: Clean filename ===
         try:
             from pipeline.filename import clean_filename
+
             clean_name = clean_filename(filepath, library_type)
         except (ImportError, Exception):
             clean_name = None  # filename module not ready yet, skip
@@ -92,7 +97,7 @@ def full_gamut(
             if enriched:
                 # Update the item's stream data with detections
                 item.update(enriched)
-                logging.info(f"  Language detection complete")
+                logging.info("  Language detection complete")
         except Exception as e:
             logging.warning(f"  Language detection failed (non-fatal): {e}")
 
@@ -127,22 +132,25 @@ def full_gamut(
         eng_external = []
         for s in external_subs:
             fn = os.path.basename(s).lower()
-            is_eng = '.en.' in fn or '.eng.' in fn
-            is_hi = '.hi.' in fn or '.sdh.' in fn
+            is_eng = ".en." in fn or ".eng." in fn
+            is_hi = ".hi." in fn or ".sdh." in fn
             if is_eng and not is_hi:
                 eng_external.append(s)
                 break  # only 1 regular English sub
         if eng_external:
             logging.info(f"  Muxing {len(eng_external)} external English subtitle(s)")
-        cmd = build_ffmpeg_cmd(actual_input, output_path, item, config,
-                               include_subs=True, external_subs=eng_external or None)
+        cmd = build_ffmpeg_cmd(
+            actual_input, output_path, item, config, include_subs=True, external_subs=eng_external or None
+        )
 
-        logging.info(f"  Encoding: AV1 + EAC-3 audio + strip foreign tracks")
-        res_key = get_res_key(item)
+        logging.info("  Encoding: AV1 + EAC-3 audio + strip foreign tracks")
+        get_res_key(item)
         params = resolve_encode_params(config, item, config.get("_profile", "baseline"))
-        logging.info(f"  {library_type.upper()} | {item.get('resolution', '?')} | "
-                     f"HDR: {item.get('hdr', False)} | CQ: {params.get('cq', '?')} | "
-                     f"Preset: {params.get('preset', '?')}")
+        logging.info(
+            f"  {library_type.upper()} | {item.get('resolution', '?')} | "
+            f"HDR: {item.get('hdr', False)} | CQ: {params.get('cq', '?')} | "
+            f"Preset: {params.get('preset', '?')}"
+        )
 
         # === STEP 6: Execute encode ===
         success = _run_encode(cmd, actual_input, output_path, item, config, state, filepath)
@@ -156,9 +164,11 @@ def full_gamut(
         saved = input_size - output_size
         ratio = (1 - output_size / input_size) * 100 if input_size > 0 else 0
 
-        logging.info(f"  Encoded in {format_duration(encode_elapsed)}: "
-                     f"{format_bytes(input_size)} -> {format_bytes(output_size)} "
-                     f"({ratio:.1f}% reduction, {format_bytes(abs(saved))} {'saved' if saved > 0 else 'added'})")
+        logging.info(
+            f"  Encoded in {format_duration(encode_elapsed)}: "
+            f"{format_bytes(input_size)} -> {format_bytes(output_size)} "
+            f"({ratio:.1f}% reduction, {format_bytes(abs(saved))} {'saved' if saved > 0 else 'added'})"
+        )
 
         # Cleanup local fetch file (free staging space)
         _cleanup(local_path, remuxed_path)
@@ -166,20 +176,24 @@ def full_gamut(
         # === HAND OFF TO NETWORK WORKER ===
         # GPU is done. Set UPLOADING with all the info the network worker needs.
         # Network worker will: upload, verify, replace, TMDb, report, Plex.
-        final_name = (clean_name if clean_name else Path(filename).stem + ".mkv")
+        final_name = clean_name if clean_name else Path(filename).stem + ".mkv"
         if not final_name.endswith(".mkv"):
             final_name = Path(final_name).stem + ".mkv"
 
-        state.set_file(filepath, FileStatus.UPLOADING, stage="pending_upload",
-                       output_path=output_path,
-                       encode_time_secs=round(encode_elapsed, 1),
-                       output_size_bytes=output_size,
-                       input_size_bytes=input_size,
-                       bytes_saved=saved,
-                       compression_ratio=round(ratio, 1),
-                       final_name=final_name,
-                       library_type=library_type,
-                       duration_seconds=item.get("duration_seconds", 0))
+        state.set_file(
+            filepath,
+            FileStatus.UPLOADING,
+            stage="pending_upload",
+            output_path=output_path,
+            encode_time_secs=round(encode_elapsed, 1),
+            output_size_bytes=output_size,
+            input_size_bytes=input_size,
+            bytes_saved=saved,
+            compression_ratio=round(ratio, 1),
+            final_name=final_name,
+            library_type=library_type,
+            duration_seconds=item.get("duration_seconds", 0),
+        )
 
         logging.info(f"  Encoded, queued for upload: {final_name}")
         return True
@@ -243,9 +257,12 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
     output_duration = get_duration(dest_path) or 0
     if input_duration > 0 and abs(input_duration - output_duration) > duration_tolerance:
         logging.error(f"  Duration mismatch: input={input_duration:.1f}s, output={output_duration:.1f}s")
-        state.set_file(filepath, FileStatus.ERROR,
-                       error=f"duration mismatch ({input_duration:.0f}s vs {output_duration:.0f}s)",
-                       stage="verify")
+        state.set_file(
+            filepath,
+            FileStatus.ERROR,
+            error=f"duration mismatch ({input_duration:.0f}s vs {output_duration:.0f}s)",
+            stage="verify",
+        )
         try:
             os.remove(dest_path)
         except OSError:
@@ -274,6 +291,7 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
     # === TMDb tags ===
     try:
         from pipeline.metadata import enrich_and_tag
+
         tmdb_data = enrich_and_tag(final_path, final_name, library_type)
         if tmdb_data:
             logging.info(f"  TMDb: {tmdb_data.get('director', tmdb_data.get('created_by', ['?']))}")
@@ -290,24 +308,25 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
     _trigger_plex_scan(final_path)
 
     # === DONE ===
-    state.set_file(filepath, FileStatus.DONE,
-                   final_path=final_path,
-                   output_size_bytes=output_size,
-                   input_size_bytes=input_size,
-                   bytes_saved=saved,
-                   compression_ratio=ratio,
-                   encode_time_secs=encode_time,
-                   upload_time_secs=round(upload_elapsed, 1),
-                   mode="full_gamut")
+    state.set_file(
+        filepath,
+        FileStatus.DONE,
+        final_path=final_path,
+        output_size_bytes=output_size,
+        input_size_bytes=input_size,
+        bytes_saved=saved,
+        compression_ratio=ratio,
+        encode_time_secs=encode_time,
+        upload_time_secs=round(upload_elapsed, 1),
+        mode="full_gamut",
+    )
 
     # Update global stats
     state.stats["completed"] = state.stats.get("completed", 0) + 1
     state.stats["bytes_saved"] = state.stats.get("bytes_saved", 0) + saved
     state.stats["total_encode_time_secs"] = state.stats.get("total_encode_time_secs", 0) + encode_time
     state.stats["total_source_size_bytes"] = state.stats.get("total_source_size_bytes", 0) + input_size
-    state.stats["total_content_duration_secs"] = (
-        state.stats.get("total_content_duration_secs", 0) + input_duration
-    )
+    state.stats["total_content_duration_secs"] = state.stats.get("total_content_duration_secs", 0) + input_duration
     state.save()
 
     logging.info(f"  DONE: {final_name}")
@@ -328,13 +347,17 @@ def _run_encode(
         if attempt > 0:
             # Retry without subs
             from pipeline.ffmpeg import build_ffmpeg_cmd
+
             cmd = build_ffmpeg_cmd(input_path, output_path, item, config, include_subs=False)
-            logging.warning(f"  Retrying without subtitles")
+            logging.warning("  Retrying without subtitles")
 
         try:
             process = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                encoding="utf-8", errors="replace",
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                encoding="utf-8",
+                errors="replace",
             )
             _, stderr = process.communicate()
 
@@ -352,8 +375,7 @@ def _run_encode(
             logging.error(f"  Encode failed (exit {process.returncode})")
             for line in stderr.strip().split("\n")[-5:]:
                 logging.error(f"    ffmpeg: {line}")
-            state.set_file(filepath, FileStatus.ERROR,
-                           error=f"ffmpeg exit {process.returncode}", stage="encoding")
+            state.set_file(filepath, FileStatus.ERROR, error=f"ffmpeg exit {process.returncode}", stage="encoding")
             return False
 
         except Exception as e:
@@ -418,11 +440,13 @@ def _trigger_plex_scan(filepath: str) -> None:
     def _scan():
         try:
             import urllib.request
+
             # Determine which section(s) to scan
             sections_url = f"{PLEX_URL}/library/sections?X-Plex-Token={PLEX_TOKEN}"
             resp = urllib.request.urlopen(sections_url, timeout=10)
             # Scan all sections (simple approach)
             from xml.etree import ElementTree
+
             root = ElementTree.fromstring(resp.read())
             scanned = 0
             for section in root.findall(".//Directory"):

@@ -11,15 +11,13 @@ import os
 import queue as queue_mod
 import signal
 import threading
-import time
-
 from typing import Optional
 
-from pipeline.ffmpeg import format_bytes, format_duration
-from pipeline.full_gamut import full_gamut, finalize_upload
-from pipeline.gap_filler import gap_fill, analyse_gaps
+from pipeline.ffmpeg import format_bytes
+from pipeline.full_gamut import finalize_upload, full_gamut
+from pipeline.gap_filler import analyse_gaps, gap_fill
 from pipeline.state import FileStatus, PipelineState
-from pipeline.transfer import fetch_file, get_free_space, get_staging_usage
+from pipeline.transfer import fetch_file
 
 
 class Orchestrator:
@@ -32,12 +30,12 @@ class Orchestrator:
         self.control = control
 
         self._shutdown = threading.Event()
-        self._gpu_lock = threading.Lock()          # only one GPU user at a time
-        self._gpu_preempt = threading.Event()       # set by Force Monitor to interrupt GPU holder
-        self._gpu_available = threading.Event()     # set when GPU is free
-        self._gpu_available.set()                   # starts available
-        self._force_gpu_queue = queue_mod.Queue()   # force items needing GPU
-        self._gpu_wants: Optional[str] = None       # filepath the GPU is waiting on — network fetches this first
+        self._gpu_lock = threading.Lock()  # only one GPU user at a time
+        self._gpu_preempt = threading.Event()  # set by Force Monitor to interrupt GPU holder
+        self._gpu_available = threading.Event()  # set when GPU is free
+        self._gpu_available.set()  # starts available
+        self._force_gpu_queue = queue_mod.Queue()  # force items needing GPU
+        self._gpu_wants: Optional[str] = None  # filepath the GPU is waiting on — network fetches this first
 
         signal.signal(signal.SIGTERM, self._handle_signal)
         signal.signal(signal.SIGINT, self._handle_signal)
@@ -46,10 +44,9 @@ class Orchestrator:
         logging.info(f"Received signal {signum}, shutting down...")
         self._shutdown.set()
 
-    def run(self, full_gamut_queue: list[dict], gap_filler_queue: list[dict],
-            enable_gap_filler: bool = True):
+    def run(self, full_gamut_queue: list[dict], gap_filler_queue: list[dict], enable_gap_filler: bool = True):
         """Main entry point."""
-        logging.info(f"Orchestrator starting:")
+        logging.info("Orchestrator starting:")
         logging.info(f"  Full gamut: {len(full_gamut_queue)} files")
         logging.info(f"  Gap filler: {len(gap_filler_queue)} files ({'enabled' if enable_gap_filler else 'disabled'})")
 
@@ -58,19 +55,17 @@ class Orchestrator:
 
         # Reset any non-terminal states from previous crashed runs
         reset_count = self.state._conn.execute(
-            "UPDATE pipeline_files SET status = ?, stage = NULL, error = NULL "
-            "WHERE status NOT IN (?, ?)",
-            ("pending", "done", "pending")
+            "UPDATE pipeline_files SET status = ?, stage = NULL, error = NULL WHERE status NOT IN (?, ?)",
+            ("pending", "done", "pending"),
         ).rowcount
         if reset_count:
             logging.info(f"  Reset {reset_count} stale entries from previous run")
 
         # Remove ghost 'done' entries where the source file no longer exists (renamed/deleted)
-        done_rows = self.state._conn.execute(
-            "SELECT filepath FROM pipeline_files WHERE status = 'done'"
-        ).fetchall()
+        done_rows = self.state._conn.execute("SELECT filepath FROM pipeline_files WHERE status = 'done'").fetchall()
         if done_rows:
             from concurrent.futures import ThreadPoolExecutor
+
             paths = [fp for (fp,) in done_rows]
             with ThreadPoolExecutor(max_workers=16) as pool:
                 existence = list(pool.map(os.path.exists, paths))
@@ -102,12 +97,21 @@ class Orchestrator:
 
         threads = {}
         threads["gpu"] = threading.Thread(
-            target=self._gpu_worker, args=(full_gamut_queue, gap_filler_queue,), daemon=True, name="gpu-encode")
+            target=self._gpu_worker,
+            args=(
+                full_gamut_queue,
+                gap_filler_queue,
+            ),
+            daemon=True,
+            name="gpu-encode",
+        )
         threads["network"] = threading.Thread(
-            target=self._network_worker, args=(full_gamut_queue,), daemon=True, name="network")
+            target=self._network_worker, args=(full_gamut_queue,), daemon=True, name="network"
+        )
         if enable_gap_filler:
             threads["gap_filler"] = threading.Thread(
-                target=self._gap_filler_worker, args=(gap_filler_queue,), daemon=True, name="gap-filler")
+                target=self._gap_filler_worker, args=(gap_filler_queue,), daemon=True, name="gap-filler"
+            )
 
         for name, t in threads.items():
             t.start()
@@ -164,14 +168,18 @@ class Orchestrator:
             self._gpu_wants = filepath
 
             tag = "FORCE" if is_force else f"GPU {processed}/{len(queue)}"
-            logging.info(f"\n[{tag}] {item.get('tier_name', '?')} | "
-                         f"{item['filename']} ({format_bytes(item.get('file_size_bytes', 0))})")
+            logging.info(
+                f"\n[{tag}] {item.get('tier_name', '?')} | "
+                f"{item['filename']} ({format_bytes(item.get('file_size_bytes', 0))})"
+            )
 
             # Acquire GPU lock
             self._gpu_available.clear()
             with self._gpu_lock:
                 # Force items that are already AV1 → gap fill instead of full gamut
-                is_av1 = item.get("video", {}).get("codec_raw") == "av1" if isinstance(item.get("video"), dict) else False
+                is_av1 = (
+                    item.get("video", {}).get("codec_raw") == "av1" if isinstance(item.get("video"), dict) else False
+                )
                 if is_force and is_av1:
                     gaps = analyse_gaps(item, self.config)
                     if gaps.needs_anything:
@@ -265,8 +273,12 @@ class Orchestrator:
                 if status in (None, FileStatus.PENDING.value):
                     entry = self._lookup_file(gpu_wants)
                     if not entry:
-                        entry = {"filepath": gpu_wants, "filename": os.path.basename(gpu_wants),
-                                 "file_size_bytes": 0, "library_type": "movie" if "Movies" in gpu_wants else "series"}
+                        entry = {
+                            "filepath": gpu_wants,
+                            "filename": os.path.basename(gpu_wants),
+                            "file_size_bytes": 0,
+                            "library_type": "movie" if "Movies" in gpu_wants else "series",
+                        }
                     result = fetch_file(entry, self.staging_dir, self.config, self.state)
                     if result is not None:
                         did_work = True
@@ -283,8 +295,12 @@ class Orchestrator:
                     continue
                 entry = self._lookup_file(fp)
                 if not entry:
-                    entry = {"filepath": fp, "filename": os.path.basename(fp),
-                             "file_size_bytes": 0, "library_type": "movie" if "Movies" in fp else "series"}
+                    entry = {
+                        "filepath": fp,
+                        "filename": os.path.basename(fp),
+                        "file_size_bytes": 0,
+                        "library_type": "movie" if "Movies" in fp else "series",
+                    }
                 result = fetch_file(entry, self.staging_dir, self.config, self.state)
                 if result is not None:
                     did_work = True
@@ -316,7 +332,7 @@ class Orchestrator:
         """Find a file with status=UPLOADING and stage=pending_upload."""
         rows = self.state._conn.execute(
             "SELECT filepath FROM pipeline_files WHERE status = ? AND stage = ?",
-            (FileStatus.UPLOADING.value, "pending_upload")
+            (FileStatus.UPLOADING.value, "pending_upload"),
         ).fetchall()
         if rows:
             return {"filepath": rows[0][0]}
@@ -337,9 +353,12 @@ class Orchestrator:
         to a tmp file, mkvpropedit/rename operate on the original.
         """
         import queue as queue_mod
+
         from pipeline.gap_filler import (
-            analyse_gaps, gap_fill, _scan_external_subs,
-            _rename_file, GapAnalysis,
+            _rename_file,
+            _scan_external_subs,
+            analyse_gaps,
+            gap_fill,
         )
 
         heavy_queue: queue_mod.Queue = queue_mod.Queue()
@@ -451,6 +470,7 @@ class Orchestrator:
                         # Patch report with new path/filename
                         try:
                             from tools.report_lock import read_report, write_report
+
                             rpt = read_report()
                             for entry in rpt.get("files", []):
                                 if entry.get("filepath") == old_path:
@@ -465,14 +485,18 @@ class Orchestrator:
                 if gaps.needs_metadata:
                     try:
                         from pipeline.metadata import enrich_and_tag
+
                         tmdb_data = enrich_and_tag(filepath, filename, library_type)
                         # Patch TMDb directly into the report (update_entry doesn't read MKV tags)
                         if tmdb_data:
                             from tools.report_lock import read_report, write_report
+
                             try:
                                 rpt = read_report()
                                 for entry in rpt.get("files", []):
-                                    if entry.get("filepath") == filepath or entry.get("filepath") == item.get("filepath"):
+                                    if entry.get("filepath") == filepath or entry.get("filepath") == item.get(
+                                        "filepath"
+                                    ):
                                         entry["tmdb"] = tmdb_data
                                         break
                                 write_report(rpt)
@@ -492,13 +516,15 @@ class Orchestrator:
                 # Update media report so hero bars reflect the change
                 try:
                     from pipeline.report import update_entry
+
                     update_entry(filepath, library_type)
                 except Exception as e:
                     logging.warning(f"  Report update failed for {filename}: {e}")
 
                 quick_queue.task_done()
 
-        from pipeline.nas_worker import SERVER, NAS
+        from pipeline.nas_worker import NAS, SERVER
+
         threads = []
         # Media server workers (faster Docker, NFS mount) — 10 workers
         for i in range(10):
@@ -575,6 +601,7 @@ class Orchestrator:
 
     def _apply_overrides(self, item: dict) -> dict:
         import copy
+
         effective = copy.deepcopy(self.config)
         filepath = item.get("filepath", "")
         profile = self.control.get_quality_profile(filepath)
@@ -594,6 +621,7 @@ class Orchestrator:
         """Look up a file in the media report."""
         try:
             from tools.report_lock import read_report
+
             report = read_report()
             for f in report.get("files", []):
                 if f.get("filepath") == filepath:
@@ -601,5 +629,3 @@ class Orchestrator:
         except Exception:
             pass
         return None
-
-

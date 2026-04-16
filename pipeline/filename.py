@@ -4,7 +4,6 @@ Extracted from tools/strip_tags.py."""
 import re
 from pathlib import Path
 
-
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -52,9 +51,7 @@ _BASE_TAG_PARTS = (
 )
 
 # Year pattern for movies: (YYYY) or .YYYY. or space-YYYY-space, range 1920-2029.
-MOVIE_YEAR_RE = re.compile(
-    r"[\s.(]*((?:19[2-9]\d|20[0-2]\d))[\s.)]*"
-)
+MOVIE_YEAR_RE = re.compile(r"[\s.(]*((?:19[2-9]\d|20[0-2]\d))[\s.)]*")
 
 # Edition tags to preserve after movie year (these are part of the title identity)
 _EDITION_RE = re.compile(
@@ -131,10 +128,19 @@ def clean_series_name(stem: str, tag_re: re.Pattern = _TAG_BOUNDARY_RE) -> str |
 
     # Strip parenthesized metadata blocks: (1080p AMZN WEB-DL ...) or (p H SDR ...)
     # These contain technical info, not episode titles
-    after = re.sub(r"\s*\([^)]*(?:1080|720|480|2160|WEB|Blu|DDP|AAC|SDR|HDR|Hybrid|HONE|TheSickle|DarQ|Webrip|Goki)[^)]*\)", "", after)
+    after = re.sub(
+        r"\s*\([^)]*(?:1080|720|480|2160|WEB|Blu|DDP|AAC|SDR|HDR|Hybrid|HONE|TheSickle|DarQ|Webrip|Goki)[^)]*\)",
+        "",
+        after,
+    )
 
     # Strip trailing bracket fragments: [WEBDL...], [h264-WEBDL-720p AAC-2 0], etc.
-    after = re.sub(r"\s*\[[^\]]*(?:1080|720|480|2160|WEB|Blu|DDP|AAC|h\.?264|h\.?265|HEVC|AVC|HDTV|DVDRip)[^\]]*\]", "", after, flags=re.IGNORECASE)
+    after = re.sub(
+        r"\s*\[[^\]]*(?:1080|720|480|2160|WEB|Blu|DDP|AAC|h\.?264|h\.?265|HEVC|AVC|HDTV|DVDRip)[^\]]*\]",
+        "",
+        after,
+        flags=re.IGNORECASE,
+    )
 
     # Strip leading absolute episode number (e.g. " - 095 - " after SxxExx)
     after = re.sub(r"^[\s\-]*\d{2,4}[\s\-]+", " ", after)
@@ -147,7 +153,9 @@ def clean_series_name(stem: str, tag_re: re.Pattern = _TAG_BOUNDARY_RE) -> str |
     after = re.sub(
         r"p(?:NOW|AMZN|DSNP|HULU|HBO|ATVP|PCOK|PMTP|MAX)"
         r"(?:Atmos|HLG|HDR|DDP|DD|AC3|H264|H265|HEVC|AVC|WEB)*\s*$",
-        "", after, flags=re.IGNORECASE,
+        "",
+        after,
+        flags=re.IGNORECASE,
     )
 
     # Find where tags begin
@@ -188,20 +196,22 @@ def clean_series_name(stem: str, tag_re: re.Pattern = _TAG_BOUNDARY_RE) -> str |
     # Also strip space-separated trailing groups (no hyphen): "EzzRips", "CRFW".
     episode_title = re.sub(
         r"\s*-("
-        r"[A-Z][A-Z0-9]{2,12}"              # ALL CAPS 3+ chars: -CRFW, -XEBEC
-        r"|[a-z]+[A-Z][A-Za-z0-9]*"          # camelCase: -playWEB, -edge2020
-        r"|[A-Z][a-z][A-Z][A-Za-z0-9]*"      # mixed: -NTb, -FuN, -PiR8, -DarQ
+        r"[A-Z][A-Z0-9]{2,12}"  # ALL CAPS 3+ chars: -CRFW, -XEBEC
+        r"|[a-z]+[A-Z][A-Za-z0-9]*"  # camelCase: -playWEB, -edge2020
+        r"|[A-Z][a-z][A-Z][A-Za-z0-9]*"  # mixed: -NTb, -FuN, -PiR8, -DarQ
         r")(?:\s*-xpost)?$",
-        "", episode_title
+        "",
+        episode_title,
     )
     # Space-separated release group at end (no hyphen): "EzzRips", "BONE"
     # Only match specific patterns to avoid stripping real words (XXX, III, CUT, etc.)
     episode_title = re.sub(
         r"\s+("
-        r"[A-Z][a-z]+(?:Rips?|DL|HD)"       # EzzRips, NtbRip, etc.
-        r"|BONE|FLUX|NOGRP"                   # known groups that appear without hyphen
+        r"[A-Z][a-z]+(?:Rips?|DL|HD)"  # EzzRips, NtbRip, etc.
+        r"|BONE|FLUX|NOGRP"  # known groups that appear without hyphen
         r")$",
-        "", episode_title
+        "",
+        episode_title,
     )
     # Strip remaining trailing channel/resolution junk
     episode_title = re.sub(r"\s*(?:51|5 1)$", "", episode_title)
@@ -217,7 +227,9 @@ def clean_series_name(stem: str, tag_re: re.Pattern = _TAG_BOUNDARY_RE) -> str |
     # Strip trailing service/channel junk that wasn't in a paren: "ATVP5 1", "DS4K ATVP5 1"
     episode_title = re.sub(
         r"\s+(?:ATVP|DSNP|NF|AMZN|HULU|MAX|HBO|PCOK|PMTP|STAN|CRAV|PBS)\d*[\s.\d]*$",
-        "", episode_title, flags=re.IGNORECASE,
+        "",
+        episode_title,
+        flags=re.IGNORECASE,
     )
     episode_title = episode_title.rstrip(" -")
 
@@ -226,6 +238,7 @@ def clean_series_name(stem: str, tag_re: re.Pattern = _TAG_BOUNDARY_RE) -> str |
     # Applied per-word so titles with spaces still get CamelCase splits.
     # Skip words with scene-style alternating case (lowercase i): "FiNAL", "REJECTiON"
     if episode_title and re.search(r"[a-z][A-Z]|\d[A-Z][a-z]|\b[A-Z][A-Z][a-z]{2,}", episode_title):
+
         def _split_camel(word: str) -> str:
             if len(word) <= 3:
                 return word
@@ -241,6 +254,7 @@ def clean_series_name(stem: str, tag_re: re.Pattern = _TAG_BOUNDARY_RE) -> str |
             # Digit-to-letter boundary: "46Long" -> "46 Long"
             w = re.sub(r"(?<=\d)(?=[A-Z][a-z])", " ", w)
             return w
+
         episode_title = " ".join(_split_camel(w) for w in episode_title.split())
 
     # Strip trailing tech tokens (after CamelCase split, these may now be separated)
@@ -265,15 +279,15 @@ def clean_series_name(stem: str, tag_re: re.Pattern = _TAG_BOUNDARY_RE) -> str |
         r"(Hybrid|DDP|AAC|AC3|SDR|HDR|AVC|Atmos|DoVi?|blurayd)\d"
         r"|AC3DL|DLWeb|bluraydd|DD\+\d|\d+Bluray"
         # Removed: ^\d+[A-Z]\w{2,}$ was too aggressive (matched real titles like "710NH1")
-        r"|(?-i:^GERMAN\b|^ENGLISH\b)" # leading language tag = no real title (ALL CAPS only)
-        r"|(?-i:i\s*TALi|MULTi)"       # space-split iTALiAN/MULTi (case-sensitive)
-        r"|^Do Vi?\d"                   # DoVi/DV remnant: "Do Vi10Atmos"
-        r"|\bp\s*DD"                     # "p DD+5.1" — resolution+audio junk
-        r"|^p\s+\w{1,3}$"               # lone "p H" or "p H1" — pure junk
-        r"|p\s*NOW"                      # "p NOWAtmos" — resolution+service junk
-        r"|AVCREMUX|REMUX[A-Z]"          # concatenated remux junk
-        r"|p\s+NOW|p\s+Atmos"             # trailing "p Atmos", "p NOW..."
-        r"|(?-i:^FiNAL$)",                  # scene-style "FiNAL" (case-sensitive, not "Final")
+        r"|(?-i:^GERMAN\b|^ENGLISH\b)"  # leading language tag = no real title (ALL CAPS only)
+        r"|(?-i:i\s*TALi|MULTi)"  # space-split iTALiAN/MULTi (case-sensitive)
+        r"|^Do Vi?\d"  # DoVi/DV remnant: "Do Vi10Atmos"
+        r"|\bp\s*DD"  # "p DD+5.1" — resolution+audio junk
+        r"|^p\s+\w{1,3}$"  # lone "p H" or "p H1" — pure junk
+        r"|p\s*NOW"  # "p NOWAtmos" — resolution+service junk
+        r"|AVCREMUX|REMUX[A-Z]"  # concatenated remux junk
+        r"|p\s+NOW|p\s+Atmos"  # trailing "p Atmos", "p NOW..."
+        r"|(?-i:^FiNAL$)",  # scene-style "FiNAL" (case-sensitive, not "Final")
         re.IGNORECASE,
     )
     # Also catch trailing concatenated tech tokens: words ending with H1, WEB, H264, etc.
@@ -282,9 +296,9 @@ def clean_series_name(stem: str, tag_re: re.Pattern = _TAG_BOUNDARY_RE) -> str |
         r"(?-i:[a-z])(H\d|WEB|AVC|H264|H265|HEVC)$",
         re.IGNORECASE,
     )
-    if episode_title and (_JUNK_WORDS.search(episode_title)
-                          or _JUNK_CONCAT.search(episode_title)
-                          or _TRAILING_TECH.search(episode_title)):
+    if episode_title and (
+        _JUNK_WORDS.search(episode_title) or _JUNK_CONCAT.search(episode_title) or _TRAILING_TECH.search(episode_title)
+    ):
         # Episode title is junk, but show title + marker are still valid
         # Return without episode title rather than skipping entirely
         if title:
@@ -322,7 +336,7 @@ def clean_movie_name(stem: str, tag_re: re.Pattern = _TAG_BOUNDARY_RE) -> str | 
             continue
 
         # Check for edition tag after the year
-        after_year = stem[m.end():]
+        after_year = stem[m.end() :]
         after_year_clean = _dots_to_spaces(after_year).strip()
         edition_match = _EDITION_RE.match(after_year_clean)
         if edition_match:

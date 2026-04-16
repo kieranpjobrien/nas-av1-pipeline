@@ -10,11 +10,9 @@ Machines:
 """
 
 import json
-import logging
 import os
 import subprocess
 from typing import Optional
-
 
 # Machine configs
 NAS = {
@@ -41,13 +39,12 @@ def unc_to_container_path(unc_path: str) -> str:
     # Strip the UNC server/share prefix
     for prefix in ("//KieranNAS/Media", "//kierannas/Media", "//kierannas/media"):
         if path.startswith(prefix):
-            path = "/media" + path[len(prefix):]
+            path = "/media" + path[len(prefix) :]
             break
     return path
 
 
-def _ssh_docker(machine: dict, tool: str, args: list[str],
-                timeout: int = 900) -> subprocess.CompletedProcess:
+def _ssh_docker(machine: dict, tool: str, args: list[str], timeout: int = 900) -> subprocess.CompletedProcess:
     """Run a tool inside the persistent mkvworker container via SSH + docker exec.
 
     Uses a pre-started container (docker exec, not docker run) to avoid
@@ -57,8 +54,7 @@ def _ssh_docker(machine: dict, tool: str, args: list[str],
 
     docker_cmd = f"{prefix} {tool} {' '.join(args)}"
 
-    ssh_cmd = ["ssh", "-o", "ConnectTimeout=10", "-o", "BatchMode=yes",
-               machine["host"], docker_cmd]
+    ssh_cmd = ["ssh", "-o", "ConnectTimeout=10", "-o", "BatchMode=yes", machine["host"], docker_cmd]
 
     return subprocess.run(
         ssh_cmd,
@@ -70,8 +66,7 @@ def _ssh_docker(machine: dict, tool: str, args: list[str],
     )
 
 
-def remote_mkvmerge(machine: dict, args: list[str],
-                    timeout: int = 900) -> subprocess.CompletedProcess:
+def remote_mkvmerge(machine: dict, args: list[str], timeout: int = 900) -> subprocess.CompletedProcess:
     """Run mkvmerge on a remote machine.
 
     All file paths in args must be container paths (/media/...).
@@ -79,9 +74,9 @@ def remote_mkvmerge(machine: dict, args: list[str],
     return _ssh_docker(machine, "mkvmerge", args, timeout)
 
 
-def remote_mkvpropedit(machine: dict, filepath: str,
-                       edit_args: list[str],
-                       timeout: int = 60) -> subprocess.CompletedProcess:
+def remote_mkvpropedit(
+    machine: dict, filepath: str, edit_args: list[str], timeout: int = 60
+) -> subprocess.CompletedProcess:
     """Run mkvpropedit on a remote machine.
 
     filepath: container path (/media/...)
@@ -91,8 +86,7 @@ def remote_mkvpropedit(machine: dict, filepath: str,
     return _ssh_docker(machine, "mkvpropedit", args, timeout)
 
 
-def remote_identify(machine: dict, filepath: str,
-                    timeout: int = 60) -> Optional[dict]:
+def remote_identify(machine: dict, filepath: str, timeout: int = 60) -> Optional[dict]:
     """Run mkvmerge --identify on a remote machine, return parsed JSON."""
     args = ["--identify", "--identification-format", "json", _shell_quote(filepath)]
     result = _ssh_docker(machine, "mkvmerge", args, timeout)
