@@ -51,63 +51,6 @@ def _find_tool(name: str, search_paths: list[str]) -> Optional[str]:
     return None
 
 
-# Drive letter mapping for mkvmerge/mkvpropedit (they don't support UNC paths)
-_drive_map_lock = threading.Lock()
-_mapped_drive: Optional[str] = None
-_mapped_share: Optional[str] = None
-
-
-def _unc_to_mapped(filepath: str) -> tuple[str, bool]:
-    """Convert a UNC path to a mapped drive path for mkvmerge.
-
-    Returns (mapped_path, was_mapped). If already a local path, returns as-is.
-    The mapping is shared across all workers and persists for the session.
-    """
-    global _mapped_drive, _mapped_share
-
-    if not filepath.startswith("\\\\"):
-        return filepath, False
-
-    # Extract share: \\server\share
-    parts = filepath.split(os.sep)
-    if len(parts) < 5:
-        return filepath, False
-    share = os.sep + os.sep + parts[2] + os.sep + parts[3]
-    rest = os.sep.join(parts[4:])
-
-    with _drive_map_lock:
-        if _mapped_share == share and _mapped_drive:
-            return _mapped_drive + os.sep + rest, True
-
-        # Check if an existing mapping already covers this share
-        try:
-            net_result = subprocess.run(
-                ["net", "use"], capture_output=True, text=True, timeout=10,
-            )
-            for line in net_result.stdout.splitlines():
-                parts = line.split()
-                if len(parts) >= 3 and parts[1].endswith(":") and parts[2].lower() == share.lower():
-                    _mapped_drive = parts[1]
-                    _mapped_share = share
-                    return _mapped_drive + os.sep + rest, True
-        except Exception:
-            pass
-
-        # Find a free drive letter and map it
-        for letter in "MNOPQRSTUVWXYZ":
-            if not os.path.exists(letter + ":" + os.sep):
-                drive = letter + ":"
-                result = subprocess.run(
-                    ["net", "use", drive, share, "/persistent:no"],
-                    capture_output=True, text=True, timeout=10,
-                )
-                if result.returncode == 0:
-                    _mapped_drive = drive
-                    _mapped_share = share
-                    logging.info(f"  Mapped {share} -> {drive}")
-                    return drive + os.sep + rest, True
-
-    return filepath, False
 
 
 @dataclass

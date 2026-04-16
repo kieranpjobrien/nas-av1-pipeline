@@ -15,19 +15,15 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
-from typing import Optional
-
-from paths import STAGING_DIR, PLEX_URL, PLEX_TOKEN
+from paths import PLEX_URL, PLEX_TOKEN
 from pipeline.config import get_res_key, resolve_encode_params, REMUX_EXTENSIONS
 from pipeline.ffmpeg import (
-    build_ffmpeg_cmd, _should_transcode_audio, _select_audio_streams,
-    _map_subtitle_streams, format_bytes, format_duration, get_duration,
-    _remux_to_mkv,
+    build_ffmpeg_cmd, format_bytes, format_duration, get_duration, _remux_to_mkv,
 )
 from pipeline.language import detect_all_languages
 from pipeline.report import update_entry
 from pipeline.state import FileStatus, PipelineState
-from pipeline.transfer import fetch_file, get_free_space
+from pipeline.transfer import fetch_file
 
 
 def full_gamut(

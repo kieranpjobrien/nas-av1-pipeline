@@ -8,7 +8,7 @@ import os
 import sys
 
 from paths import STAGING_DIR, MEDIA_REPORT
-from pipeline.config import DEFAULT_CONFIG, build_config
+from pipeline.config import build_config
 from pipeline.control import PipelineControl
 from pipeline.state import PipelineState, migrate_from_json
 

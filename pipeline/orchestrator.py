@@ -6,7 +6,6 @@ Thread 2 (Network): bidirectional — uploads first (frees space), then fetches.
 Thread 3 (Gap Filler): CPU work on AV1 files, grabs GPU for whisper between encodes
 """
 
-import json
 import logging
 import os
 import queue as queue_mod
@@ -16,7 +15,6 @@ import time
 
 from typing import Optional
 
-from pipeline.config import get_res_key
 from pipeline.ffmpeg import format_bytes, format_duration
 from pipeline.full_gamut import full_gamut, finalize_upload
 from pipeline.gap_filler import gap_fill, analyse_gaps
@@ -25,7 +23,7 @@ from pipeline.transfer import fetch_file, get_free_space, get_staging_usage
 
 
 class Orchestrator:
-    """4-thread pipeline coordinator with GPU sharing."""
+    """3-thread pipeline coordinator: GPU encode + network I/O + gap filler."""
 
     def __init__(self, config: dict, state: PipelineState, staging_dir: str, control):
         self.config = config
@@ -549,19 +547,6 @@ class Orchestrator:
             existing = self.state.get_file(fp)
             status = existing["status"] if existing else None
             if status in (FileStatus.DONE.value, FileStatus.ERROR.value, FileStatus.PROCESSING.value):
-                continue
-            return item
-        return None
-
-    def _pick_next_gap(self, queue: list[dict], dispatched: set[str]) -> dict | None:
-        """Pick next gap filler item."""
-        for item in queue:
-            fp = item["filepath"]
-            if fp in dispatched:
-                continue
-            existing = self.state.get_file(fp)
-            status = existing["status"] if existing else None
-            if status in (FileStatus.DONE.value, FileStatus.ERROR.value):
                 continue
             return item
         return None

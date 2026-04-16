@@ -25,4 +25,4 @@ PLEX_URL = os.environ.get("PLEX_URL", "http://192.168.4.43:32400")
 PLEX_TOKEN = os.environ.get("PLEX_TOKEN", "")
 
 # TMDb API key (for metadata enrichment)
-TMDB_API_KEY = os.environ.get("TMDB_API_KEY", "363884c381745615bb12a803becf09b6")
+TMDB_API_KEY = os.environ.get("TMDB_API_KEY", "")

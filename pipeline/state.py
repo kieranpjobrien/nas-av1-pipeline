@@ -32,19 +32,7 @@ class FileStatus(str, Enum):
     ERROR = "error"
 
 
-# Legacy status aliases for migration and backward compat during transition
-class LegacyStatus(str, Enum):
-    FETCHED = "fetched"
-    ENCODING = "encoding"
-    ENCODED = "encoded"
-    UPLOADED = "uploaded"
-    VERIFIED = "verified"
-    REPLACING = "replacing"
-    REPLACED = "replaced"
-    SKIPPED = "skipped"
-
-
-# Map old statuses to new ones
+# Map legacy statuses to current ones (for migration from old pipeline state)
 _LEGACY_STATUS_MAP = {
     "fetched": "processing",
     "encoding": "processing",

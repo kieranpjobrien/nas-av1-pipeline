@@ -10,10 +10,7 @@ import logging
 import os
 import subprocess
 import threading
-from pathlib import Path
 from typing import Optional
-
-from paths import MEDIA_REPORT
 
 _update_lock = threading.Lock()
 
