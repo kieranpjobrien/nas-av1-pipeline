@@ -705,16 +705,32 @@ export function DashboardPage({ onClassic, onFileClick }) {
     const remainingSizeGb = files
       .filter((f) => f.codec !== "AV1")
       .reduce((s, f) => s + (f.size_gb || 0), 0);
-    const noSubs = files.filter((f) => !f.subs || f.subs.length === 0);
+    // Subtitle checks match Bazarr's logic: consider BOTH internal tracks and external
+    // sidecar files (.srt/.ass/etc. written by Bazarr alongside the media). The scanner
+    // records these on `external_subtitles` / `external_subtitle_count` per file. Without
+    // this, the dashboard over-reports the "needs subs" count massively.
+    const hasEngSubAnywhere = (f) => {
+      const internal = (f.subs || []).some((s) =>
+        (s.lang || "").toLowerCase().startsWith("en")
+      );
+      if (internal) return true;
+      const external = (f.externalSubs || []).some((s) =>
+        (s.language || "").toLowerCase().startsWith("en")
+      );
+      return external;
+    };
+    const noSubs = files.filter((f) => {
+      const internal = f.subs?.length || 0;
+      const external = f.externalSubs?.length || 0;
+      return internal + external === 0;
+    });
     const nonEnglishAudio = files.filter((f) => {
       const hasEngAudio = (f.audio || []).some((a) =>
         (a.lang || "").toLowerCase().startsWith("en")
       );
       return !hasEngAudio && (f.audio || []).length > 0;
     });
-    const noEng = nonEnglishAudio.filter(
-      (f) => !(f.subs || []).some((s) => (s.lang || "").toLowerCase().startsWith("en"))
-    );
+    const noEng = nonEnglishAudio.filter((f) => !hasEngSubAnywhere(f));
     return {
       summary: report.summary || {},
       codecs,

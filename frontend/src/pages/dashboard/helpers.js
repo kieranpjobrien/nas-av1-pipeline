@@ -85,28 +85,40 @@ export const shortName = (name, max = 60) => {
 };
 
 // Normalize a file row from the /media-report payload into the shape the design expects.
-export const normalizeFile = (f) => ({
-  filename: f.filename || (f.file_path ? f.file_path.split(/[\\/]/).pop() : ""),
-  filepath: f.file_path || "",
-  codec: f.video?.codec || f.codec || "?",
-  res: f.video?.resolution_class || f.res || "",
-  size_gb: f.file_size_gb ?? f.size_gb ?? 0,
-  bitrate: f.overall_bitrate_kbps ?? f.bitrate ?? 0,
-  hdr: !!(f.video?.hdr || f.hdr),
-  dur: f.duration_seconds ?? f.dur ?? 0,
-  library: f.library_type || libraryOf(f.file_path || ""),
-  audio: (f.audio_streams || f.audio || []).map((a) => ({
-    codec: a.codec,
-    lang: a.language || a.lang,
-    ch: a.channels || a.ch,
-    br: a.bitrate_kbps || a.br,
-    lossless: !!a.lossless,
-  })),
-  subs: (f.subtitle_streams || f.subs || []).map((s) => ({
-    codec: s.codec,
-    lang: s.language || s.lang,
-  })),
-});
+// Scanner emits `filepath`; older snapshots used `file_path` — read either.
+export const normalizeFile = (f) => {
+  const path = f.filepath || f.file_path || "";
+  return {
+    filename: f.filename || (path ? path.split(/[\\/]/).pop() : ""),
+    filepath: path,
+    codec: f.video?.codec || f.codec || "?",
+    res: f.video?.resolution_class || f.res || "",
+    size_gb: f.file_size_gb ?? f.size_gb ?? 0,
+    bitrate: f.overall_bitrate_kbps ?? f.bitrate ?? 0,
+    hdr: !!(f.video?.hdr || f.hdr),
+    dur: f.duration_seconds ?? f.dur ?? 0,
+    library: f.library_type || libraryOf(path),
+    audio: (f.audio_streams || f.audio || []).map((a) => ({
+      codec: a.codec,
+      lang: a.language || a.lang,
+      ch: a.channels || a.ch,
+      br: a.bitrate_kbps || a.br,
+      lossless: !!a.lossless,
+    })),
+    subs: (f.subtitle_streams || f.subs || []).map((s) => ({
+      codec: s.codec,
+      lang: s.language || s.lang,
+    })),
+    // External sidecar subs recorded by tools/scanner.py. Bazarr writes `.en.srt` etc.
+    // next to the media file; the Worklist sub-gap check reads from here.
+    externalSubs: (f.external_subtitles || []).map((s) => ({
+      filename: s.filename,
+      language: s.language,
+      flags: s.flags || [],
+      ext: s.ext,
+    })),
+  };
+};
 
 // Derive codec/res dicts from raw file array.
 export const aggregateBy = (files, fn) => {

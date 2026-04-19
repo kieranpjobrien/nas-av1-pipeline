@@ -212,6 +212,44 @@ def extract_info(filepath: str, probe_data: dict, library_type: str) -> dict:
             }
         )
 
+    # External subtitle sidecars — Bazarr writes .srt/.ass alongside the media file. The
+    # dashboard's "needs subs" check has been under-counting because it only looked at
+    # internal streams. Record what's actually on disk so downstream consumers can check
+    # both. Naming patterns we handle:
+    #   foo.mkv, foo.en.srt, foo.en.hi.srt, foo.en.forced.ass, foo.eng.srt, foo.srt
+    external_subs = []
+    try:
+        parent = os.path.dirname(filepath)
+        stem = Path(filepath).stem.lower()
+        for sibling in os.listdir(parent):
+            low = sibling.lower()
+            if not low.endswith((".srt", ".ass", ".ssa", ".sub", ".vtt", ".idx")):
+                continue
+            sib_stem = Path(sibling).stem.lower()
+            # Must reference the same media stem: either exact match, or stem + ".lang" suffix.
+            if not (sib_stem == stem or sib_stem.startswith(stem + ".")):
+                continue
+            # Parse language from the portion after the stem (e.g. ".en" or ".en.hi" -> "en").
+            suffix = sib_stem[len(stem) :].lstrip(".")
+            parts = suffix.split(".") if suffix else []
+            lang = "und"
+            flags = []
+            for part in parts:
+                if len(part) in (2, 3) and part.isalpha() and not flags:
+                    lang = part
+                else:
+                    flags.append(part)
+            external_subs.append(
+                {
+                    "filename": sibling,
+                    "language": lang,
+                    "flags": flags,  # e.g. ["hi"] for hearing-impaired, ["forced"] for forced
+                    "ext": Path(sibling).suffix.lower().lstrip("."),
+                }
+            )
+    except OSError:
+        pass
+
     try:
         file_mtime = os.path.getmtime(filepath)
     except OSError:
@@ -234,6 +272,8 @@ def extract_info(filepath: str, probe_data: dict, library_type: str) -> dict:
         "audio_estimated_size_gb": round(total_audio_size_estimate / (1024**3), 3),
         "subtitle_streams": subtitle_info,
         "subtitle_count": len(subtitle_info),
+        "external_subtitles": external_subs,
+        "external_subtitle_count": len(external_subs),
     }
 
 
