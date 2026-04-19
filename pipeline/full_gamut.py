@@ -298,27 +298,30 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
         pass
 
     # === Verify ===
-    # Tiny mismatches (ffmpeg rounding + container overhead) are OK; anything over a few
-    # seconds is suspect; anything >1.2x input duration is a real broken encode (seen on
-    # VFR sources where ffmpeg padded the timeline). Auto-discard and reset to pending so
-    # the file gets another shot — cheaper than making the user manually retry from the UI.
-    # BUT: cap retries at MAX_DURATION_RETRIES. If ffmpeg produces a broken output twice in
-    # a row the bug is deterministic for this source and we'd just burn GPU forever.
-    MAX_DURATION_RETRIES = 1  # 1 = one auto-retry; second broken output parks in ERROR
-    duration_tolerance = config.get("verify_duration_tolerance_secs", 2.0)
+    # Three tiers, chosen to match the empirical ffmpeg/NVENC behaviour we've actually seen:
+    #   - within max(2s, 2% of input): accept — normal container/rounding drift.
+    #   - within 0.8x-1.2x: log a warning but STILL accept — visually fine in practice,
+    #     and re-encoding wastes GPU when the output was probably usable.
+    #   - outside 0.8x-1.2x: real broken encode (20%+ off). Auto-retry once, then park.
+    # Anything that gets past the 20% threshold is deterministic garbage (seen today on VFR
+    # sources and the raw-DTS-in-.mkv files). Retry cap prevents GPU loop on those.
+    MAX_DURATION_RETRIES = 1
+    duration_tolerance_fixed = config.get("verify_duration_tolerance_secs", 2.0)
+    duration_tolerance_pct = config.get("verify_duration_tolerance_pct", 0.02)  # 2%
     output_duration = get_duration(dest_path) or 0
     if input_duration > 0:
         diff = abs(input_duration - output_duration)
         ratio = output_duration / input_duration if input_duration else 1.0
-        if diff > duration_tolerance:
-            # Clean up the bad encode either way
-            try:
-                os.remove(dest_path)
-            except OSError:
-                pass
-
+        # Dynamic tolerance — scales with content length. A 50-min episode gets ~60s
+        # grace; a 3-min short gets 3.6s. Prevents false alarms on long-form content.
+        allowed_drift = max(duration_tolerance_fixed, input_duration * duration_tolerance_pct)
+        if diff > allowed_drift:
             if ratio > 1.2 or ratio < 0.8:
-                # Clearly broken (>20% off).
+                # Clearly broken (>20% off). Clean up the output file before retry/park.
+                try:
+                    os.remove(dest_path)
+                except OSError:
+                    pass
                 prev = state.get_file(filepath) or {}
                 retry_count = int(prev.get("duration_retry_count", 0) or 0)
                 if retry_count < MAX_DURATION_RETRIES:
@@ -352,18 +355,15 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
                         duration_retry_count=retry_count + 1,
                     )
             else:
-                # Small-ish mismatch (2-20%) — park in ERROR for manual review; resetting
-                # blindly could loop on a deterministic ffmpeg bug.
-                logging.error(
-                    f"  Duration mismatch: input={input_duration:.1f}s, output={output_duration:.1f}s"
+                # 2%-20% off — drift is real but not catastrophic. Log a warning so the
+                # user can spot a pattern, but DON'T reject the encode. In practice these
+                # files play fine; rejecting them costs GPU for no benefit. The > 20%
+                # branch above handles genuinely broken cases.
+                logging.warning(
+                    f"  Duration drift (accepting anyway): input={input_duration:.1f}s, "
+                    f"output={output_duration:.1f}s, {(ratio - 1) * 100:+.1f}%"
                 )
-                state.set_file(
-                    filepath,
-                    FileStatus.ERROR,
-                    error=f"duration mismatch ({input_duration:.0f}s vs {output_duration:.0f}s)",
-                    stage="verify",
-                )
-            return False
+                # fall through to replace + DONE below
 
     # === Replace original (crash-safe) ===
     backup_path = filepath + ".original.bak"
