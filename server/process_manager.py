@@ -182,8 +182,13 @@ class ProcessManager:
             return {"ok": True, "method": "terminated"}
 
     def force_kill(self, name: str) -> dict:
-        """Kill any OS process matching this pipeline command, even if not started by us."""
-        import signal
+        """Kill any OS process matching this pipeline command, even if not started by us.
+
+        Uses psutil to enumerate processes — wmic was the original approach but is
+        deprecated/absent in Windows 11. psutil works cross-platform and is already
+        a dependency.
+        """
+        import psutil
 
         cfg = PROCESS_CONFIGS.get(name)
         if not cfg:
@@ -194,34 +199,28 @@ class ProcessManager:
         if not module_flag:
             return {"ok": False, "error": "Cannot identify process command"}
 
-        killed = []
+        killed: list[int] = []
+        my_pid = os.getpid()
         try:
-            result = subprocess.run(
-                ["wmic", "process", "where", "name='python.exe'", "get", "processid,commandline", "/format:csv"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            my_pid = os.getpid()
-            for line in result.stdout.strip().splitlines():
-                if module_flag not in line:
+            for proc_info in psutil.process_iter(["pid", "name", "cmdline"]):
+                info = proc_info.info
+                if info["pid"] == my_pid:
                     continue
-                parts = line.strip().split(",")
-                if len(parts) < 3:
+                pname = (info.get("name") or "").lower()
+                if "python" not in pname:
                     continue
-                try:
-                    pid = int(parts[-1])
-                except ValueError:
-                    continue
-                if pid == my_pid:
+                cmdline = info.get("cmdline") or []
+                # Require both "-m" and the module_flag to match — avoids killing
+                # unrelated python processes that happen to mention the module name.
+                if "-m" not in cmdline or module_flag not in cmdline:
                     continue
                 try:
-                    os.kill(pid, signal.SIGTERM)
-                    killed.append(pid)
-                except OSError:
+                    proc_info.terminate()
+                    killed.append(info["pid"])
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
                     pass
         except Exception as e:
-            return {"ok": False, "error": str(e)}
+            return {"ok": False, "error": f"psutil scan failed: {e}"}
 
         # Also clean up our tracked process if it matches
         with self._lock:

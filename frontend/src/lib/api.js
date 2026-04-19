@@ -12,7 +12,24 @@ async function postJSON(path, body) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  if (!res.ok) {
+    // FastAPI HTTPException bodies carry the real reason as {detail: "..."} —
+    // parse and rethrow an Error that preserves that text. Callers that care
+    // (start/stop/kill etc.) can read e.status / e.detail and render a proper
+    // toast instead of the generic "409 Conflict".
+    let detail = `${res.status} ${res.statusText}`;
+    try {
+      const payload = await res.json();
+      if (payload?.detail) detail = payload.detail;
+      else if (payload?.error) detail = payload.error;
+    } catch {
+      /* non-JSON error body, keep the status line */
+    }
+    const err = new Error(detail);
+    err.status = res.status;
+    err.detail = detail;
+    throw err;
+  }
   return res.json();
 }
 
@@ -22,7 +39,20 @@ async function putJSON(path, body) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  if (!res.ok) {
+    let detail = `${res.status} ${res.statusText}`;
+    try {
+      const payload = await res.json();
+      if (payload?.detail) detail = payload.detail;
+      else if (payload?.error) detail = payload.error;
+    } catch {
+      /* non-JSON error body */
+    }
+    const err = new Error(detail);
+    err.status = res.status;
+    err.detail = detail;
+    throw err;
+  }
   return res.json();
 }
 

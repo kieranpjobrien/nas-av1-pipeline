@@ -882,39 +882,59 @@ export function DashboardPage({ onClassic, onFileClick }) {
 
       try {
         if (mode === "start") {
-          const r = await api.startProcess("pipeline");
-          if (r?.ok === false) {
-            push({ kind: "warn", title: "Pipeline already running", body: r.error || "" });
-          } else {
+          try {
+            const r = await api.startProcess("pipeline");
             push({
               kind: "good",
               title: "Pipeline started",
               body: `pid ${r?.pid ?? "?"} · will process the priority + main queue on ${host}`,
             });
+          } catch (e) {
+            if (e?.status === 409) {
+              push({ kind: "warn", title: "Pipeline already running", body: e.detail || e.message });
+            } else {
+              throw e;
+            }
           }
           return;
         }
 
         if (mode === "stop") {
-          const r = await api.stopProcess("pipeline");
-          push({
-            kind: r?.ok === false ? "warn" : "info",
-            title: r?.ok === false ? "Pipeline not running" : "Pipeline stop requested",
-            body: r?.method ? `method: ${r.method}` : r?.error || "",
-          });
+          try {
+            const r = await api.stopProcess("pipeline");
+            push({
+              kind: "info",
+              title: "Pipeline stop requested",
+              body: r?.method ? `method: ${r.method}` : "",
+            });
+          } catch (e) {
+            if (e?.status === 409) {
+              push({ kind: "warn", title: "Pipeline not running", body: e.detail || e.message });
+            } else {
+              throw e;
+            }
+          }
           return;
         }
 
         if (mode === "kill") {
-          const r = await api.killProcess("pipeline");
-          const killedCount = Array.isArray(r?.killed) ? r.killed.length : 0;
-          push({
-            kind: r?.ok === false ? "warn" : "bad",
-            title: r?.ok === false ? "Nothing to kill" : "Pipeline force-killed",
-            body: killedCount
-              ? `${killedCount} process${killedCount === 1 ? "" : "es"} terminated (pid${killedCount === 1 ? "" : "s"} ${r.killed.join(", ")})`
-              : r?.error || "",
-          });
+          try {
+            const r = await api.killProcess("pipeline");
+            const killedCount = Array.isArray(r?.killed) ? r.killed.length : 0;
+            push({
+              kind: "bad",
+              title: "Pipeline force-killed",
+              body: killedCount
+                ? `${killedCount} process${killedCount === 1 ? "" : "es"} terminated (pid${killedCount === 1 ? "" : "s"} ${r.killed.join(", ")})`
+                : "No matching processes were running.",
+            });
+          } catch (e) {
+            if (e?.status === 409) {
+              push({ kind: "warn", title: "Nothing to kill", body: e.detail || e.message });
+            } else {
+              throw e;
+            }
+          }
           return;
         }
 
@@ -958,7 +978,7 @@ export function DashboardPage({ onClassic, onFileClick }) {
           return;
         }
       } catch (e) {
-        push({ kind: "bad", title: "Action failed", body: String(e.message || e) });
+        push({ kind: "bad", title: "Action failed", body: e?.detail || String(e.message || e) });
       }
     },
     [push, routing, liveErrorCount]
