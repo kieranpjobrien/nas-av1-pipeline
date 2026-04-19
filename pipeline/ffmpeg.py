@@ -245,6 +245,14 @@ def build_ffmpeg_cmd(
     is_hdr = item.get("hdr", False)
     params = resolve_encode_params(config, item)
 
+    # Hard cap on output duration — `+genpts` plus EAC-3 audio transcoding can produce
+    # output files whose container duration is inflated 20-30% over the source (seen in
+    # the wild on My Cousin Vinny and Trennung mit Hindernissen). Passing `-t` to ffmpeg
+    # truncates the output at exactly the source duration, which prevents the verify
+    # step from rejecting an otherwise-fine encode. We add a 1s pad so we don't clip
+    # the last frame on files whose duration report rounds down.
+    source_duration = item.get("duration_seconds") or get_duration(input_path) or 0
+
     # Pixel format: 10-bit for HDR (mandatory), also 10-bit for SDR (banding resistance)
     pix_fmt = config.get("pixel_format_hdr" if is_hdr else "pixel_format_sdr", "yuv420p10le")
 
@@ -417,6 +425,10 @@ def build_ffmpeg_cmd(
     # Strip encoder metadata bloat (scene group tags, encoder info)
     cmd.extend(["-map_metadata", "-1"])
 
+    # Hard duration cap (see note at top of fn)
+    if source_duration > 0:
+        cmd.extend(["-t", f"{source_duration + 1:.3f}"])
+
     # Output (mkv container — no -movflags needed)
     cmd.append(output_path)
 
@@ -428,6 +440,7 @@ def build_audio_remux_cmd(
 ) -> list[str]:
     """Build ffmpeg command that copies video but transcodes bulky audio to EAC-3."""
     audio_keep = _select_audio_streams(item, config)
+    source_duration = item.get("duration_seconds") or get_duration(input_path) or 0
 
     cmd = [
         "ffmpeg",
@@ -478,6 +491,10 @@ def build_audio_remux_cmd(
     # Subtitles: copy
     if include_subs:
         cmd.extend(["-c:s", "copy"])
+
+    # Hard duration cap (same guard as build_ffmpeg_cmd)
+    if source_duration > 0:
+        cmd.extend(["-t", f"{source_duration + 1:.3f}"])
 
     cmd.append(output_path)
     return cmd
