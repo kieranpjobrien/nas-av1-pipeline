@@ -9,8 +9,10 @@ start to finish.
 """
 
 import hashlib
+import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -65,10 +67,23 @@ def full_gamut(
         status = existing.get("status") if existing else None
         local_path = existing.get("local_path") if existing else None
 
+        # Already done — bail cleanly rather than waiting forever for a fetch that won't come.
+        # (The orchestrator's force-stack check should prevent this, but belt-and-braces.)
+        terminal_states = {
+            FileStatus.DONE.value,
+            getattr(FileStatus, "REPLACED", FileStatus.DONE).value,
+            getattr(FileStatus, "SKIPPED", FileStatus.DONE).value,
+        }
+        if status in terminal_states:
+            logging.info(f"Already {status}: {filename} — skipping full_gamut.")
+            return True
+
         # Wait for file to be ready (status=PROCESSING, set after copy completes).
         # No timers — just block until the network worker signals completion.
         if not (status == FileStatus.PROCESSING.value and local_path and os.path.exists(local_path)):
             logging.info(f"Waiting for fetch: {filename}")
+            waited = 0
+            last_warn_status = None  # only warn when the status hasn't changed in a while
             while True:
                 existing = state.get_file(filepath)
                 status = existing.get("status") if existing else None
@@ -78,7 +93,19 @@ def full_gamut(
                 if status == FileStatus.ERROR.value:
                     logging.error(f"Fetch failed: {filename}")
                     return False
+                if status in terminal_states:
+                    logging.info(f"Became {status} while waiting for fetch: {filename} — bailing.")
+                    return True
                 time.sleep(2)
+                waited += 2
+                # Log once per 2 min and only if status isn't FETCHING (which means progress is happening).
+                # Avoids the "Still waiting 60s/120s/180s..." spam while fetch is actually in flight.
+                if waited % 120 == 0 and status != FileStatus.FETCHING.value:
+                    logging.warning(
+                        f"Still waiting for fetch after {waited}s "
+                        f"(status={status}, not actively fetching): {filename}"
+                    )
+                    last_warn_status = status
             logging.info(f"Fetched: {filename}")
 
         # === STEP 2: Clean filename ===
@@ -329,6 +356,47 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
     state.stats["total_content_duration_secs"] = state.stats.get("total_content_duration_secs", 0) + input_duration
     state.save()
 
+    # === Append to encode_history.jsonl (what the dashboard reads) ===
+    # State entries are flat — video/hdr/resolution live in the media report, which we consult
+    # here rather than rely on state (where those fields aren't reliably populated).
+    try:
+        from datetime import datetime, timezone
+
+        from paths import MEDIA_REPORT, STAGING_DIR
+        from server.helpers import read_json_safe
+
+        report = read_json_safe(MEDIA_REPORT) or {}
+        video_info = {}
+        for f in report.get("files", []):
+            if f.get("filepath") == filepath or f.get("filepath") == final_path:
+                video_info = f.get("video", {}) or {}
+                break
+
+        history_entry = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "filepath": final_path,
+            "filename": final_name,
+            "tier": entry.get("tier") or entry.get("tier_name") or "",
+            "res_key": entry.get("res_key") or video_info.get("resolution_class", ""),
+            "input_bytes": input_size,
+            "output_bytes": output_size,
+            "saved_bytes": saved,
+            "encode_time_secs": encode_time,
+            "fetch_time_secs": entry.get("fetch_time_secs", 0),
+            "upload_time_secs": round(upload_elapsed, 1),
+            "compression_ratio": round(output_size / input_size, 3) if input_size > 0 else 0,
+            "codec_from": video_info.get("codec", "") or entry.get("codec", ""),
+            "resolution": video_info.get("resolution_class", ""),
+            "hdr": bool(video_info.get("hdr")),
+            "audio_only": entry.get("mode") == "audio_remux",
+            "library_type": library_type,
+        }
+        history_file = STAGING_DIR / "encode_history.jsonl"
+        with open(history_file, "a", encoding="utf-8") as f:
+            f.write(json.dumps(history_entry) + "\n")
+    except Exception as e:
+        logging.debug(f"  History append failed (non-fatal): {e}")
+
     logging.info(f"  DONE: {final_name}")
     return True
 
@@ -342,14 +410,32 @@ def _run_encode(
     state: PipelineState,
     filepath: str,
 ) -> bool:
-    """Execute the ffmpeg encode command. Retries without subs if subtitle codec fails."""
-    for attempt, include_subs in enumerate([True, False]):
-        if attempt > 0:
-            # Retry without subs
-            from pipeline.ffmpeg import build_ffmpeg_cmd
+    """Execute the ffmpeg encode command with up to three attempts.
 
+    1. Full command as built.
+    2. If subtitle codec rejected → retry without subs.
+    3. If audio timestamps corrupted (common on DTS-HD MA → EAC-3) → retry with audio copy.
+
+    Progress is parsed from stderr (frame=/fps=/time=/speed= lines) and pushed into
+    pipeline state so the dashboard can show live % / speed / ETA per file.
+    """
+    from pipeline.ffmpeg import build_ffmpeg_cmd
+
+    retry_mode = "none"  # tracks what retry strategy we applied
+    attempts = 3  # up to 3 attempts total (original + 2 retries)
+    duration_secs = item.get("duration_seconds") or 0
+
+    for attempt in range(attempts):
+        if attempt == 0:
+            pass  # original cmd
+        elif retry_mode == "no_subs":
             cmd = build_ffmpeg_cmd(input_path, output_path, item, config, include_subs=False)
             logging.warning("  Retrying without subtitles")
+        elif retry_mode == "audio_copy":
+            cmd = _build_audio_copy_cmd(cmd)
+            logging.warning("  Retrying with audio passthrough (DTS timestamp workaround)")
+        else:
+            break  # no more retry strategies
 
         try:
             process = subprocess.Popen(
@@ -359,7 +445,7 @@ def _run_encode(
                 encoding="utf-8",
                 errors="replace",
             )
-            _, stderr = process.communicate()
+            stderr = _stream_encode_progress(process, state, filepath, duration_secs)
 
             if process.returncode == 0:
                 if not os.path.exists(output_path):
@@ -369,8 +455,17 @@ def _run_encode(
             if os.path.exists(output_path):
                 os.remove(output_path)
 
-            if attempt == 0 and ("subtitle" in stderr.lower() or "codec none" in stderr.lower()):
-                continue  # retry without subs
+            stderr_low = stderr.lower()
+            # Decide what to retry next
+            if attempt == 0 and ("subtitle" in stderr_low or "codec none" in stderr_low):
+                retry_mode = "no_subs"
+                continue
+            if "non-monotonic dts" in stderr_low or "non monotonic dts" in stderr_low:
+                # The DTS timestamp error mostly hits the output EAC-3 from DTS-HD MA sources.
+                # Falling back to audio copy skips the transcode and mostly sidesteps the bug.
+                if retry_mode != "audio_copy":
+                    retry_mode = "audio_copy"
+                    continue
 
             logging.error(f"  Encode failed (exit {process.returncode})")
             for line in stderr.strip().split("\n")[-5:]:
@@ -387,6 +482,111 @@ def _run_encode(
 
     state.set_file(filepath, FileStatus.ERROR, error="encode failed after retries", stage="encoding")
     return False
+
+
+def _stream_encode_progress(process, state: PipelineState, filepath: str, duration_secs: float) -> str:
+    """Consume ffmpeg's stable `-progress pipe:1` key=value output on stdout, emit state updates.
+
+    Also drains stderr on a background thread so it doesn't deadlock the subprocess (stderr
+    still carries warnings + errors which the caller needs for the retry detection).
+
+    Each progress snapshot ends with `progress=continue` (or `progress=end` at finish). We
+    push a state update on each snapshot boundary, throttled to one per ~1.5s to keep the
+    SQLite write volume sane.
+    """
+    import threading
+
+    stderr_buf: list[str] = []
+
+    def _drain_stderr():
+        assert process.stderr is not None
+        for line in iter(process.stderr.readline, ""):
+            if not line:
+                break
+            stderr_buf.append(line.rstrip("\n"))
+
+    t = threading.Thread(target=_drain_stderr, daemon=True)
+    t.start()
+
+    snapshot: dict[str, str] = {}
+    last_update = 0.0
+    assert process.stdout is not None
+    for raw in iter(process.stdout.readline, ""):
+        if not raw:
+            break
+        line = raw.strip()
+        if not line:
+            continue
+        if "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        snapshot[key.strip()] = val.strip()
+        if key.strip() != "progress":
+            continue
+        # snapshot is complete (progress=continue or progress=end)
+        now = time.time()
+        if snapshot["progress"] != "end" and now - last_update < 1.5:
+            snapshot.clear()
+            continue
+        last_update = now
+        try:
+            fps_s = snapshot.get("fps", "0")
+            speed_s = snapshot.get("speed", "0x").rstrip("x")
+            out_time_us_s = snapshot.get("out_time_us") or snapshot.get("out_time_ms")
+            # out_time_us is microseconds; out_time_ms is (misnamed) also microseconds per ffmpeg docs
+            out_time_us = int(out_time_us_s) if out_time_us_s and out_time_us_s.isdigit() else 0
+            elapsed_out = out_time_us / 1_000_000
+            fps = float(fps_s) if fps_s else 0.0
+            speed = float(speed_s) if speed_s else 0.0
+            pct = int(elapsed_out / duration_secs * 100) if duration_secs > 0 else None
+            eta_secs = (
+                (duration_secs - elapsed_out) / speed if speed > 0 and duration_secs else None
+            )
+            eta_text = None
+            if eta_secs and eta_secs > 0:
+                h, rem = divmod(int(eta_secs), 3600)
+                m_, _s = divmod(rem, 60)
+                eta_text = f"{h}h {m_:02d}m" if h else f"{m_}m {_s:02d}s"
+            state.set_file(
+                filepath,
+                FileStatus.PROCESSING,
+                stage="encoding",
+                progress_pct=pct,
+                speed=f"{speed}x",
+                fps=round(fps, 1),
+                eta_text=eta_text,
+            )
+        except (ValueError, KeyError):
+            pass
+        snapshot.clear()
+
+    process.wait()
+    t.join(timeout=5)
+    return "\n".join(stderr_buf)
+
+
+def _build_audio_copy_cmd(cmd: list[str]) -> list[str]:
+    """Rewrite an ffmpeg command to use audio passthrough instead of transcode.
+
+    Strips per-stream -c:a:N / -b:a:N pairs (added by build_ffmpeg_cmd) and inserts a single
+    global -c:a copy just before the output path. Faster and sidesteps DTS timestamp bugs.
+    """
+    out = []
+    skip_next = False
+    for i, tok in enumerate(cmd):
+        if skip_next:
+            skip_next = False
+            continue
+        # Strip per-stream audio codec/bitrate flags
+        if tok.startswith(("-c:a", "-b:a", "-filter:a", "-ac:a")):
+            skip_next = True
+            continue
+        out.append(tok)
+    # Insert -c:a copy right before the output path (final argument)
+    if out:
+        output = out[-1]
+        out = out[:-1] + ["-c:a", "copy", output]
+    return out
 
 
 def _find_external_subs(filepath: str) -> list[str]:

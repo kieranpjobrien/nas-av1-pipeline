@@ -256,8 +256,18 @@ def build_ffmpeg_cmd(
         "-y",
         "-err_detect",
         "ignore_err",  # continue past corrupt data in input
+        # Regenerate timestamps from frame order — fixes "Non-monotonic DTS" errors on output
+        # EAC-3 streams when the source is DTS-HD MA (seen on Vinny, Dances With Wolves).
+        "-fflags",
+        "+genpts",
         "-i",
         input_path,
+        # Emit machine-readable progress to stdout. Much cleaner than parsing stderr, since
+        # ffmpeg may change its human-facing format at any time but the `-progress` key=value
+        # protocol is stable. -nostats silences the human-facing stderr progress rewrites.
+        "-progress",
+        "pipe:1",
+        "-nostats",
     ]
 
     # Add external subtitle files as additional inputs

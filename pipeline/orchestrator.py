@@ -29,16 +29,38 @@ class Orchestrator:
         self.staging_dir = staging_dir
         self.control = control
 
+        # Concurrent NVENC sessions. RTX 40-series has 2 NVENC chips → 2 concurrent encodes
+        # are natively supported by hardware with no perf penalty. Settable via config.
+        # Safety: each encode uses ~600 MB VRAM + 500 MB RAM + ~10% CPU — stays well within
+        # 16 GB VRAM / 96 GB RAM / 24-thread budget on RTX 4080 workstation.
+        self._gpu_concurrency = max(1, int(config.get("gpu_concurrency", 2)))
+
         self._shutdown = threading.Event()
-        self._gpu_lock = threading.Lock()  # only one GPU user at a time
+        # Semaphore replaces the old 1-slot lock so N workers can hold a GPU slot at once.
+        self._gpu_semaphore = threading.Semaphore(self._gpu_concurrency)
         self._gpu_preempt = threading.Event()  # set by Force Monitor to interrupt GPU holder
-        self._gpu_available = threading.Event()  # set when GPU is free
-        self._gpu_available.set()  # starts available
         self._force_gpu_queue = queue_mod.Queue()  # force items needing GPU
-        self._gpu_wants: Optional[str] = None  # filepath the GPU is waiting on — network fetches this first
+        # Set of filepaths each worker wants fetched next. Network worker reads this set to know
+        # which files to prioritise — any worker waiting is enough to bump priority.
+        self._gpu_wants_set: set[str] = set()
+        self._gpu_wants_lock = threading.Lock()
+        # Shared dispatched set across all GPU workers — prevents two workers picking the same file.
+        self._dispatched: set[str] = set()
+        self._dispatched_lock = threading.Lock()
 
         signal.signal(signal.SIGTERM, self._handle_signal)
         signal.signal(signal.SIGINT, self._handle_signal)
+
+    def _set_gpu_wants(self, filepath: Optional[str], previous: Optional[str] = None) -> None:
+        with self._gpu_wants_lock:
+            if previous:
+                self._gpu_wants_set.discard(previous)
+            if filepath:
+                self._gpu_wants_set.add(filepath)
+
+    def _get_gpu_wants(self) -> set[str]:
+        with self._gpu_wants_lock:
+            return set(self._gpu_wants_set)
 
     def _handle_signal(self, signum, frame):
         logging.info(f"Received signal {signum}, shutting down...")
@@ -70,34 +92,57 @@ class Orchestrator:
                 self.state.remove_ghosts(ghosts)
                 logging.info(f"  Removed {len(ghosts)} ghost entries (files renamed/deleted)")
 
-        # Clean orphaned fetch/encoded files from previous runs
+        # Clean orphaned fetch/encoded files from previous runs. Retry once on transient
+        # Windows file locks — the common case is the old pipeline's ffmpeg still holding
+        # the handle for a moment after the subprocess exits. Left orphans waste disk and
+        # can mislead the fetch-buffer accounting.
+        import time as _time
+
         for subdir in ("fetch", "encoded"):
             d = os.path.join(self.staging_dir, subdir)
-            if os.path.isdir(d):
-                cleaned = 0
-                for f in os.listdir(d):
+            if not os.path.isdir(d):
+                continue
+            cleaned = 0
+            still_locked = []
+            for f in os.listdir(d):
+                path = os.path.join(d, f)
+                try:
+                    os.remove(path)
+                    cleaned += 1
+                except OSError:
+                    still_locked.append(f)
+            if still_locked:
+                _time.sleep(1)
+                for f in list(still_locked):
+                    path = os.path.join(d, f)
                     try:
-                        os.remove(os.path.join(d, f))
+                        os.remove(path)
                         cleaned += 1
+                        still_locked.remove(f)
                     except OSError:
                         pass
-                if cleaned:
-                    logging.info(f"  Cleaned {cleaned} orphaned files from {subdir}/")
+            if cleaned:
+                logging.info(f"  Cleaned {cleaned} orphaned files from {subdir}/")
+            if still_locked:
+                logging.warning(
+                    f"  {len(still_locked)} file(s) in {subdir}/ still locked after retry — "
+                    f"leaving them; they'll be reclaimed by the next restart. First: {still_locked[0][:80]}"
+                )
 
         self.state.compact()
         full_gamut_queue = self.control.apply_queue_overrides(full_gamut_queue)
         gap_filler_queue = self.control.apply_queue_overrides(gap_filler_queue)
 
         threads = {}
-        threads["gpu"] = threading.Thread(
-            target=self._gpu_worker,
-            args=(
-                full_gamut_queue,
-                gap_filler_queue,
-            ),
-            daemon=True,
-            name="gpu-encode",
-        )
+        # Spin up N GPU worker threads (RTX 40-series has 2 NVENC chips → N=2 safe).
+        for i in range(self._gpu_concurrency):
+            name = f"gpu-encode-{i}"
+            threads[name] = threading.Thread(
+                target=self._gpu_worker,
+                args=(full_gamut_queue, gap_filler_queue, i),
+                daemon=True,
+                name=name,
+            )
         threads["network"] = threading.Thread(
             target=self._network_worker, args=(full_gamut_queue,), daemon=True, name="network"
         )
@@ -129,46 +174,52 @@ class Orchestrator:
     # GPU Worker — holds GPU lock during NVENC encode
     # =========================================================================
 
-    def _gpu_worker(self, queue: list[dict], gap_queue: list[dict]):
-        """Full gamut encodes + force items. Releases GPU lock between files."""
-        logging.info("GPU worker started")
-        dispatched: set[str] = set()
+    def _gpu_worker(self, queue: list[dict], gap_queue: list[dict], worker_id: int = 0):
+        """Full gamut encodes + force items. Holds one GPU semaphore slot per file.
+
+        Multiple workers run in parallel — the semaphore caps concurrency to the configured
+        `gpu_concurrency` (default 2 for RTX 40-series dual NVENC). Pickers use a shared
+        `_dispatched` set to avoid two workers grabbing the same file.
+        """
+        tag_prefix = f"gpu{worker_id}"
+        logging.info(f"GPU worker {worker_id} started")
         processed = 0
 
         while not self._shutdown.is_set():
-            # Priority 1: Force items from the force stack
-            item = self._pop_force_item(gap_queue)
-            is_force = item is not None
-
-            # Priority 2: Regular queue
-            if not item:
-                item = self._pick_next(queue, dispatched)
+            # Under a single lock: try force stack first, then regular queue. Holding the lock
+            # across the force-pop + regular-pick + add-to-dispatched makes the whole claim
+            # atomic so two workers can't end up on the same file.
+            with self._dispatched_lock:
+                item = self._pop_force_item_locked(gap_queue)
+                is_force = item is not None
+                if not item:
+                    item = self._pick_next_locked(queue)
+                if item is not None:
+                    self._dispatched.add(item["filepath"])
 
             if item is None:
-                if self._all_done(queue, dispatched):
+                if self._all_done(queue):
                     break
                 self._shutdown.wait(timeout=5)
                 continue
 
             filepath = item["filepath"]
-            dispatched.add(filepath)
             processed += 1
 
             while self.control.is_encode_paused() and not self._shutdown.is_set():
                 self._shutdown.wait(timeout=5)
 
-            # Tell the network worker what we need fetched
-            self._gpu_wants = filepath
+            # Tell the network worker what we need fetched (per-worker tracking via shared set).
+            self._set_gpu_wants(filepath)
 
-            tag = "FORCE" if is_force else f"GPU {processed}/{len(queue)}"
+            tag = f"FORCE:{tag_prefix}" if is_force else f"{tag_prefix} {processed}/{len(queue)}"
             logging.info(
                 f"\n[{tag}] {item.get('tier_name', '?')} | "
                 f"{item['filename']} ({format_bytes(item.get('file_size_bytes', 0))})"
             )
 
-            # Acquire GPU lock
-            self._gpu_available.clear()
-            with self._gpu_lock:
+            # Acquire a GPU semaphore slot (blocks if all N slots are busy).
+            with self._gpu_semaphore:
                 # Force items that are already AV1 → gap fill instead of full gamut
                 is_av1 = (
                     item.get("video", {}).get("codec_raw") == "av1" if isinstance(item.get("video"), dict) else False
@@ -177,6 +228,16 @@ class Orchestrator:
                     gaps = analyse_gaps(item, self.config)
                     if gaps.needs_anything:
                         gap_fill(filepath, item, gaps, self.config, self.state)
+                    else:
+                        # AV1 + nothing to gap-fill: mark done so the file isn't left in
+                        # an orphaned "processing" state from a prior pipeline run.
+                        logging.info(f"  AV1 with no gaps: {item['filename']} — marking done.")
+                        self.state.set_file(
+                            filepath,
+                            FileStatus.DONE,
+                            mode="gap_filler",
+                            reason="nothing to do (AV1)",
+                        )
                 else:
                     effective_config = self._apply_overrides(item)
                     success = full_gamut(filepath, item, effective_config, self.state, self.staging_dir)
@@ -184,43 +245,65 @@ class Orchestrator:
                         self.state.stats["errors"] = self.state.stats.get("errors", 0) + 1
                         self.state.save()
 
-            self._gpu_wants = None
-            self._gpu_available.set()
+            self._set_gpu_wants(None, previous=filepath)
 
-        self._gpu_wants = None
-        self._gpu_available.set()
-        logging.info("GPU worker finished")
+        self._set_gpu_wants(None)
+        logging.info(f"GPU worker {worker_id} finished")
 
     def _pop_force_item(self, gap_queue: list[dict]) -> dict | None:
-        """Pop the top force item and return it as a queue-compatible dict."""
-        force_items = self.control.get_force_items()
-        if not force_items:
-            return None
+        """Non-locked variant kept for back-compat — use _pop_force_item_locked from GPU workers."""
+        with self._dispatched_lock:
+            return self._pop_force_item_locked(gap_queue)
 
-        filepath = force_items[0]
-        self.control.remove_force_item(filepath)
+    def _pop_force_item_locked(self, gap_queue: list[dict]) -> dict | None:
+        """Pop the top force item and return it as a queue-compatible dict.
 
-        if not os.path.exists(filepath):
-            logging.warning(f"Force item not found: {os.path.basename(filepath)}")
-            return None
+        Caller MUST hold `_dispatched_lock`. Skips items already in `_dispatched` (currently
+        held by another worker) and items in terminal state (done/replaced/skipped).
+        """
+        terminal_states = {"done", "replaced", "skipped", "completed"}
 
-        # Look up in media report for full metadata
-        entry = self._lookup_file(filepath)
-        if entry:
-            return entry
+        while True:
+            force_items = self.control.get_force_items()
+            if not force_items:
+                return None
 
-        # Check gap_queue
-        for item in gap_queue:
-            if item.get("filepath") == filepath:
-                return item
+            filepath = force_items[0]
+            self.control.remove_force_item(filepath)
 
-        # Minimal fallback
-        return {
-            "filepath": filepath,
-            "filename": os.path.basename(filepath),
-            "file_size_bytes": os.path.getsize(filepath) if os.path.exists(filepath) else 0,
-            "library_type": "movie" if "Movies" in filepath else "series",
-        }
+            if filepath in self._dispatched:
+                # Another GPU worker is already on this file — skip it.
+                continue
+
+            if not os.path.exists(filepath):
+                logging.warning(f"Force item not found: {os.path.basename(filepath)}")
+                continue
+
+            existing = self.state.get_file(filepath)
+            if existing and (existing.get("status") or "").lower() in terminal_states:
+                logging.info(
+                    f"Force item already {existing.get('status')}: "
+                    f"{os.path.basename(filepath)} — skipping."
+                )
+                continue
+
+            # Look up in media report for full metadata
+            entry = self._lookup_file(filepath)
+            if entry:
+                return entry
+
+            # Check gap_queue
+            for item in gap_queue:
+                if item.get("filepath") == filepath:
+                    return item
+
+            # Minimal fallback
+            return {
+                "filepath": filepath,
+                "filename": os.path.basename(filepath),
+                "file_size_bytes": os.path.getsize(filepath) if os.path.exists(filepath) else 0,
+                "library_type": "movie" if "Movies" in filepath else "series",
+            }
 
     # =========================================================================
     # Network Worker — pre-fetch files to keep GPU fed
@@ -237,6 +320,12 @@ class Orchestrator:
         """
         logging.info("Network worker started")
         max_buffer = self.config.get("max_fetch_buffer_bytes", 2000 * 1024**3)
+        # Cap the count of pre-fetched-but-not-yet-encoded files, independent of bytes.
+        # On a 1 TB buffer the network worker otherwise pulls 100+ files ahead of a slow
+        # encoder, wasting bandwidth on stuff that'll sit there for hours. Adaptive: allow
+        # gpu_concurrency files currently being encoded, plus 2*gpu_concurrency pre-fetched
+        # ahead so every worker finds its next file ready the moment the current one exits.
+        max_prefetched = max(4, 3 * self._gpu_concurrency)
 
         while not self._shutdown.is_set():
             did_work = False
@@ -258,24 +347,39 @@ class Orchestrator:
                 self._shutdown.wait(timeout=5)
                 continue
 
-            # === Priority 2: Fetch what the GPU is blocked on ===
-            gpu_wants = self._gpu_wants
-            if gpu_wants:
+            # Count how many files are already fetched-but-not-yet-encoded. If we're at the
+            # cap, pause the proactive pre-fetch (priorities 3/4) — but still allow priority 2
+            # (fetch-what-GPU-wants) so a worker never starves waiting on a file we could pull.
+            prefetched_count = self._count_prefetched()
+            prefetch_full = prefetched_count >= max_prefetched
+
+            # === Priority 2: Fetch what the GPU workers are blocked on ===
+            # With multiple GPU workers we can have multiple wants — handle them in order.
+            for gpu_wants in self._get_gpu_wants():
                 existing = self.state.get_file(gpu_wants)
                 status = existing["status"] if existing else None
-                if status in (None, FileStatus.PENDING.value):
-                    entry = self._lookup_file(gpu_wants)
-                    if not entry:
-                        entry = {
-                            "filepath": gpu_wants,
-                            "filename": os.path.basename(gpu_wants),
-                            "file_size_bytes": 0,
-                            "library_type": "movie" if "Movies" in gpu_wants else "series",
-                        }
-                    result = fetch_file(entry, self.staging_dir, self.config, self.state)
-                    if result is not None:
-                        did_work = True
-                        continue
+                if status not in (None, FileStatus.PENDING.value):
+                    continue  # already fetched or in some other state
+                entry = self._lookup_file(gpu_wants)
+                if not entry:
+                    entry = {
+                        "filepath": gpu_wants,
+                        "filename": os.path.basename(gpu_wants),
+                        "file_size_bytes": 0,
+                        "library_type": "movie" if "Movies" in gpu_wants else "series",
+                    }
+                result = fetch_file(entry, self.staging_dir, self.config, self.state)
+                if result is not None:
+                    did_work = True
+                    break  # re-evaluate all priorities next iteration
+            if did_work:
+                continue
+
+            # Don't pre-fetch beyond the queue-depth cap — GPU's already-fetched queue is deep
+            # enough that pulling more would just pile up untouched bytes on the staging drive.
+            if prefetch_full:
+                self._shutdown.wait(timeout=10)
+                continue
 
             # === Priority 3: Fetch force items ===
             force_items = self.control.get_force_items()
@@ -541,12 +645,20 @@ class Orchestrator:
     # Helpers
     # =========================================================================
 
-    def _pick_next(self, queue: list[dict], dispatched: set[str]) -> dict | None:
-        """Pick next item from full gamut queue. Prefers already-fetched files."""
+    def _pick_next(self, queue: list[dict]) -> dict | None:
+        """Non-locked variant — acquires the lock. Use _pick_next_locked from GPU workers."""
+        with self._dispatched_lock:
+            return self._pick_next_locked(queue)
+
+    def _pick_next_locked(self, queue: list[dict]) -> dict | None:
+        """Pick next item from full gamut queue. Prefers already-fetched files.
+
+        Caller MUST hold `_dispatched_lock`. Skips items already in `_dispatched`.
+        """
         # First pass: find a file that's already fetched (status=PROCESSING, local file exists)
         for item in queue:
             fp = item["filepath"]
-            if fp in dispatched:
+            if fp in self._dispatched:
                 continue
             existing = self.state.get_file(fp)
             status = existing["status"] if existing else None
@@ -558,7 +670,7 @@ class Orchestrator:
         # Second pass: pick next pending file (will need fetching)
         for item in queue:
             fp = item["filepath"]
-            if fp in dispatched:
+            if fp in self._dispatched:
                 continue
             if self.control.should_skip(fp):
                 continue
@@ -569,7 +681,9 @@ class Orchestrator:
             return item
         return None
 
-    def _all_done(self, queue: list[dict], dispatched: set[str]) -> bool:
+    def _all_done(self, queue: list[dict]) -> bool:
+        with self._dispatched_lock:
+            dispatched = set(self._dispatched)
         for item in queue:
             fp = item["filepath"]
             existing = self.state.get_file(fp)
@@ -590,6 +704,26 @@ class Orchestrator:
             except OSError:
                 pass
         return total
+
+    def _count_prefetched(self) -> int:
+        """Number of files in state that are fetched-but-not-yet-done.
+
+        Used to cap aggressive pre-fetch: it's pointless to keep pulling files from the NAS
+        when dozens are already sitting on the staging drive waiting for the encoder. Counts
+        any non-terminal, non-pending file (processing/uploading/encoding/etc.) — those have
+        a local fetch file consuming buffer.
+        """
+        active_statuses = {
+            FileStatus.PROCESSING.value,
+            FileStatus.FETCHING.value,
+            FileStatus.UPLOADING.value,
+        }
+        count = 0
+        for fp, entry in self.state.get_all_files().items():
+            status = (entry.get("status") or "").lower()
+            if status in active_statuses and entry.get("local_path"):
+                count += 1
+        return count
 
     def _apply_overrides(self, item: dict) -> dict:
         import copy

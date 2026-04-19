@@ -57,6 +57,9 @@ DEFAULT_CONFIG = {
     "max_staging_bytes": 2_500_000_000_000,  # 2.5 TB total local staging
     "max_fetch_buffer_bytes": 200_000_000_000,  # 200 GB fetch buffer
     "min_free_space_bytes": 50_000_000_000,  # 50 GB minimum free on staging drive
+    # Concurrent NVENC sessions. RTX 40-series has 2 NVENC chips so 2 is the practical cap
+    # with zero perf penalty. Set to 1 on older Turing/Ampere cards with one chip.
+    "gpu_concurrency": 2,
     # Encoding: NVENC AV1 (RTX 4080)
     "video_codec": "av1_nvenc",
     "cq": {

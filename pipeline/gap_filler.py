@@ -236,6 +236,18 @@ def gap_fill(
     filename = file_entry["filename"]
     library_type = file_entry.get("library_type", "")
 
+    # Short-circuit if the state already says DONE for this filepath. The gap_filler queue is
+    # built from media_report which can lag reality — a file we already re-encoded can end up
+    # back in the queue with stale track info, and we don't want to overwrite its DONE state
+    # with an ERROR just because the analysis was based on outdated metadata.
+    existing = state.get_file(filepath)
+    if existing and (existing.get("status") or "").lower() == FileStatus.DONE.value:
+        logging.info(
+            f"  Skipping {filename}: already DONE in state "
+            f"(media_report analysis likely stale)."
+        )
+        return True
+
     # Verify file still exists (may have been renamed by another worker)
     if not os.path.exists(filepath):
         # Try the clean name in the same directory
@@ -281,7 +293,12 @@ def gap_fill(
         # Track removal and/or sub muxing (remote mkvmerge — no SMB transfer)
         if (gaps.needs_track_removal or gaps.needs_sub_mux) and not gaps.needs_audio_transcode:
             machine = getattr(gaps, "_remote_machine", None)
-            success = _strip_tracks_on_nas(filepath, gaps, machine=machine)
+            try:
+                success = _strip_tracks_on_nas(filepath, gaps, machine=machine)
+            except RuntimeError as e:
+                # Config error (e.g. SSH host unset) — surface the real reason.
+                state.set_file(filepath, FileStatus.ERROR, error=str(e), stage="gap_fill")
+                return False
             if not success:
                 state.set_file(filepath, FileStatus.ERROR, error="track strip failed", stage="gap_fill")
                 return False
@@ -359,6 +376,17 @@ def _strip_tracks_on_nas(filepath: str, gaps: GapAnalysis, machine: dict | None 
 
     if machine is None:
         machine = SERVER  # default to media server (fastest Docker)
+
+    # Skip remote operations entirely if SSH host isn't configured — the SSH call will just
+    # error out with "connect to host  port 22" otherwise, leaving an unhelpful log.
+    if not machine.get("host"):
+        logging.error(
+            f"  Remote {machine['label']} SSH host not configured "
+            f"(set {machine['label']}_SSH_HOST env var) — skipping track strip."
+        )
+        # Raise so the caller records a specific error message rather than the generic
+        # "track strip failed" — the user needs to know it's a config issue, not a code bug.
+        raise RuntimeError(f"ssh host {machine['label']}_SSH_HOST not configured")
 
     container_path = unc_to_container_path(filepath)
     tmp_path = container_path + ".gapfill_tmp.mkv"
@@ -469,6 +497,42 @@ def _strip_tracks_on_nas(filepath: str, gaps: GapAnalysis, machine: dict | None 
                 pass
 
 
+def _run_audio_transcode_with_retry(cmd: list[str], input_path: str, output_path: str):
+    """Run the audio-remux ffmpeg command with a DTS-passthrough fallback.
+
+    Returns (process, stderr) — caller checks process.returncode for success. If the first
+    attempt hits the "Non-monotonic DTS" error (common on DTS-HD MA → EAC-3), retry with
+    audio passthrough so the transcode sidesteps the buggy encode path.
+    """
+    process = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding="utf-8", errors="replace"
+    )
+    _, stderr = process.communicate()
+    if process.returncode == 0:
+        return process, stderr
+
+    low = (stderr or "").lower()
+    if "non-monotonic dts" not in low and "non monotonic dts" not in low:
+        return process, stderr  # different failure — let caller handle
+
+    if os.path.exists(output_path):
+        try:
+            os.remove(output_path)
+        except OSError:
+            pass
+
+    # Import locally to avoid a circular import at module load.
+    from pipeline.full_gamut import _build_audio_copy_cmd
+
+    retry_cmd = _build_audio_copy_cmd(cmd)
+    logging.warning("  Audio transcode hit DTS timestamp bug — retrying with passthrough")
+    retry_proc = subprocess.Popen(
+        retry_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding="utf-8", errors="replace"
+    )
+    _, retry_stderr = retry_proc.communicate()
+    return retry_proc, retry_stderr
+
+
 def _audio_transcode(
     filepath: str,
     file_entry: dict,
@@ -500,17 +564,17 @@ def _audio_transcode(
         # Build remux command (copy video, transcode audio, strip foreign tracks)
         cmd = build_audio_remux_cmd(local_path, output_path, file_entry, config, include_subs=True)
 
-        # Execute
+        # Execute with the same DTS fallback as full_gamut._run_encode: if the EAC-3 output
+        # hits non-monotonic DTS from a DTS-HD MA source, retry once with audio passthrough.
         state.set_file(filepath, FileStatus.PROCESSING, stage="audio_transcode")
         start = time.time()
-        process = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding="utf-8", errors="replace"
-        )
-        _, stderr = process.communicate()
+        process, stderr = _run_audio_transcode_with_retry(cmd, local_path, output_path)
         elapsed = time.time() - start
 
         if process.returncode != 0:
             logging.error(f"  Audio transcode failed (exit {process.returncode})")
+            for line in stderr.strip().split("\n")[-3:]:
+                logging.error(f"    ffmpeg: {line}")
             state.set_file(
                 filepath, FileStatus.ERROR, error=f"ffmpeg exit {process.returncode}", stage="audio_transcode"
             )
