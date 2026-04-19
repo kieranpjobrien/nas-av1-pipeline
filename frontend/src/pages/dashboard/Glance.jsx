@@ -163,20 +163,15 @@ export function Glance({ data, pipelineData, throughputPerDay, workersActive, wo
           eta: info.eta_text ?? null,
         };
       })
-      // Stable sort: bucket-aware, then by filepath. Sorting by ageMs (last_updated) made
-      // cards jump around every time the progress parser wrote — hurts readability. Within
-      // the Encoder section we sort by progress descending so "closest to done" shows first;
-      // other buckets go alphabetical by filepath for stability.
+      // Fully stable sort: bucket first, then alphabetical by filepath. Anything
+      // derived from progress or last_updated drives re-ordering on every tick — cards
+      // jumping around is worse than "closest to done at top". Alphabetical within a
+      // bucket is at worst neutral and at best memorable.
       .sort((a, b) => {
         const bucketOrder = { encoding: 0, queued: 1, fetching: 2, uploading: 3 };
         const ba = bucketOrder[a.bucket] ?? 9;
         const bb = bucketOrder[b.bucket] ?? 9;
         if (ba !== bb) return ba - bb;
-        if (a.bucket === "encoding") {
-          const pa = a.progressPct ?? -1;
-          const pb = b.progressPct ?? -1;
-          if (pa !== pb) return pb - pa;
-        }
         return (a.filepath || "").localeCompare(b.filepath || "");
       });
   }, [pipelineFiles]);
