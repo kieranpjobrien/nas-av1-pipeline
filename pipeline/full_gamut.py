@@ -298,21 +298,49 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
         pass
 
     # === Verify ===
+    # Tiny mismatches (ffmpeg rounding + container overhead) are OK; anything over a few
+    # seconds is suspect; anything >1.2x input duration is a real broken encode (seen on
+    # VFR sources where ffmpeg padded the timeline). Auto-discard and reset to pending so
+    # the file gets another shot — cheaper than making the user manually retry from the UI.
     duration_tolerance = config.get("verify_duration_tolerance_secs", 2.0)
     output_duration = get_duration(dest_path) or 0
-    if input_duration > 0 and abs(input_duration - output_duration) > duration_tolerance:
-        logging.error(f"  Duration mismatch: input={input_duration:.1f}s, output={output_duration:.1f}s")
-        state.set_file(
-            filepath,
-            FileStatus.ERROR,
-            error=f"duration mismatch ({input_duration:.0f}s vs {output_duration:.0f}s)",
-            stage="verify",
-        )
-        try:
-            os.remove(dest_path)
-        except OSError:
-            pass
-        return False
+    if input_duration > 0:
+        diff = abs(input_duration - output_duration)
+        ratio = output_duration / input_duration if input_duration else 1.0
+        if diff > duration_tolerance:
+            # Clean up the bad encode either way
+            try:
+                os.remove(dest_path)
+            except OSError:
+                pass
+
+            if ratio > 1.2 or ratio < 0.8:
+                # Clearly broken (>20% off) — discard + reset to PENDING so the pipeline
+                # picks it up again. Don't leave it in ERROR state requiring manual retry.
+                logging.error(
+                    f"  Duration mismatch (broken encode, ratio {ratio:.2f}): "
+                    f"input={input_duration:.0f}s, output={output_duration:.0f}s — resetting to pending."
+                )
+                state.set_file(
+                    filepath,
+                    FileStatus.PENDING,
+                    error=None,
+                    stage=None,
+                    reason=f"auto-retry: duration mismatch {input_duration:.0f}s→{output_duration:.0f}s",
+                )
+            else:
+                # Small-ish mismatch (2-20%) — park in ERROR for manual review; resetting
+                # blindly could loop on a deterministic ffmpeg bug.
+                logging.error(
+                    f"  Duration mismatch: input={input_duration:.1f}s, output={output_duration:.1f}s"
+                )
+                state.set_file(
+                    filepath,
+                    FileStatus.ERROR,
+                    error=f"duration mismatch ({input_duration:.0f}s vs {output_duration:.0f}s)",
+                    stage="verify",
+                )
+            return False
 
     # === Replace original (crash-safe) ===
     backup_path = filepath + ".original.bak"

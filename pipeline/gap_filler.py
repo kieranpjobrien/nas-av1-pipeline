@@ -290,26 +290,37 @@ def gap_fill(
             except Exception as e:
                 logging.warning(f"  Language detection failed: {e}")
 
-        # Track removal and/or sub muxing (remote mkvmerge — no SMB transfer)
+        # Track removal and/or sub muxing (remote mkvmerge — no SMB transfer).
+        # If remote SSH isn't configured or the strip fails, we DON'T error the whole file —
+        # we skip the strip and continue with local ops (filename clean, metadata, foreign
+        # sub delete). Those are genuine wins that don't require SSH. Only the file that
+        # needed strip stays partially untouched, not the rest of the queue.
+        track_strip_deferred = False
         if (gaps.needs_track_removal or gaps.needs_sub_mux) and not gaps.needs_audio_transcode:
             machine = getattr(gaps, "_remote_machine", None)
+            strip_ok = False
             try:
-                success = _strip_tracks_on_nas(filepath, gaps, machine=machine)
+                strip_ok = _strip_tracks_on_nas(filepath, gaps, machine=machine)
             except RuntimeError as e:
-                # Config error (e.g. SSH host unset) — surface the real reason.
-                state.set_file(filepath, FileStatus.ERROR, error=str(e), stage="gap_fill")
-                return False
-            if not success:
-                state.set_file(filepath, FileStatus.ERROR, error="track strip failed", stage="gap_fill")
-                return False
-            # Delete external sub files after successful mux
-            if gaps.needs_sub_mux:
-                for sub_path in gaps.external_subs:
-                    try:
-                        os.remove(sub_path)
-                        logging.info(f"  Muxed and removed: {os.path.basename(sub_path)}")
-                    except OSError:
-                        pass
+                logging.warning(f"  Track strip deferred (config): {e}")
+                track_strip_deferred = True
+            except Exception as e:
+                logging.warning(f"  Track strip failed ({e}) — continuing with local ops")
+                track_strip_deferred = True
+
+            if strip_ok:
+                # Delete external sub files after successful mux
+                if gaps.needs_sub_mux:
+                    for sub_path in gaps.external_subs:
+                        try:
+                            os.remove(sub_path)
+                            logging.info(f"  Muxed and removed: {os.path.basename(sub_path)}")
+                        except OSError:
+                            pass
+            elif not track_strip_deferred:
+                # Attempted + failed for a real reason (not config): mark that specifically.
+                track_strip_deferred = True
+                logging.warning("  Track strip failed — continuing with local ops")
 
         # Delete foreign external subs (not muxed, just cleaned up)
         if gaps.needs_foreign_sub_cleanup:
@@ -349,10 +360,25 @@ def gap_fill(
         except Exception as e:
             logging.warning(f"  Report update failed: {e}")
 
-        state.set_file(filepath, FileStatus.DONE, mode="gap_filler")
+        # If track strip was deferred (SSH unavailable), mark the file accordingly so it can
+        # be identified for a retry when SSH is configured. Still counts as "done for now"
+        # because the local ops succeeded and there's no point re-running them.
+        if track_strip_deferred:
+            state.set_file(
+                filepath,
+                FileStatus.DONE,
+                mode="gap_filler",
+                reason="local ops done; track_strip deferred (ssh unavailable)",
+            )
+            logging.info(
+                f"  DONE (partial — strip deferred): {filename} "
+                f"— local ops applied, track strip will need SSH on a retry."
+            )
+        else:
+            state.set_file(filepath, FileStatus.DONE, mode="gap_filler")
+            logging.info(f"  DONE: Gap filled: {filename}")
         state.stats["gap_filled"] = state.stats.get("gap_filled", 0) + 1
         state.save()
-        logging.info(f"  DONE: Gap filled: {filename}")
         return True
 
     except Exception as e:
