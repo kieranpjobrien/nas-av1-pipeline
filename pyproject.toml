@@ -13,6 +13,7 @@ authors = [{name = "Kieran O'Brien"}]
 dependencies = [
     "fastapi>=0.115",
     "langdetect>=1.0.9",
+    "psutil>=7.2.2",
     "uvicorn[standard]>=0.34",
 ]
 

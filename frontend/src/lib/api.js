@@ -56,6 +56,8 @@ export const api = {
   getDuplicates: () => fetchJSON("/duplicates"),
   deleteFile: (path) => postJSON("/file/delete", { path }),
   getGpu: () => fetchJSON("/gpu"),
+  getHostStats: () => fetchJSON("/host-stats"),
+  getFileSiblings: (path) => fetchJSON(`/file/siblings?path=${encodeURIComponent(path)}`),
   getHistory: (days = 0, limit = 500) => fetchJSON(`/history?days=${days}&limit=${limit}`),
   getHistorySummary: () => fetchJSON("/history/summary"),
   getHealth: () => fetchJSON("/health"),

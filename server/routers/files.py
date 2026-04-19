@@ -72,6 +72,64 @@ def delete_file(req: DeleteFileRequest) -> dict:
         raise HTTPException(500, f"Delete failed: {e}")
 
 
+@router.get("/api/file/siblings")
+def get_file_siblings(path: str) -> dict:
+    """List files that sit alongside the given media file (sub sidecars, artwork, nfo, etc.).
+
+    Used by the Library inspector's "Open in file manager" panel.
+    """
+    from paths import NAS_MOVIES, NAS_SERIES
+
+    norm = os.path.normpath(path)
+    nas_movies = os.path.normpath(str(NAS_MOVIES))
+    nas_series = os.path.normpath(str(NAS_SERIES))
+    if not (norm.startswith(nas_movies) or norm.startswith(nas_series)):
+        raise HTTPException(403, "Path is outside NAS media directories")
+
+    parent = os.path.dirname(norm)
+    if not os.path.isdir(parent):
+        raise HTTPException(404, f"Parent dir not found: {parent}")
+
+    def classify(name: str, full: str) -> str:
+        if os.path.isdir(full):
+            return "dir"
+        low = name.lower()
+        if low.endswith((".mkv", ".mp4", ".avi", ".mov", ".m4v", ".webm", ".ts")):
+            return "video"
+        if low.endswith((".srt", ".ass", ".sub", ".idx", ".vtt", ".ssa")):
+            return "sub"
+        if low.endswith((".jpg", ".jpeg", ".png", ".webp")):
+            return "art"
+        if low.endswith((".nfo", ".xml", ".json")):
+            return "meta"
+        if low.endswith((".txt", ".log")):
+            return "text"
+        return "other"
+
+    items = []
+    try:
+        for name in sorted(os.listdir(parent)):
+            full = os.path.join(parent, name)
+            try:
+                is_dir = os.path.isdir(full)
+                size = 0 if is_dir else os.path.getsize(full)
+            except OSError:
+                continue
+            items.append(
+                {
+                    "name": name,
+                    "kind": classify(name, full),
+                    "is_dir": is_dir,
+                    "size_bytes": size,
+                    "current": os.path.normpath(full).lower() == norm.lower(),
+                }
+            )
+    except OSError as e:
+        raise HTTPException(500, f"Listing failed: {e}")
+
+    return {"parent": parent, "items": items}
+
+
 @router.get("/api/file-detail")
 def get_file_detail(path: str) -> dict:
     """Cross-reference media report + pipeline state for a single file."""

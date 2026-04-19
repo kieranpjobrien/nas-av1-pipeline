@@ -88,6 +88,72 @@ def get_gpu() -> dict:
     return _query_gpu()
 
 
+# --- Host stats (CPU/memory/network/staging disk) ---
+
+_net_prev: dict = {}
+
+
+@router.get("/api/host-stats")
+def get_host_stats() -> dict:
+    """Return live host CPU/memory/network + staging disk usage for the telemetry strip."""
+    import shutil as _shutil
+
+    try:
+        import psutil
+    except ImportError:
+        return {"available": False, "reason": "psutil not installed"}
+
+    # psutil.cpu_percent with interval=None returns cumulative since last call — we rely on the
+    # frontend polling cadence (every ~1.5s) to produce meaningful per-tick deltas.
+    cpu_pct = psutil.cpu_percent(interval=None)
+    mem = psutil.virtual_memory()
+
+    # Network throughput: diff against the last snapshot we kept.
+    now = time.monotonic()
+    io = psutil.net_io_counters()
+    prev = _net_prev.get("snap")
+    net_mbps = None
+    if prev:
+        dt = now - prev["t"]
+        if dt > 0:
+            rx_per_s = (io.bytes_recv - prev["rx"]) / dt
+            tx_per_s = (io.bytes_sent - prev["tx"]) / dt
+            net_mbps = round((rx_per_s + tx_per_s) / (1024 * 1024), 1)
+    _net_prev["snap"] = {"t": now, "rx": io.bytes_recv, "tx": io.bytes_sent}
+
+    try:
+        disk = _shutil.disk_usage(str(STAGING_DIR))
+        staging_free_gb = round(disk.free / (1024**3), 2)
+        staging_used_gb = round(disk.used / (1024**3), 2)
+        staging_total_gb = round(disk.total / (1024**3), 2)
+    except OSError:
+        staging_free_gb = staging_used_gb = staging_total_gb = None
+
+    cpu_temp = None
+    try:
+        temps = psutil.sensors_temperatures() if hasattr(psutil, "sensors_temperatures") else {}
+        for probe in ("coretemp", "k10temp", "cpu_thermal", "acpitz"):
+            if probe in temps and temps[probe]:
+                cpu_temp = round(temps[probe][0].current)
+                break
+    except Exception:
+        pass
+
+    return {
+        "available": True,
+        "cpu_pct": round(cpu_pct, 1),
+        "cpu_temp_c": cpu_temp,
+        "cpu_count": psutil.cpu_count(logical=True),
+        "mem_used_gb": round(mem.used / (1024**3), 2),
+        "mem_total_gb": round(mem.total / (1024**3), 2),
+        "mem_pct": mem.percent,
+        "net_mbps": net_mbps,
+        "staging_used_gb": staging_used_gb,
+        "staging_free_gb": staging_free_gb,
+        "staging_total_gb": staging_total_gb,
+    }
+
+
 # --- Health dashboard ---
 
 _health_cache: dict = {}
@@ -139,6 +205,9 @@ def get_health(request: Request) -> dict:
     pm = request.app.state.pm
     pipeline_status = pm.status("pipeline")
 
+    nas_ssh = os.environ.get("NAS_SSH_HOST", "")
+    server_ssh = os.environ.get("SERVER_SSH_HOST", "")
+
     _health_cache = {
         "nas_movies_reachable": nas_movies_ok,
         "nas_series_reachable": nas_series_ok,
@@ -151,6 +220,10 @@ def get_health(request: Request) -> dict:
         "pipeline_status": pipeline_status.get("status", "idle"),
         "pipeline_pid": pipeline_status.get("pid"),
         "python_version": sys.version.split()[0],
+        "nas_ssh_configured": bool(nas_ssh),
+        "server_ssh_configured": bool(server_ssh),
+        "nas_ssh_host": nas_ssh or None,
+        "server_ssh_host": server_ssh or None,
     }
     _health_cache_time = now
     return _health_cache

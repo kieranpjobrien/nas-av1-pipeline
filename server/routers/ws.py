@@ -45,13 +45,16 @@ class ConnectionManager:
 
 
 ws_manager = ConnectionManager()
-_ws_state_mtime: float = 0
 
 
 @router.websocket("/api/ws")
 async def websocket_endpoint(ws: WebSocket) -> None:
-    """WebSocket endpoint that pushes live pipeline, GPU, and control updates."""
-    global _ws_state_mtime
+    """WebSocket endpoint that pushes live pipeline, GPU, and control updates.
+
+    Each connection has its own mtime tracking so multiple clients don't starve each other,
+    and a heartbeat-like resend (every ~6s) ensures clients get the latest state even if
+    they connected mid-tick before a DB change.
+    """
     await ws_manager.connect(ws)
     try:
         # Send initial state
@@ -71,7 +74,12 @@ async def websocket_endpoint(ws: WebSocket) -> None:
         }
         await ws.send_json({"type": "control", "data": control_data})
 
-        # Poll loop -- push updates when state changes
+        # Per-connection mtime tracking so concurrent clients don't steal each other's push.
+        last_mtime: float = 0
+        ticks_since_push: int = 0
+        HEARTBEAT_TICKS = 6  # resend pipeline state at least every ~6s even if DB didn't change
+
+        # Poll loop
         gpu_tick = 0
         while True:
             try:
@@ -81,7 +89,7 @@ async def websocket_endpoint(ws: WebSocket) -> None:
             except WebSocketDisconnect:
                 break
 
-            # Pipeline state -- check DB mtime
+            # Pipeline state — push if DB mtime changed OR we haven't pushed in a while.
             try:
                 db_path = str(PIPELINE_STATE_DB)
                 wal_path = db_path + "-wal"
@@ -93,8 +101,10 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                     mtime = 0
             except OSError:
                 mtime = 0
-            if mtime != _ws_state_mtime:
-                _ws_state_mtime = mtime
+            ticks_since_push += 1
+            if mtime != last_mtime or ticks_since_push >= HEARTBEAT_TICKS:
+                last_mtime = mtime
+                ticks_since_push = 0
                 data = _get_pipeline_state()
                 if data:
                     await ws.send_json({"type": "pipeline", "data": data})

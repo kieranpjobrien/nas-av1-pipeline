@@ -4,12 +4,14 @@ import { PipelinePage } from "./pages/PipelinePage";
 import { LibraryPage } from "./pages/LibraryPage";
 import { ControlPage } from "./pages/ControlPage";
 import { HistoryPage } from "./pages/HistoryPage";
+import { DashboardPage } from "./pages/DashboardPage";
 import { GpuWidget } from "./components/GpuWidget";
 import { FileDrawer } from "./components/FileDrawer";
 import { useWebSocket } from "./lib/useWebSocket";
 import { api } from "./lib/api";
 
 const TABS = [
+  { id: "dashboard", label: "Dashboard" },
   { id: "pipeline", label: "Pipeline" },
   { id: "library", label: "Library" },
   { id: "controls", label: "Controls" },
@@ -17,9 +19,25 @@ const TABS = [
 ];
 
 export default function App() {
-  const [tab, setTab] = useState("pipeline");
+  const [tab, setTab] = useState(() => localStorage.getItem("nc.tab") || "dashboard");
   const [drawerPath, setDrawerPath] = useState(null);
   const { pipeline, gpu, control, connected } = useWebSocket(api.getPipeline, 3000);
+
+  const setTabPersist = (t) => {
+    setTab(t);
+    localStorage.setItem("nc.tab", t);
+  };
+
+  // When Dashboard is selected, hand over the full viewport to the operator console —
+  // it has its own sidebar/topbar and doesn't co-exist well with a second chrome above it.
+  if (tab === "dashboard") {
+    return (
+      <>
+        <DashboardPage onClassic={() => setTabPersist("pipeline")} onFileClick={setDrawerPath} />
+        {drawerPath && <FileDrawer path={drawerPath} onClose={() => setDrawerPath(null)} />}
+      </>
+    );
+  }
 
   return (
     <div style={{
@@ -46,7 +64,7 @@ export default function App() {
         {TABS.map(({ id, label }) => (
           <button
             key={id}
-            onClick={() => setTab(id)}
+            onClick={() => setTabPersist(id)}
             style={{
               background: tab === id ? PALETTE.accent : "transparent",
               color: tab === id ? "#fff" : PALETTE.textMuted,

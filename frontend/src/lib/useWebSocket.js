@@ -12,6 +12,8 @@ export function useWebSocket(fallbackFetcher, fallbackIntervalMs = 3000) {
   const wsRef = useRef(null);
   const reconnectTimer = useRef(null);
   const reconnectDelay = useRef(1000);
+  const fallbackFetcherRef = useRef(fallbackFetcher);
+  fallbackFetcherRef.current = fallbackFetcher;
 
   const connect = useCallback(() => {
     // Derive WS URL from current page location
@@ -22,9 +24,16 @@ export function useWebSocket(fallbackFetcher, fallbackIntervalMs = 3000) {
       const ws = new WebSocket(url);
       wsRef.current = ws;
 
-      ws.onopen = () => {
+      ws.onopen = async () => {
         setConnected(true);
         reconnectDelay.current = 1000; // reset backoff
+        // Belt-and-braces: the backend's WS now sends state on connect AND heartbeats every
+        // ~6s, but fire an HTTP snapshot anyway so the dashboard isn't blank for a moment
+        // while we wait for the first WS push after (re)connect.
+        try {
+          const fresh = await fallbackFetcherRef.current?.();
+          if (fresh) setPipeline(fresh);
+        } catch {}
       };
 
       ws.onmessage = (event) => {
