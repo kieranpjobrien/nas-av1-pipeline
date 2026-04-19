@@ -365,12 +365,28 @@ function RunMenu({ routing, setRouting, onRun, errorCount = 0, pipelineRunning =
       ? {
           k: "stop",
           title: "Stop pipeline",
-          sub: "Graceful stop · finishes any in-flight uploads, then terminates workers",
+          sub: "Graceful · finishes any in-flight upload, then terminates workers",
           count: "",
           iconColor: "var(--warn)",
           icon: (
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <rect x="6" y="6" width="12" height="12" rx="1" />
+            </svg>
+          ),
+        }
+      : null,
+    pipelineRunning
+      ? {
+          k: "kill",
+          title: "Force-kill pipeline",
+          sub: "Instant · terminates every worker immediately, in-flight work is lost",
+          count: "",
+          iconColor: "var(--bad)",
+          icon: (
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <circle cx="12" cy="12" r="9" />
+              <line x1="8" y1="8" x2="16" y2="16" />
+              <line x1="16" y1="8" x2="8" y2="16" />
             </svg>
           ),
         }
@@ -885,6 +901,19 @@ export function DashboardPage({ onClassic, onFileClick }) {
             kind: r?.ok === false ? "warn" : "info",
             title: r?.ok === false ? "Pipeline not running" : "Pipeline stop requested",
             body: r?.method ? `method: ${r.method}` : r?.error || "",
+          });
+          return;
+        }
+
+        if (mode === "kill") {
+          const r = await api.killProcess("pipeline");
+          const killedCount = Array.isArray(r?.killed) ? r.killed.length : 0;
+          push({
+            kind: r?.ok === false ? "warn" : "bad",
+            title: r?.ok === false ? "Nothing to kill" : "Pipeline force-killed",
+            body: killedCount
+              ? `${killedCount} process${killedCount === 1 ? "" : "es"} terminated (pid${killedCount === 1 ? "" : "s"} ${r.killed.join(", ")})`
+              : r?.error || "",
           });
           return;
         }
