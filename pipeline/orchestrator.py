@@ -719,12 +719,19 @@ class Orchestrator:
         from pipeline.nas_worker import NAS, SERVER
 
         threads = []
-        # Media server workers (faster Docker, NFS mount) — 10 workers
-        for i in range(10):
-            threads.append(threading.Thread(target=heavy_worker, args=(f"SRV-{i}", SERVER), daemon=True))
+        # Media server workers (faster Docker, NFS mount) — 10 workers. Only spawn if
+        # SERVER_SSH_HOST is set; otherwise every job would defer with an error log line.
+        if SERVER.get("host"):
+            for i in range(10):
+                threads.append(threading.Thread(target=heavy_worker, args=(f"SRV-{i}", SERVER), daemon=True))
+        else:
+            logging.info("  SRV workers skipped (SERVER_SSH_HOST not set)")
         # NAS workers (local disk, persistent Docker container — no startup overhead)
-        for i in range(6):
-            threads.append(threading.Thread(target=heavy_worker, args=(f"NAS-{i}", NAS), daemon=True))
+        if NAS.get("host"):
+            for i in range(6):
+                threads.append(threading.Thread(target=heavy_worker, args=(f"NAS-{i}", NAS), daemon=True))
+        else:
+            logging.info("  NAS workers skipped (NAS_SSH_HOST not set)")
         # Quick workers (run on PC — instant ops)
         for i in range(2):
             threads.append(threading.Thread(target=quick_worker, args=(f"QUICK-{i}",), daemon=True))
