@@ -163,7 +163,22 @@ export function Glance({ data, pipelineData, throughputPerDay, workersActive, wo
           eta: info.eta_text ?? null,
         };
       })
-      .sort((a, b) => (a.ageMs ?? 0) - (b.ageMs ?? 0));
+      // Stable sort: bucket-aware, then by filepath. Sorting by ageMs (last_updated) made
+      // cards jump around every time the progress parser wrote — hurts readability. Within
+      // the Encoder section we sort by progress descending so "closest to done" shows first;
+      // other buckets go alphabetical by filepath for stability.
+      .sort((a, b) => {
+        const bucketOrder = { encoding: 0, queued: 1, fetching: 2, uploading: 3 };
+        const ba = bucketOrder[a.bucket] ?? 9;
+        const bb = bucketOrder[b.bucket] ?? 9;
+        if (ba !== bb) return ba - bb;
+        if (a.bucket === "encoding") {
+          const pa = a.progressPct ?? -1;
+          const pb = b.progressPct ?? -1;
+          if (pa !== pb) return pb - pa;
+        }
+        return (a.filepath || "").localeCompare(b.filepath || "");
+      });
   }, [pipelineFiles]);
 
   const encoding = activeSample.filter((f) => f.bucket === "encoding");
