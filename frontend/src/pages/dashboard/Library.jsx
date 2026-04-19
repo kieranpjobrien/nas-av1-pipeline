@@ -25,27 +25,98 @@ const statusLabel = (s) => {
   return { led: "var(--ink-4)", label: "—" };
 };
 
+const SORT_OPTIONS = [
+  { k: "size_desc", label: "Size ↓" },
+  { k: "size_asc", label: "Size ↑" },
+  { k: "name_asc", label: "Name A-Z" },
+  { k: "bitrate_desc", label: "Bitrate ↓" },
+  { k: "duration_desc", label: "Duration ↓" },
+];
+
+const GROUP_OPTIONS = [
+  { k: "none", label: "—" },
+  { k: "library", label: "Library (Movies / Series)" },
+  { k: "codec", label: "Codec" },
+  { k: "resolution", label: "Resolution" },
+];
+
+const hasAtmos = (f) =>
+  (f.audio || []).some((a) => {
+    const c = (a.codec || "").toLowerCase();
+    const t = (a.title || "").toLowerCase();
+    return c.includes("atmos") || c.includes("truehd") || t.includes("atmos");
+  });
+
+const foreignSubsOnly = (f) => {
+  const subs = f.subs || [];
+  const ext = f.externalSubs || [];
+  if (subs.length + ext.length === 0) return false;
+  const hasEng =
+    subs.some((s) => (s.lang || "").toLowerCase().startsWith("en")) ||
+    ext.some((s) => (s.language || "").toLowerCase().startsWith("en"));
+  return !hasEng;
+};
+
+const statusIsErrored = (pf) => ["error", "errored", "failed"].includes((pf?.status || "").toLowerCase());
+
 export function Library({ data, pipelineData, onFileOpen }) {
-  const all = data.topTargets;
+  const all = data.files || data.topTargets;
   const [selIdx, setSelIdx] = useState(0);
   const [query, setQuery] = useState("");
-  const [filters, setFilters] = useState({ codec: null, res: null, hdr: false });
+  const [filters, setFilters] = useState({
+    codec: null,
+    res: null,
+    hdr: false,
+    atmos: false,
+    foreignSubs: false,
+    status: null, // null | "needs_encode" | "errored"
+  });
+  const [sort, setSort] = useState("size_desc");
+  const [group, setGroup] = useState("none");
+  const [sortOpen, setSortOpen] = useState(false);
+  const [groupOpen, setGroupOpen] = useState(false);
+  const [visibleCount, setVisibleCount] = useState(50);
   const [panel, setPanel] = useState(null);
   const pipelineFiles = pipelineData?.files || {};
 
   const rows = useMemo(() => {
-    return all.filter((f) => {
+    const filtered = all.filter((f) => {
       if (query && !`${f.filename} ${f.filepath}`.toLowerCase().includes(query.toLowerCase())) return false;
       if (filters.codec && codecKey(f.codec) !== filters.codec) return false;
       if (filters.res && resKey(f.res) !== filters.res) return false;
       if (filters.hdr && !f.hdr) return false;
+      if (filters.atmos && !hasAtmos(f)) return false;
+      if (filters.foreignSubs && !foreignSubsOnly(f)) return false;
+      if (filters.status === "needs_encode") {
+        const k = codecKey(f.codec);
+        if (k !== "hevc" && k !== "h264") return false;
+      }
+      if (filters.status === "errored") {
+        if (!statusIsErrored(pipelineFiles[f.filepath])) return false;
+      }
       return true;
     });
-  }, [all, query, filters]);
+    const cmp = {
+      size_desc: (a, b) => (b.size_gb || 0) - (a.size_gb || 0),
+      size_asc: (a, b) => (a.size_gb || 0) - (b.size_gb || 0),
+      name_asc: (a, b) => (a.filename || "").localeCompare(b.filename || ""),
+      bitrate_desc: (a, b) => (b.bitrate || 0) - (a.bitrate || 0),
+      duration_desc: (a, b) => (b.dur || 0) - (a.dur || 0),
+    }[sort];
+    return [...filtered].sort(cmp);
+  }, [all, query, filters, sort, pipelineFiles]);
+
+  // reset pagination when filters change
+  useEffect(() => setVisibleCount(50), [query, filters, sort]);
 
   const sel = rows[selIdx] || rows[0] || all[0];
 
   const toggle = (k, v) => setFilters((f) => ({ ...f, [k]: f[k] === v ? null : v }));
+  const toggleBool = (k) => setFilters((f) => ({ ...f, [k]: !f[k] }));
+  const setStatus = (v) => setFilters((f) => ({ ...f, status: f.status === v ? null : v }));
+
+  const sortLabel = SORT_OPTIONS.find((o) => o.k === sort)?.label || sort;
+  const groupLabel = GROUP_OPTIONS.find((o) => o.k === group)?.label || group;
 
   return (
     <div className="view">
@@ -67,7 +138,8 @@ export function Library({ data, pipelineData, onFileOpen }) {
             <b>Size</b>: {(data.summary.total_size_gb / 1024).toFixed(1)} TB
           </div>
           <div>
-            <b>Showing</b>: {fmtNum(rows.length)} of {fmtNum(all.length)}
+            <b>Showing</b>: {fmtNum(Math.min(visibleCount, rows.length))} /{" "}
+            {fmtNum(rows.length)} match · {fmtNum(all.length)} total
           </div>
         </div>
       </div>
@@ -96,8 +168,60 @@ export function Library({ data, pipelineData, onFileOpen }) {
           />
           <span className="kbd">⌘K</span>
         </div>
-        <button className="chip">Sort: Size ↓</button>
-        <button className="chip">Group: —</button>
+        <div style={{ position: "relative" }}>
+          <button
+            className={`chip ${sortOpen ? "on" : ""}`}
+            onClick={() => {
+              setSortOpen((v) => !v);
+              setGroupOpen(false);
+            }}
+          >
+            Sort: {sortLabel}
+          </button>
+          {sortOpen && (
+            <div className="chip-menu">
+              {SORT_OPTIONS.map((o) => (
+                <div
+                  key={o.k}
+                  className={`chip-menu-item ${sort === o.k ? "on" : ""}`}
+                  onClick={() => {
+                    setSort(o.k);
+                    setSortOpen(false);
+                  }}
+                >
+                  {o.label}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+        <div style={{ position: "relative" }}>
+          <button
+            className={`chip ${groupOpen ? "on" : ""}`}
+            onClick={() => {
+              setGroupOpen((v) => !v);
+              setSortOpen(false);
+            }}
+          >
+            Group: {groupLabel}
+          </button>
+          {groupOpen && (
+            <div className="chip-menu">
+              {GROUP_OPTIONS.map((o) => (
+                <div
+                  key={o.k}
+                  className={`chip-menu-item ${group === o.k ? "on" : ""}`}
+                  onClick={() => {
+                    setGroup(o.k);
+                    setGroupOpen(false);
+                  }}
+                >
+                  {o.label}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
 
       <div className="facets">
@@ -129,19 +253,42 @@ export function Library({ data, pipelineData, onFileOpen }) {
           <span className="lbl">Flags</span>
           <button
             className={`chip ${filters.hdr ? "on" : ""}`}
-            onClick={() => setFilters((f) => ({ ...f, hdr: !f.hdr }))}
+            onClick={() => toggleBool("hdr")}
           >
             HDR
           </button>
-          <button className="chip">Atmos</button>
-          <button className="chip">Foreign subs only</button>
+          <button
+            className={`chip ${filters.atmos ? "on" : ""}`}
+            onClick={() => toggleBool("atmos")}
+            title="Audio track tagged Atmos or encoded as TrueHD"
+          >
+            Atmos
+          </button>
+          <button
+            className={`chip ${filters.foreignSubs ? "on" : ""}`}
+            onClick={() => toggleBool("foreignSubs")}
+            title="File has subs, none of them English"
+          >
+            Foreign subs only
+          </button>
         </div>
         <div className="facet-group">
           <span className="lbl">Status</span>
-          <button className="chip">
-            Needs encode <span className="c">{fmtNum(codecCount(data.codecs, "hevc") + codecCount(data.codecs, "h264"))}</span>
+          <button
+            className={`chip ${filters.status === "needs_encode" ? "on" : ""}`}
+            onClick={() => setStatus("needs_encode")}
+          >
+            Needs encode{" "}
+            <span className="c">
+              {fmtNum(codecCount(data.codecs, "hevc") + codecCount(data.codecs, "h264"))}
+            </span>
           </button>
-          <button className="chip">Errored <span className="c">{data.errorCount || 0}</span></button>
+          <button
+            className={`chip ${filters.status === "errored" ? "on" : ""}`}
+            onClick={() => setStatus("errored")}
+          >
+            Errored <span className="c">{data.errorCount || 0}</span>
+          </button>
         </div>
       </div>
 
@@ -155,39 +302,81 @@ export function Library({ data, pipelineData, onFileOpen }) {
             <span style={{ textAlign: "right" }}>Bitrate</span>
             <span>Status</span>
           </div>
-          {rows.slice(0, 25).map((f, i) => (
-            <div
-              key={f.filepath || i}
-              className={`ft-row ${sel === f ? "sel" : ""}`}
-              onClick={() => setSelIdx(i)}
-              onDoubleClick={() => onFileOpen?.(f.filepath)}
-            >
-              <div className="ft-name">
-                <div className="n">
-                  {prettyTitle(f.filename)} {f.hdr && <span className="tag hdr">HDR</span>}
+          {(() => {
+            const slice = rows.slice(0, visibleCount);
+            if (group === "none") {
+              return slice.map((f, i) => (
+                <FileRow
+                  key={f.filepath || i}
+                  f={f}
+                  selected={sel === f}
+                  onClick={() => setSelIdx(i)}
+                  onDoubleClick={() => onFileOpen?.(f.filepath)}
+                  pipelineInfo={pipelineFiles[f.filepath]}
+                />
+              ));
+            }
+            // Grouped view
+            const getBucket = (f) => {
+              if (group === "library") return libraryOf(f.filepath) || "other";
+              if (group === "codec") return codecLabel(f.codec) || "Unknown";
+              if (group === "resolution") return f.res || "—";
+              return "all";
+            };
+            const buckets = new Map();
+            slice.forEach((f) => {
+              const b = getBucket(f);
+              if (!buckets.has(b)) buckets.set(b, []);
+              buckets.get(b).push(f);
+            });
+            let runningIdx = 0;
+            return Array.from(buckets.entries()).map(([bucket, files]) => (
+              <div key={bucket}>
+                <div
+                  style={{
+                    padding: "10px 16px 6px",
+                    fontSize: 10,
+                    color: "var(--ink-3)",
+                    textTransform: "uppercase",
+                    letterSpacing: "0.1em",
+                    borderBottom: "1px solid var(--line)",
+                  }}
+                >
+                  {bucket} <span style={{ color: "var(--ink-4)" }}>· {files.length}</span>
                 </div>
-                <div className="p">{f.filepath}</div>
+                {files.map((f) => {
+                  const absIdx = runningIdx++;
+                  return (
+                    <FileRow
+                      key={f.filepath || absIdx}
+                      f={f}
+                      selected={sel === f}
+                      onClick={() => setSelIdx(absIdx)}
+                      onDoubleClick={() => onFileOpen?.(f.filepath)}
+                      pipelineInfo={pipelineFiles[f.filepath]}
+                    />
+                  );
+                })}
               </div>
-              <div style={{ textAlign: "center" }}>
-                <span className={`tag ${codecKey(f.codec)}`}>{codecLabel(f.codec)}</span>
-              </div>
-              <div style={{ textAlign: "center" }}>
-                <span className="tag res">{f.res || "—"}</span>
-              </div>
-              <div className="num">{fmtSize(f.size_gb)}</div>
-              <div className="num">{fmtBitrate(f.bitrate)}</div>
-              {(() => {
-                const info = pipelineFiles[f.filepath];
-                const st = statusLabel(info?.status);
-                return (
-                  <div className="status-cell">
-                    <span className="led" style={{ background: st.led }} />
-                    {st.label}
-                  </div>
-                );
-              })()}
+            ));
+          })()}
+          {rows.length > visibleCount && (
+            <div
+              style={{
+                padding: "14px 20px",
+                textAlign: "center",
+                borderTop: "1px solid var(--line)",
+              }}
+            >
+              <button
+                className="chip"
+                onClick={() => setVisibleCount((n) => n + 100)}
+              >
+                Show {Math.min(100, rows.length - visibleCount)} more ·{" "}
+                <span className="c">{fmtNum(rows.length - visibleCount)} hidden</span>
+              </button>
             </div>
-          ))}
+          )}
           {rows.length === 0 && (
             <div style={{ padding: "40px 20px", textAlign: "center", color: "var(--ink-3)", fontSize: 12 }}>
               No files match the current filters.
@@ -203,6 +392,36 @@ export function Library({ data, pipelineData, onFileOpen }) {
             onFileOpen={onFileOpen}
           />
         )}
+      </div>
+    </div>
+  );
+}
+
+function FileRow({ f, selected, onClick, onDoubleClick, pipelineInfo }) {
+  const st = statusLabel(pipelineInfo?.status);
+  return (
+    <div
+      className={`ft-row ${selected ? "sel" : ""}`}
+      onClick={onClick}
+      onDoubleClick={onDoubleClick}
+    >
+      <div className="ft-name">
+        <div className="n">
+          {prettyTitle(f.filename)} {f.hdr && <span className="tag hdr">HDR</span>}
+        </div>
+        <div className="p">{f.filepath}</div>
+      </div>
+      <div style={{ textAlign: "center" }}>
+        <span className={`tag ${codecKey(f.codec)}`}>{codecLabel(f.codec)}</span>
+      </div>
+      <div style={{ textAlign: "center" }}>
+        <span className="tag res">{f.res || "—"}</span>
+      </div>
+      <div className="num">{fmtSize(f.size_gb)}</div>
+      <div className="num">{fmtBitrate(f.bitrate)}</div>
+      <div className="status-cell">
+        <span className="led" style={{ background: st.led }} />
+        {st.label}
       </div>
     </div>
   );

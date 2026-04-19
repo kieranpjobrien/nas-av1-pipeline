@@ -2,36 +2,43 @@ import { useState } from "react";
 import { api } from "../../lib/api";
 import { codecCount, codecKey, codecLabel, fmtNum, fmtSize, prettyTitle } from "./helpers";
 
-export function Worklist({ data, pipelineData }) {
+export function Worklist({ data, pipelineData, onNavigate }) {
   const [tab, setTab] = useState("encode");
   const [expanded, setExpanded] = useState(null);
 
-  const targets = data.topTargets;
-  // Previews come from the sorted top-200 sample; counts come from full codec totals.
-  const bigHevcPreview = targets.filter((f) => f.size_gb > 20 && codecKey(f.codec) === "hevc");
-  const hevcPreview = targets.filter((f) => codecKey(f.codec) === "hevc");
-  const h264Preview = targets.filter((f) => codecKey(f.codec) === "h264");
+  // Full library — matching sets here drive both the counts shown AND what gets queued
+  // when the user clicks Queue batch. Previews use the same sets, just sliced.
+  const allFiles = data.files || data.topTargets;
+  const bigHevcAll = allFiles.filter((f) => f.size_gb > 20 && codecKey(f.codec) === "hevc");
+  const hevcAll = allFiles.filter((f) => codecKey(f.codec) === "hevc");
+  const h264All = allFiles.filter((f) => codecKey(f.codec) === "h264");
   const hevcTotal = codecCount(data.codecs, "hevc");
   const h264Total = codecCount(data.codecs, "h264");
-  const bigHevcTotal = bigHevcPreview.length; // no full-library size filter on server — show sample count.
+  const bigHevcTotal = bigHevcAll.length;
 
-  const errors = Object.values(pipelineData?.files || {}).filter((f) =>
-    ["error", "errored", "failed"].includes((f.status || "").toLowerCase())
-  ).length;
+  const erroredFiles = Object.entries(pipelineData?.files || {})
+    .filter(([, f]) => ["error", "errored", "failed"].includes((f.status || "").toLowerCase()))
+    .map(([path]) => path);
+  const errors = erroredFiles.length;
 
-  const noEngCount = (data.noEng || []).length;
-  const noSubsCount = (data.noSubs || []).length;
+  const noEngAll = data.noEngAll || data.noEng || [];
+  const noSubsAll = data.noSubsAll || data.noSubs || [];
+  const noEngCount = noEngAll.length;
+  const noSubsCount = noSubsAll.length;
 
+  // `full` is the list that gets queued when the user clicks Queue batch.
+  // `detail` is the 5-item preview shown when the card is expanded.
   const encodeProblems = [
     bigHevcTotal > 0
       ? {
           id: "enc-big",
           sev: "hi",
           title: "Large HEVC remuxes (>20 GB)",
-          sub: "Highest storage reclaim potential · sample of top-200",
+          sub: "Highest storage reclaim potential",
           n: bigHevcTotal,
           action: "Queue batch",
-          detail: bigHevcPreview.slice(0, 5),
+          full: bigHevcAll,
+          detail: bigHevcAll.slice(0, 5),
         }
       : null,
     hevcTotal > 0
@@ -42,7 +49,8 @@ export function Worklist({ data, pipelineData }) {
           sub: "Standard priority · mostly 1080p TV episodes",
           n: hevcTotal,
           action: "Queue batch",
-          detail: hevcPreview.slice(0, 5),
+          full: hevcAll,
+          detail: hevcAll.slice(0, 5),
         }
       : null,
     h264Total > 0
@@ -53,7 +61,8 @@ export function Worklist({ data, pipelineData }) {
           sub: "Re-encode to AV1 for consistency + space",
           n: h264Total,
           action: "Queue batch",
-          detail: h264Preview.slice(0, 3),
+          full: h264All,
+          detail: h264All.slice(0, 5),
         }
       : null,
     errors > 0
@@ -61,9 +70,10 @@ export function Worklist({ data, pipelineData }) {
           id: "enc-err",
           sev: "hi",
           title: "Failed encodes needing review",
-          sub: "Encoder timeout on 4K HDR · may need preset change",
+          sub: "Reset to pending in bulk, or open Library filtered to errored",
           n: errors,
           action: "Review",
+          full: erroredFiles.map((path) => ({ filepath: path })),
           detail: null,
         }
       : null,
@@ -78,7 +88,8 @@ export function Worklist({ data, pipelineData }) {
           sub: "Foreign audio detected but no ENG sub track",
           n: noEngCount,
           action: "Fetch subs",
-          detail: (data.noEng || []).slice(0, 5),
+          full: noEngAll,
+          detail: noEngAll.slice(0, 5),
         }
       : null,
     noSubsCount > 0
@@ -89,7 +100,8 @@ export function Worklist({ data, pipelineData }) {
           sub: "Handled by Bazarr · deep link from inspector",
           n: noSubsCount,
           action: "Fetch subs",
-          detail: (data.noSubs || []).slice(0, 5),
+          full: noSubsAll,
+          detail: noSubsAll.slice(0, 5),
         }
       : null,
   ].filter(Boolean);
@@ -169,15 +181,26 @@ export function Worklist({ data, pipelineData }) {
                 className="problem-action"
                 onClick={async (e) => {
                   e.stopPropagation();
-                  const paths = (p.detail || []).map((f) => f.filepath).filter(Boolean);
+                  // Use the FULL matching set — `p.detail` is a 5-item preview.
+                  const paths = (p.full || p.detail || [])
+                    .map((f) => f.filepath)
+                    .filter(Boolean);
                   try {
                     if (p.action === "Queue batch") {
                       if (paths.length === 0) {
                         window.notify?.({
                           kind: "warn",
                           title: "No paths to queue",
-                          body: "Expand the card to see offenders, then queue individually.",
+                          body: "No matching files in the current library index.",
                         });
+                        return;
+                      }
+                      if (
+                        paths.length > 50 &&
+                        !confirm(
+                          `Queue ${paths.length} files for re-encode? This writes reencode.json and the running pipeline will pick them up.`
+                        )
+                      ) {
                         return;
                       }
                       const r = await api.setReencode(paths);
@@ -206,17 +229,31 @@ export function Worklist({ data, pipelineData }) {
                     } else if (p.action === "Clean up") {
                       const r = await api.startProcess("strip_tags");
                       window.notify?.({
-                        kind: r?.ok === false ? "warn" : "good",
-                        title: r?.ok === false ? "Already running" : "Cleanup started",
-                        body: r?.error || `strip_tags pid ${r?.pid ?? "?"}`,
+                        kind: "good",
+                        title: "Cleanup started",
+                        body: `strip_tags pid ${r?.pid ?? "?"}`,
                       });
                     } else if (p.action === "Review") {
-                      // Just expand the card — Review has no single endpoint
-                      window.notify?.({
-                        kind: "info",
-                        title: "Expand for details",
-                        body: "Click the card to see offenders.",
-                      });
+                      // Two-choice: bulk reset-to-pending, or jump to the Errors view
+                      const choice = confirm(
+                        `${paths.length} errored files.\n\nOK: reset them all to pending (the running pipeline will retry them)\nCancel: open the Errors view to review each one`
+                      );
+                      if (choice) {
+                        const r = await api.resetErrors();
+                        window.notify?.({
+                          kind: "good",
+                          title: `Reset ${r?.reset ?? paths.length} errored files to pending`,
+                          body: "The running pipeline will pick them up again.",
+                        });
+                      } else if (onNavigate) {
+                        onNavigate("errors");
+                      } else {
+                        window.notify?.({
+                          kind: "info",
+                          title: "Errors view not reachable from here",
+                          body: "Use the sidebar to open the Errors view.",
+                        });
+                      }
                     } else if (p.action === "Flag") {
                       window.notify?.({
                         kind: "info",
@@ -228,7 +265,7 @@ export function Worklist({ data, pipelineData }) {
                     window.notify?.({
                       kind: "bad",
                       title: `${p.action} failed`,
-                      body: String(err.message || err),
+                      body: err?.detail || String(err.message || err),
                     });
                   }
                 }}
@@ -262,7 +299,7 @@ export function Worklist({ data, pipelineData }) {
                 ))}
                 <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
                   <button
-                    className="ins-btn primary"
+                    className="ins-btn"
                     style={{ padding: "8px 14px" }}
                     onClick={async (e) => {
                       e.stopPropagation();
@@ -275,20 +312,52 @@ export function Worklist({ data, pipelineData }) {
                         const r = await api.setReencode(paths);
                         window.notify?.({
                           kind: "good",
-                          title: `Queued ${fmtNum(paths.length)} files for re-encode`,
+                          title: `Queued ${fmtNum(paths.length)} preview files`,
                           body: `${p.title} · reencode.json · ${r?.files ?? paths.length} total`,
                         });
                       } catch (err) {
                         window.notify?.({
                           kind: "bad",
                           title: "Queue failed",
-                          body: String(err.message || err),
+                          body: err?.detail || String(err.message || err),
                         });
                       }
                     }}
                   >
-                    Queue preview · {fmtNum((p.detail || []).length)} →
+                    Queue preview only · {fmtNum((p.detail || []).length)}
                   </button>
+                  {(p.full || []).length > (p.detail || []).length && (
+                    <button
+                      className="ins-btn primary"
+                      style={{ padding: "8px 14px" }}
+                      onClick={async (e) => {
+                        e.stopPropagation();
+                        const paths = (p.full || []).map((f) => f.filepath).filter(Boolean);
+                        if (paths.length === 0) return;
+                        if (
+                          paths.length > 50 &&
+                          !confirm(`Queue all ${paths.length} ${p.title.toLowerCase()}?`)
+                        )
+                          return;
+                        try {
+                          const r = await api.setReencode(paths);
+                          window.notify?.({
+                            kind: "good",
+                            title: `Queued ${fmtNum(paths.length)} files`,
+                            body: `${p.title} · reencode.json · ${r?.files ?? paths.length} total`,
+                          });
+                        } catch (err) {
+                          window.notify?.({
+                            kind: "bad",
+                            title: "Queue failed",
+                            body: err?.detail || String(err.message || err),
+                          });
+                        }
+                      }}
+                    >
+                      Queue all · {fmtNum((p.full || []).length)} →
+                    </button>
+                  )}
                 </div>
               </div>
             )}

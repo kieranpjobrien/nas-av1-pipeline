@@ -760,9 +760,12 @@ export function DashboardPage({ onClassic, onFileClick }) {
       summary: report.summary || {},
       codecs,
       resolutions,
+      files: sorted, // full library, sorted by size desc — for Library browser + Worklist filters
       topTargets: sorted.slice(0, 200),
       noSubs: noSubs.slice(0, 200),
+      noSubsAll: noSubs, // full list for batch actions
       noEng: noEng.slice(0, 200),
+      noEngAll: noEng, // full list for batch actions
       remainingSizeGb,
       errorCount: report.summary?.errors || 0,
       recentEvents: null,
@@ -1044,7 +1047,9 @@ export function DashboardPage({ onClassic, onFileClick }) {
             {view === "library" && (
               <Library data={data} pipelineData={pipeline} onFileOpen={onFileClick} />
             )}
-            {view === "worklist" && <Worklist data={data} pipelineData={pipeline} />}
+            {view === "worklist" && (
+              <Worklist data={data} pipelineData={pipeline} onNavigate={setView} />
+            )}
             {view === "storage" && <Storage data={data} />}
             {view === "settings" && <Settings />}
             {view === "logs" && <Logs />}
