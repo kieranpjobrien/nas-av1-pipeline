@@ -302,6 +302,9 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
     # seconds is suspect; anything >1.2x input duration is a real broken encode (seen on
     # VFR sources where ffmpeg padded the timeline). Auto-discard and reset to pending so
     # the file gets another shot — cheaper than making the user manually retry from the UI.
+    # BUT: cap retries at MAX_DURATION_RETRIES. If ffmpeg produces a broken output twice in
+    # a row the bug is deterministic for this source and we'd just burn GPU forever.
+    MAX_DURATION_RETRIES = 1  # 1 = one auto-retry; second broken output parks in ERROR
     duration_tolerance = config.get("verify_duration_tolerance_secs", 2.0)
     output_duration = get_duration(dest_path) or 0
     if input_duration > 0:
@@ -315,19 +318,39 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
                 pass
 
             if ratio > 1.2 or ratio < 0.8:
-                # Clearly broken (>20% off) — discard + reset to PENDING so the pipeline
-                # picks it up again. Don't leave it in ERROR state requiring manual retry.
-                logging.error(
-                    f"  Duration mismatch (broken encode, ratio {ratio:.2f}): "
-                    f"input={input_duration:.0f}s, output={output_duration:.0f}s — resetting to pending."
-                )
-                state.set_file(
-                    filepath,
-                    FileStatus.PENDING,
-                    error=None,
-                    stage=None,
-                    reason=f"auto-retry: duration mismatch {input_duration:.0f}s→{output_duration:.0f}s",
-                )
+                # Clearly broken (>20% off).
+                prev = state.get_file(filepath) or {}
+                retry_count = int(prev.get("duration_retry_count", 0) or 0)
+                if retry_count < MAX_DURATION_RETRIES:
+                    # First (or first N) time — discard + reset to PENDING so the pipeline
+                    # picks it up again. Bump the counter so the second attempt can't loop.
+                    logging.error(
+                        f"  Duration mismatch (broken encode, ratio {ratio:.2f}, retry {retry_count + 1}/{MAX_DURATION_RETRIES}): "
+                        f"input={input_duration:.0f}s, output={output_duration:.0f}s — resetting to pending."
+                    )
+                    state.set_file(
+                        filepath,
+                        FileStatus.PENDING,
+                        error=None,
+                        stage=None,
+                        reason=f"auto-retry {retry_count + 1}/{MAX_DURATION_RETRIES}: duration mismatch {input_duration:.0f}s→{output_duration:.0f}s",
+                        duration_retry_count=retry_count + 1,
+                    )
+                else:
+                    # Already retried and still broken — park in ERROR with the retry count
+                    # recorded for audit. User can manually reset from the Errors page if
+                    # they want to try again (e.g. after tweaking config).
+                    logging.error(
+                        f"  Duration mismatch persists after {retry_count} retries (ratio {ratio:.2f}): "
+                        f"input={input_duration:.0f}s, output={output_duration:.0f}s — parking in ERROR."
+                    )
+                    state.set_file(
+                        filepath,
+                        FileStatus.ERROR,
+                        error=f"duration mismatch after {retry_count} auto-retries ({input_duration:.0f}s vs {output_duration:.0f}s)",
+                        stage="verify",
+                        duration_retry_count=retry_count + 1,
+                    )
             else:
                 # Small-ish mismatch (2-20%) — park in ERROR for manual review; resetting
                 # blindly could loop on a deterministic ffmpeg bug.
@@ -381,6 +404,8 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
     _trigger_plex_scan(final_path)
 
     # === DONE ===
+    # Clear the duration_retry_count on success — a file that retried once and then
+    # encoded cleanly shouldn't carry the counter forward if it's re-queued later.
     state.set_file(
         filepath,
         FileStatus.DONE,
@@ -392,6 +417,7 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
         encode_time_secs=encode_time,
         upload_time_secs=round(upload_elapsed, 1),
         mode="full_gamut",
+        duration_retry_count=0,
     )
 
     # Update global stats
