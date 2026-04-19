@@ -707,30 +707,39 @@ export function DashboardPage({ onClassic, onFileClick }) {
       .reduce((s, f) => s + (f.size_gb || 0), 0);
     // Subtitle checks match Bazarr's logic: consider BOTH internal tracks and external
     // sidecar files (.srt/.ass/etc. written by Bazarr alongside the media). The scanner
-    // records these on `external_subtitles` / `external_subtitle_count` per file. Without
-    // this, the dashboard over-reports the "needs subs" count massively.
+    // records these on `external_subtitles` / `external_subtitle_count` per file.
+    //
+    // "Needs English subs" means: at least one audio track is EXPLICITLY non-English, AND
+    // there's no English sub (internal or external). Files where every audio track is
+    // `und` are treated as English (most libraries default to English-native, and we'd
+    // rather under-report than flag 300 files that actually don't need anything).
     const hasEngSubAnywhere = (f) => {
       const internal = (f.subs || []).some((s) =>
         (s.lang || "").toLowerCase().startsWith("en")
       );
       if (internal) return true;
-      const external = (f.externalSubs || []).some((s) =>
+      return (f.externalSubs || []).some((s) =>
         (s.language || "").toLowerCase().startsWith("en")
       );
-      return external;
+    };
+    const langIsNonEng = (l) => {
+      const low = (l || "").toLowerCase();
+      if (!low || low === "und" || low === "unknown") return false;
+      return !low.startsWith("en");
     };
     const noSubs = files.filter((f) => {
       const internal = f.subs?.length || 0;
       const external = f.externalSubs?.length || 0;
       return internal + external === 0;
     });
-    const nonEnglishAudio = files.filter((f) => {
-      const hasEngAudio = (f.audio || []).some((a) =>
-        (a.lang || "").toLowerCase().startsWith("en")
-      );
-      return !hasEngAudio && (f.audio || []).length > 0;
+    const definitelyNonEnglishAudio = files.filter((f) => {
+      const audio = f.audio || [];
+      if (audio.length === 0) return false;
+      const hasEng = audio.some((a) => (a.lang || "").toLowerCase().startsWith("en"));
+      if (hasEng) return false;
+      return audio.some((a) => langIsNonEng(a.lang));
     });
-    const noEng = nonEnglishAudio.filter((f) => !hasEngSubAnywhere(f));
+    const noEng = definitelyNonEnglishAudio.filter((f) => !hasEngSubAnywhere(f));
     return {
       summary: report.summary || {},
       codecs,
