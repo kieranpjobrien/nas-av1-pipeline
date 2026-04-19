@@ -321,7 +321,7 @@ function Telemetry() {
   );
 }
 
-function RunMenu({ routing, setRouting, onRun, errorCount = 0, remainingCount = null }) {
+function RunMenu({ routing, setRouting, onRun, errorCount = 0, pipelineRunning = false }) {
   const setJobHost = (jk, host) => {
     if (!HOSTS[host].can.includes(jk)) return;
     setRouting((r) => ({ ...r, [jk]: host }));
@@ -332,7 +332,9 @@ function RunMenu({ routing, setRouting, onRun, errorCount = 0, remainingCount = 
     {
       k: "quick",
       title: "Quick wins",
-      sub: "Smallest pending files · fast to finish",
+      sub: pipelineRunning
+        ? "Push audio/sub-cleanup AV1 files to the front of the running queue"
+        : "Push audio/sub-cleanup AV1 files up + start the pipeline",
       count: "~20 files",
       icon: (
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -341,35 +343,14 @@ function RunMenu({ routing, setRouting, onRun, errorCount = 0, remainingCount = 
       ),
     },
     {
-      k: "next",
-      title: "Next batch",
-      sub: "The next prioritised slice",
-      count: "~20 files",
-      icon: (
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-          <path d="M6 4v16l14-8z" />
-        </svg>
-      ),
-    },
-    {
-      k: "full",
-      title: "Full pipeline",
-      sub: "Every file flagged for re-encode",
-      count:
-        remainingCount != null
-          ? `${fmtNum(remainingCount)} ${remainingCount === 1 ? "file" : "files"}`
-          : "—",
-      disabled: remainingCount === 0,
-      icon: (
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-          <path d="M3 12h4l3-8 4 16 3-8h4" />
-        </svg>
-      ),
-    },
-    {
       k: "errors",
       title: "Retry errored jobs",
-      sub: errorCount > 0 ? "Requeue previously failed files" : "No failed jobs — nothing to retry",
+      sub:
+        errorCount === 0
+          ? "No failed jobs — nothing to retry"
+          : pipelineRunning
+            ? "Reset failed files to pending; the running pipeline will pick them up"
+            : "Reset failed files to pending + start the pipeline",
       count: `${fmtNum(errorCount)} ${errorCount === 1 ? "file" : "files"}`,
       disabled: errorCount === 0,
       iconColor: "var(--bad)",
@@ -380,7 +361,21 @@ function RunMenu({ routing, setRouting, onRun, errorCount = 0, remainingCount = 
         </svg>
       ),
     },
-  ];
+    pipelineRunning
+      ? {
+          k: "stop",
+          title: "Stop pipeline",
+          sub: "Graceful stop · finishes any in-flight uploads, then terminates workers",
+          count: "",
+          iconColor: "var(--warn)",
+          icon: (
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <rect x="6" y="6" width="12" height="12" rx="1" />
+            </svg>
+          ),
+        }
+      : null,
+  ].filter(Boolean);
   return (
     <div className="run-menu">
       <div className="run-menu-head">Start a batch</div>
@@ -480,7 +475,31 @@ function TopBar({
 }) {
   const PRIMARY_VIEWS = ["glance", "library", "worklist"];
   const [runMenu, setRunMenu] = useState(false);
+  const [pipelineStatus, setPipelineStatus] = useState(null); // "idle" | "running" | "error" | "finished"
+  const [busy, setBusy] = useState(false); // true for 1-2s after clicking Run, before status poll catches up
   const runMenuRef = useRef(null);
+
+  // Poll pipeline status so the Run button reflects reality. 2.5s is fast enough that a click
+  // feels responsive but doesn't spam the endpoint.
+  useEffect(() => {
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const s = await api.getProcessStatus("pipeline");
+        if (!cancelled) setPipelineStatus(s?.status || "idle");
+      } catch {
+        if (!cancelled) setPipelineStatus(null);
+      }
+    };
+    tick();
+    const id = setInterval(tick, 2500);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, []);
+
+  const pipelineRunning = pipelineStatus === "running";
 
   useEffect(() => {
     if (!runMenu) return;
@@ -491,9 +510,15 @@ function TopBar({
     return () => document.removeEventListener("mousedown", onDoc);
   }, [runMenu]);
 
-  const fireRun = (mode) => {
+  const fireRun = async (mode) => {
     setRunMenu(false);
-    onRunBatch(mode);
+    setBusy(true);
+    try {
+      await onRunBatch(mode);
+    } finally {
+      // Give the status poll a moment to catch up before unlocking the button.
+      setTimeout(() => setBusy(false), 1000);
+    }
   };
 
   return (
@@ -540,18 +565,47 @@ function TopBar({
         {rescan ? `Rescanning · ${rescan.pct.toFixed(0)}%` : "Rescan"}
       </button>
       <div className="split" ref={runMenuRef}>
-        <button className="top-btn primary" onClick={() => fireRun("next")}>
-          <svg
-            width="12"
-            height="12"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2.5"
-          >
-            <path d="M6 4v16l14-8z" />
-          </svg>
-          Run next batch
+        <button
+          className="top-btn primary"
+          onClick={() => fireRun("start")}
+          disabled={pipelineRunning || busy}
+          title={
+            pipelineRunning
+              ? "Pipeline is already running — use the dropdown for queue actions"
+              : "Start the pipeline daemon — it will process the priority + main queue"
+          }
+        >
+          {pipelineRunning ? (
+            <>
+              <svg
+                width="12"
+                height="12"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                style={{ animation: "nc-spin 2.4s linear infinite" }}
+              >
+                <circle cx="12" cy="12" r="9" />
+                <path d="M12 3v3" />
+              </svg>
+              Running
+            </>
+          ) : (
+            <>
+              <svg
+                width="12"
+                height="12"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2.5"
+              >
+                <path d="M6 4v16l14-8z" />
+              </svg>
+              {busy ? "Starting…" : "Run next batch"}
+            </>
+          )}
         </button>
         <button
           className="split-caret"
@@ -568,7 +622,7 @@ function TopBar({
             setRouting={setRouting}
             onRun={fireRun}
             errorCount={errorCount}
-            remainingCount={remainingCount}
+            pipelineRunning={pipelineRunning}
           />
         )}
       </div>
@@ -774,44 +828,83 @@ export function DashboardPage({ onClassic, onFileClick }) {
     async (mode) => {
       const host = HOSTS[routing.encode]?.label || HOSTS.local.label;
       const errs = liveErrorCount;
+      const startIfIdle = async () => {
+        // Best-effort start. If it's already running, backend returns ok:false — swallow.
+        try {
+          const r = await api.startProcess("pipeline");
+          if (r?.ok !== false) {
+            return { started: true, pid: r?.pid };
+          }
+        } catch {}
+        return { started: false };
+      };
+
       try {
+        if (mode === "start") {
+          const r = await api.startProcess("pipeline");
+          if (r?.ok === false) {
+            push({ kind: "warn", title: "Pipeline already running", body: r.error || "" });
+          } else {
+            push({
+              kind: "good",
+              title: "Pipeline started",
+              body: `pid ${r?.pid ?? "?"} · will process the priority + main queue on ${host}`,
+            });
+          }
+          return;
+        }
+
+        if (mode === "stop") {
+          const r = await api.stopProcess("pipeline");
+          push({
+            kind: r?.ok === false ? "warn" : "info",
+            title: r?.ok === false ? "Pipeline not running" : "Pipeline stop requested",
+            body: r?.method ? `method: ${r.method}` : r?.error || "",
+          });
+          return;
+        }
+
         if (mode === "errors") {
           if (errs === 0) {
             push({ kind: "info", title: "Nothing to retry", body: "No errored jobs right now." });
             return;
           }
           const r = await api.resetErrors();
+          const resetCount = r?.reset ?? errs;
+          const started = await startIfIdle();
           push({
             kind: "good",
-            title: "Errors cleared",
-            body: `${r?.cleared ?? errs} failed ${errs === 1 ? "job" : "jobs"} requeued · pipeline will pick them up`,
+            title: `Requeued ${resetCount} ${resetCount === 1 ? "file" : "files"}`,
+            body: started.started
+              ? `Errors → pending · pipeline started (pid ${started.pid}) on ${host}`
+              : `Errors → pending · running pipeline will pick them up`,
           });
           return;
         }
-        if (mode === "full") {
-          const r = await api.startProcess("pipeline");
-          if (r?.ok === false) {
-            push({ kind: "warn", title: "Pipeline already running", body: r.error || "nothing to do" });
-          } else {
+
+        if (mode === "quick") {
+          const r = await api.quickWins();
+          const added = r?.added ?? 0;
+          if (added === 0) {
             push({
-              kind: "good",
-              title: "Full pipeline started",
-              body: `pid ${r?.pid ?? "?"} · running on ${host}`,
+              kind: "info",
+              title: "No quick wins found",
+              body: "Nothing obvious to push up — the library's already clean on audio/subs.",
             });
+            return;
           }
+          const started = await startIfIdle();
+          push({
+            kind: "good",
+            title: `Pushed ${added} quick wins to priority`,
+            body: started.started
+              ? `Force list updated · pipeline started (pid ${started.pid})`
+              : `Force list updated · running pipeline will pick them up first`,
+          });
           return;
         }
-        // quick + next: the dedicated quick-wins endpoint handles both
-        const r = await api.quickWins();
-        push({
-          kind: "good",
-          title: mode === "quick" ? "Quick wins queued" : "Next batch queued",
-          body: r?.queued
-            ? `${r.queued} files queued on ${host} · worker will pick up on next cycle`
-            : `queued on ${host}`,
-        });
       } catch (e) {
-        push({ kind: "bad", title: "Run failed", body: String(e.message || e) });
+        push({ kind: "bad", title: "Action failed", body: String(e.message || e) });
       }
     },
     [push, routing, liveErrorCount]
