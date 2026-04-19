@@ -640,12 +640,31 @@ def _audio_transcode(
 
 
 def _rename_file(filepath: str, clean_name: str) -> Optional[str]:
-    """Rename a file on the NAS to a cleaned name. Returns new path or None."""
+    """Rename a file on the NAS to a cleaned name. Returns new path or None.
+
+    Special case: if the source ends in `.gapfill_tmp.mkv` and the destination
+    already exists, the tmp is a stale leftover from a gap-fill that got
+    interrupted between the mkvmerge mux and the final rename. Delete the
+    stale tmp so the next scan doesn't pick it up again.
+    """
     source_dir = os.path.dirname(filepath)
     new_path = os.path.join(source_dir, clean_name)
 
     if new_path == filepath:
         return None
+
+    is_stale_tmp = filepath.endswith(".gapfill_tmp.mkv")
+    if is_stale_tmp and os.path.exists(new_path):
+        try:
+            os.remove(filepath)
+            logging.info(
+                f"  Removed stale gapfill tmp (clean name already present): "
+                f"{os.path.basename(filepath)}"
+            )
+            return new_path  # caller treats this as success — clean file is the real one
+        except OSError as e:
+            logging.warning(f"  Could not remove stale gapfill tmp: {e}")
+            return None
 
     try:
         os.rename(filepath, new_path)
