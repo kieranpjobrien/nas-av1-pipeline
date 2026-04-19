@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { api } from "../../lib/api";
 import { fmtSize, prettyTitle } from "./helpers";
 
@@ -19,6 +20,25 @@ export function Errors({ pipelineData }) {
   const rows = deriveErrors(pipelineData);
   const total = rows.length;
   const timeouts = rows.filter((r) => /timeout/i.test(r.kind)).length;
+  const [retrying, setRetrying] = useState(false);
+
+  const retryAll = async () => {
+    if (retrying) return;
+    setRetrying(true);
+    try {
+      const r = await api.resetErrors();
+      const n = r?.reset ?? total;
+      window.notify?.({
+        kind: "good",
+        title: `Requeued ${n} ${n === 1 ? "file" : "files"}`,
+        body: "All errored files reset to pending — pipeline will pick them up on the next cycle.",
+      });
+    } catch (e) {
+      window.notify?.({ kind: "bad", title: "Retry-all failed", body: String(e.message || e) });
+    } finally {
+      setRetrying(false);
+    }
+  };
 
   return (
     <div className="view">
@@ -33,13 +53,25 @@ export function Errors({ pipelineData }) {
                 }.`}
           </div>
         </div>
-        <div className="stamp">
-          <div><b>Total</b>: {total}</div>
-          {timeouts > 0 && <div><b>Timeouts</b>: {timeouts}</div>}
+        <div style={{ display: "flex", flexDirection: "column", gap: 10, alignItems: "flex-end" }}>
+          {total > 0 && (
+            <button
+              className="ins-btn primary"
+              onClick={retryAll}
+              disabled={retrying}
+              style={{ padding: "10px 18px", minWidth: 160, justifyContent: "center" }}
+            >
+              {retrying ? "Retrying…" : `Retry all ${total}`}
+            </button>
+          )}
+          <div className="stamp">
+            <div><b>Total</b>: {total}</div>
+            {timeouts > 0 && <div><b>Timeouts</b>: {timeouts}</div>}
+          </div>
         </div>
       </div>
 
-      {total === 0 ? (
+      {total === 0 && (
         <div
           className="card"
           style={{ textAlign: "center", padding: "48px 20px", color: "var(--ink-3)" }}
@@ -47,44 +79,7 @@ export function Errors({ pipelineData }) {
           <div style={{ fontSize: 14, color: "var(--ink-2)", marginBottom: 6 }}>Pipeline is clean</div>
           <div style={{ fontSize: 12 }}>Nothing has failed — there's nothing to retry here.</div>
         </div>
-      ) : timeouts > 0 ? (
-        <div
-          className="card"
-          style={{
-            marginBottom: 16,
-            background: "rgba(224,101,75,0.04)",
-            borderColor: "rgba(224,101,75,0.2)",
-          }}
-        >
-          <div style={{ display: "flex", gap: 14, alignItems: "center" }}>
-            <div style={{ fontSize: 32, color: "var(--bad)" }}>⚠</div>
-            <div style={{ flex: 1 }}>
-              <div style={{ fontSize: 14, fontWeight: 500 }}>Bulk retry with fallback preset?</div>
-              <div style={{ fontSize: 12, color: "var(--ink-3)" }}>
-                Drop speed preset 8 → 6 for the {timeouts} timeout {timeouts === 1 ? "case" : "cases"}. Expected ~80%
-                success rate, roughly +40% per-file runtime.
-              </div>
-            </div>
-            <button
-              className="ins-btn primary"
-              onClick={async () => {
-                try {
-                  const r = await api.resetErrors();
-                  window.notify?.({
-                    kind: "good",
-                    title: "Errors cleared",
-                    body: `${r?.cleared ?? total} ${total === 1 ? "file" : "files"} requeued — pipeline will pick them up`,
-                  });
-                } catch (e) {
-                  window.notify?.({ kind: "bad", title: "Reset failed", body: String(e.message || e) });
-                }
-              }}
-            >
-              Retry {total} {total === 1 ? "file" : "files"}
-            </button>
-          </div>
-        </div>
-      ) : null}
+      )}
 
       <div className="file-table">
         <div
