@@ -773,11 +773,13 @@ export function DashboardPage({ onClassic, onFileClick }) {
   }, [report]);
 
   const liveErrorCount = useMemo(() => {
-    const fromPipeline = Object.values(pipeline?.files || {}).filter((f) =>
+    // Count live pipeline-state errors only. `data.errorCount` comes from the
+    // scanner's summary (files it couldn't probe) — those aren't retryable pipeline
+    // failures and shouldn't show as a red badge on the Errors nav entry.
+    return Object.values(pipeline?.files || {}).filter((f) =>
       ["error", "errored", "failed"].includes((f.status || "").toLowerCase())
     ).length;
-    return fromPipeline || data?.errorCount || 0;
-  }, [pipeline, data]);
+  }, [pipeline]);
 
   const remainingEncodes = useMemo(() => {
     if (!data) return null;

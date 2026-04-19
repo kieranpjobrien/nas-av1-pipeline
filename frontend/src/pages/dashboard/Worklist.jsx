@@ -129,7 +129,7 @@ export function Worklist({ data, pipelineData, onNavigate }) {
           <p>
             Your library grouped by actionable problems instead of raw files. Tackle the top items first — the{" "}
             {bigHevcTotal} largest HEVC remuxes alone could reclaim ~
-            {fmtSize(bigHevcPreview.reduce((s, f) => s + f.size_gb * 0.42, 0))}.
+            {fmtSize(bigHevcAll.reduce((s, f) => s + f.size_gb * 0.42, 0))}.
           </p>
         </div>
         <div className="work-metric">
