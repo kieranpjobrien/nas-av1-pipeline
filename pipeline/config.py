@@ -60,6 +60,10 @@ DEFAULT_CONFIG = {
     # Concurrent NVENC sessions. RTX 40-series has 2 NVENC chips so 2 is the practical cap
     # with zero perf penalty. Set to 1 on older Turing/Ampere cards with one chip.
     "gpu_concurrency": 2,
+    # Concurrent SMB fetches. 2 is enough to stop a single 20 GB REMUX blocking a small file
+    # from reaching the other GPU. fetch_file uses an atomic state-lock claim so two workers
+    # can never pick the same path.
+    "fetch_concurrency": 2,
     # Encoding: NVENC AV1 (RTX 4080)
     "video_codec": "av1_nvenc",
     "cq": {

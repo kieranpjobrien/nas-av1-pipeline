@@ -296,6 +296,15 @@ class PipelineState:
             ).fetchall()
             return [row[0] for row in rows]
 
+    def all_filepaths(self) -> list[str]:
+        """Return every filepath tracked in state, any status.
+
+        Used for startup sweeps (e.g. finding stale .gapfill_tmp.mkv leftovers).
+        """
+        with self._lock:
+            rows = self._conn.execute("SELECT filepath FROM pipeline_files").fetchall()
+            return [row[0] for row in rows]
+
     @property
     def stats(self) -> dict:
         """Get stats dict. Cached in memory, flushed to DB on save()."""

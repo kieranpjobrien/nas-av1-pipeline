@@ -92,6 +92,31 @@ class Orchestrator:
                 self.state.remove_ghosts(ghosts)
                 logging.info(f"  Removed {len(ghosts)} ghost entries (files renamed/deleted)")
 
+        # Delete stale .gapfill_tmp.mkv files from the NAS + drop their state entries.
+        # These are leftovers from a previous gap-filler run that got interrupted between
+        # the tmp-mux and the final rename. They block the next run's rename (WinError 183
+        # "Cannot create a file when that file already exists") and the scanner indexes
+        # them as if they were real media. Pull them out of state first, then delete from
+        # disk — scanner will exclude them from the next media_report pass.
+        tmp_paths = [
+            p for p in self.state.all_filepaths()
+            if p.endswith(".gapfill_tmp.mkv")
+        ] if hasattr(self.state, "all_filepaths") else []
+        if tmp_paths:
+            deleted = 0
+            for p in tmp_paths:
+                try:
+                    if os.path.exists(p):
+                        os.remove(p)
+                    deleted += 1
+                except OSError as e:
+                    logging.debug(f"Could not remove stale gapfill tmp {p}: {e}")
+            self.state.remove_ghosts(tmp_paths)
+            logging.info(
+                f"  Cleaned {deleted}/{len(tmp_paths)} stale .gapfill_tmp.mkv files "
+                f"from the library (state entries also removed)"
+            )
+
         # Clean orphaned fetch/encoded files from previous runs. Retry once on transient
         # Windows file locks — the common case is the old pipeline's ffmpeg still holding
         # the handle for a moment after the subprocess exits. Left orphans waste disk and
@@ -143,16 +168,22 @@ class Orchestrator:
                 daemon=True,
                 name=name,
             )
-        # Split the old single network thread into an upload worker and a fetch worker so an
-        # upload-after-encode doesn't sit behind an in-flight 20 GB fetch (and vice versa).
-        # On SMB they share bandwidth, but network is idle most of the cycle (GPU is slow),
-        # so in practice they almost never contend.
+        # Split the old single network thread into an upload worker and N fetch workers so
+        # an upload-after-encode doesn't sit behind an in-flight 20 GB fetch, and a single
+        # big REMUX fetch doesn't starve the other GPU. fetch_file claims its target under
+        # state._lock so two workers never pick the same path.
         threads["upload"] = threading.Thread(
             target=self._upload_worker, daemon=True, name="upload"
         )
-        threads["fetch"] = threading.Thread(
-            target=self._fetch_worker, args=(full_gamut_queue,), daemon=True, name="fetch"
-        )
+        fetch_concurrency = max(1, int(self.config.get("fetch_concurrency", 1)))
+        for i in range(fetch_concurrency):
+            name = f"fetch-{i}" if fetch_concurrency > 1 else "fetch"
+            threads[name] = threading.Thread(
+                target=self._fetch_worker,
+                args=(full_gamut_queue, i),
+                daemon=True,
+                name=name,
+            )
         if enable_gap_filler:
             threads["gap_filler"] = threading.Thread(
                 target=self._gap_filler_worker, args=(gap_filler_queue,), daemon=True, name="gap-filler"
@@ -342,7 +373,7 @@ class Orchestrator:
     # Fetch Worker — pre-fetch files to keep the GPU encoders fed
     # =========================================================================
 
-    def _fetch_worker(self, queue: list[dict]):
+    def _fetch_worker(self, queue: list[dict], worker_id: int = 0):
         """Pull files from NAS → staging, in priority order.
 
         Priority order:
@@ -352,8 +383,12 @@ class Orchestrator:
 
         After each successful fetch, runs cheap pre-processing (language detection +
         external sub scan) so the encode startup is basically instant.
+
+        Multiple workers can run concurrently — fetch_file uses state._lock to
+        atomically claim the target, so two workers never pick the same path.
         """
-        logging.info("Fetch worker started")
+        tag = f"Fetch worker {worker_id}" if worker_id >= 0 else "Fetch worker"
+        logging.info(f"{tag} started")
         max_buffer = self.config.get("max_fetch_buffer_bytes", 2000 * 1024**3)
         # Cap the count of pre-fetched-but-not-yet-encoded files, independent of bytes.
         max_prefetched = max(4, 3 * self._gpu_concurrency)
@@ -442,7 +477,7 @@ class Orchestrator:
             if not did_work:
                 self._shutdown.wait(timeout=5)
 
-        logging.info("Fetch worker finished")
+        logging.info(f"{tag} finished")
 
     def _post_fetch(self, item: dict) -> None:
         """Eager CPU work on a freshly-fetched file so the GPU worker doesn't pay the cost.
