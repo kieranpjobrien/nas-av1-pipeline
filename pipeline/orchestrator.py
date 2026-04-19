@@ -143,8 +143,15 @@ class Orchestrator:
                 daemon=True,
                 name=name,
             )
-        threads["network"] = threading.Thread(
-            target=self._network_worker, args=(full_gamut_queue,), daemon=True, name="network"
+        # Split the old single network thread into an upload worker and a fetch worker so an
+        # upload-after-encode doesn't sit behind an in-flight 20 GB fetch (and vice versa).
+        # On SMB they share bandwidth, but network is idle most of the cycle (GPU is slow),
+        # so in practice they almost never contend.
+        threads["upload"] = threading.Thread(
+            target=self._upload_worker, daemon=True, name="upload"
+        )
+        threads["fetch"] = threading.Thread(
+            target=self._fetch_worker, args=(full_gamut_queue,), daemon=True, name="fetch"
         )
         if enable_gap_filler:
             threads["gap_filler"] = threading.Thread(
@@ -306,38 +313,53 @@ class Orchestrator:
             }
 
     # =========================================================================
-    # Network Worker — pre-fetch files to keep GPU fed
+    # Upload Worker — ships encoded files back to the NAS, independent of fetch
     # =========================================================================
 
-    def _network_worker(self, queue: list[dict]):
-        """Bidirectional network worker. One operation at a time, full bandwidth.
+    def _upload_worker(self):
+        """Handle post-encode uploads (copy to NAS + verify + replace + TMDb + Plex).
+
+        Split out from the old combined network worker so an upload of a finished encode
+        doesn't have to wait for an in-flight 20 GB fetch to complete. Both threads share
+        the same NAS link but in practice only one is active at a time (GPU encode is the
+        bottleneck, so the network is usually idle).
+        """
+        logging.info("Upload worker started")
+        while not self._shutdown.is_set():
+            upload_entry = self._find_pending_upload()
+            if not upload_entry:
+                self._shutdown.wait(timeout=2)
+                continue
+            fp = upload_entry["filepath"]
+            logging.info(f"[NET] Upload: {os.path.basename(fp)}")
+            try:
+                finalize_upload(fp, self.state, self.config)
+            except Exception as e:
+                logging.error(f"Upload failed for {os.path.basename(fp)}: {e}")
+        logging.info("Upload worker finished")
+
+    # =========================================================================
+    # Fetch Worker — pre-fetch files to keep the GPU encoders fed
+    # =========================================================================
+
+    def _fetch_worker(self, queue: list[dict]):
+        """Pull files from NAS → staging, in priority order.
 
         Priority order:
-        1. Upload encoded files (frees local space, completes pipeline for that file)
-        2. Fetch what the GPU is waiting on (never starve the GPU)
-        3. Fetch force items (user priority)
-        4. Fetch next from queue (pre-fetch ahead)
+        1. Fetch what a GPU worker is blocked on (never starve the encoders)
+        2. Fetch force items (user priority)
+        3. Pre-fetch next queue items (up to the adaptive cap)
+
+        After each successful fetch, runs cheap pre-processing (language detection +
+        external sub scan) so the encode startup is basically instant.
         """
-        logging.info("Network worker started")
+        logging.info("Fetch worker started")
         max_buffer = self.config.get("max_fetch_buffer_bytes", 2000 * 1024**3)
         # Cap the count of pre-fetched-but-not-yet-encoded files, independent of bytes.
-        # On a 1 TB buffer the network worker otherwise pulls 100+ files ahead of a slow
-        # encoder, wasting bandwidth on stuff that'll sit there for hours. Adaptive: allow
-        # gpu_concurrency files currently being encoded, plus 2*gpu_concurrency pre-fetched
-        # ahead so every worker finds its next file ready the moment the current one exits.
         max_prefetched = max(4, 3 * self._gpu_concurrency)
 
         while not self._shutdown.is_set():
             did_work = False
-
-            # === Priority 1: Upload any encoded files waiting ===
-            upload_entry = self._find_pending_upload()
-            if upload_entry:
-                fp = upload_entry["filepath"]
-                logging.info(f"[NET] Upload: {os.path.basename(fp)}")
-                finalize_upload(fp, self.state, self.config)
-                did_work = True
-                continue  # check for more uploads before fetching
 
             if self.control.is_fetch_paused():
                 self._shutdown.wait(timeout=5)
@@ -347,14 +369,10 @@ class Orchestrator:
                 self._shutdown.wait(timeout=5)
                 continue
 
-            # Count how many files are already fetched-but-not-yet-encoded. If we're at the
-            # cap, pause the proactive pre-fetch (priorities 3/4) — but still allow priority 2
-            # (fetch-what-GPU-wants) so a worker never starves waiting on a file we could pull.
             prefetched_count = self._count_prefetched()
             prefetch_full = prefetched_count >= max_prefetched
 
-            # === Priority 2: Fetch what the GPU workers are blocked on ===
-            # With multiple GPU workers we can have multiple wants — handle them in order.
+            # === Priority 1: Fetch what the GPU workers are blocked on ===
             for gpu_wants in self._get_gpu_wants():
                 existing = self.state.get_file(gpu_wants)
                 status = existing["status"] if existing else None
@@ -370,18 +388,17 @@ class Orchestrator:
                     }
                 result = fetch_file(entry, self.staging_dir, self.config, self.state)
                 if result is not None:
+                    self._post_fetch(entry)
                     did_work = True
-                    break  # re-evaluate all priorities next iteration
+                    break
             if did_work:
                 continue
 
-            # Don't pre-fetch beyond the queue-depth cap — GPU's already-fetched queue is deep
-            # enough that pulling more would just pile up untouched bytes on the staging drive.
             if prefetch_full:
                 self._shutdown.wait(timeout=10)
                 continue
 
-            # === Priority 3: Fetch force items ===
+            # === Priority 2: Fetch force items ===
             force_items = self.control.get_force_items()
             for fp in force_items:
                 if self._shutdown.is_set():
@@ -400,10 +417,11 @@ class Orchestrator:
                     }
                 result = fetch_file(entry, self.staging_dir, self.config, self.state)
                 if result is not None:
+                    self._post_fetch(entry)
                     did_work = True
                     break
 
-            # === Priority 3: Fetch next from queue ===
+            # === Priority 3: Pre-fetch next queue items ===
             if not did_work:
                 for item in queue:
                     if self._shutdown.is_set():
@@ -417,13 +435,57 @@ class Orchestrator:
                         continue
                     result = fetch_file(item, self.staging_dir, self.config, self.state)
                     if result is not None:
+                        self._post_fetch(item)
                         did_work = True
                         break
 
             if not did_work:
                 self._shutdown.wait(timeout=5)
 
-        logging.info("Network worker finished")
+        logging.info("Fetch worker finished")
+
+    def _post_fetch(self, item: dict) -> None:
+        """Eager CPU work on a freshly-fetched file so the GPU worker doesn't pay the cost.
+
+        Runs:
+        - Language detection on undetermined audio/sub tracks (text-based, no whisper).
+        - External sub scan — find sidecar .srt/.ass files next to the source.
+
+        Results are written into state.extras under `detected_streams` and `external_subs`;
+        full_gamut reads them and skips its own detection. If anything goes wrong here we
+        just log + move on — the encode will re-detect at worst case.
+        """
+        filepath = item.get("filepath")
+        if not filepath:
+            return
+        try:
+            # Local import to avoid circular imports at module load.
+            from pipeline.language import detect_all_languages
+
+            enriched = detect_all_languages(item, use_whisper=False)
+            payload: dict = {}
+            if enriched:
+                payload["detected_audio"] = enriched.get("audio_streams")
+                payload["detected_subs"] = enriched.get("subtitle_streams")
+        except Exception as e:
+            logging.debug(f"  post-fetch language detect failed ({os.path.basename(filepath)}): {e}")
+            payload = {}
+
+        try:
+            from pipeline.full_gamut import _find_external_subs
+
+            ext_subs = _find_external_subs(filepath)
+            if ext_subs:
+                payload["external_subs"] = ext_subs
+        except Exception as e:
+            logging.debug(f"  post-fetch sub scan failed ({os.path.basename(filepath)}): {e}")
+
+        if payload:
+            payload["pre_processed"] = True
+            try:
+                self.state.set_file(filepath, FileStatus.PROCESSING, **payload)
+            except Exception as e:
+                logging.debug(f"  post-fetch state write failed: {e}")
 
     def _find_pending_upload(self) -> dict | None:
         """Find a file with status=UPLOADING and stage=pending_upload."""

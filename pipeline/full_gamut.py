@@ -117,19 +117,37 @@ def full_gamut(
             clean_name = None  # filename module not ready yet, skip
 
         # === STEP 3: Detect undetermined languages ===
-        state.set_file(filepath, FileStatus.PROCESSING, stage="language_detect")
-        try:
-            # Detect languages for undetermined tracks
-            enriched = detect_all_languages(item, use_whisper=False)
-            if enriched:
-                # Update the item's stream data with detections
-                item.update(enriched)
-                logging.info("  Language detection complete")
-        except Exception as e:
-            logging.warning(f"  Language detection failed (non-fatal): {e}")
+        # The fetch worker runs this eagerly on fetch-complete and caches results in state,
+        # so encoding startup is instant for pre-fetched files. If the cache is present we
+        # use it; otherwise we detect inline (old behaviour, e.g. for files we fetched
+        # ourselves above). Refresh `existing` first in case the post-fetch hook wrote the
+        # cache after we grabbed the earlier snapshot.
+        existing = state.get_file(filepath) or existing
+        detected_audio = existing.get("detected_audio") if existing else None
+        detected_subs = existing.get("detected_subs") if existing else None
+        if existing and existing.get("pre_processed"):
+            if detected_audio is not None:
+                item["audio_streams"] = detected_audio
+            if detected_subs is not None:
+                item["subtitle_streams"] = detected_subs
+            logging.info("  Language detection: using pre-computed results")
+        else:
+            state.set_file(filepath, FileStatus.PROCESSING, stage="language_detect")
+            try:
+                enriched = detect_all_languages(item, use_whisper=False)
+                if enriched:
+                    item.update(enriched)
+                    logging.info("  Language detection complete")
+            except Exception as e:
+                logging.warning(f"  Language detection failed (non-fatal): {e}")
 
         # === STEP 4: Find external subs ===
-        external_subs = _find_external_subs(filepath)
+        # Also eagerly computed by the fetch worker — use cached list if present.
+        cached_external = existing.get("external_subs") if existing else None
+        if existing and existing.get("pre_processed") and cached_external is not None:
+            external_subs = cached_external
+        else:
+            external_subs = _find_external_subs(filepath)
         if external_subs:
             logging.info(f"  Found {len(external_subs)} external subtitle file(s)")
 
