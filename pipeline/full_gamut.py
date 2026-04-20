@@ -270,12 +270,19 @@ def full_gamut(
             logging.info(f"Fetched: {filename}")
 
         # === STEP 2: Clean filename ===
+        # Loud failure mode: if the filename cleaner errors, we WANT to know — silently
+        # falling back to the dirty name means we commit standards-violating files.
+        # (Real failure today: Begin Again shipped with its scene-tagged name because
+        # clean_filename raised and we caught it without logging.)
         try:
             from pipeline.filename import clean_filename
 
             clean_name = clean_filename(filepath, library_type)
-        except (ImportError, Exception):
-            clean_name = None  # filename module not ready yet, skip
+            if clean_name and clean_name != os.path.basename(filepath):
+                logging.info(f"  Clean name: {clean_name}")
+        except Exception as e:
+            logging.warning(f"  Filename cleaner failed on {filename}: {e}")
+            clean_name = None
 
         # === STEP 3: Detect undetermined languages ===
         # The fetch worker runs this eagerly on fetch-complete and caches results in state,
@@ -594,6 +601,58 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
                 )
             return False
 
+    # === Standards compliance check ===
+    # Beyond "the encode ran without crashing" we also insist every output file meets
+    # the library's policy:
+    #   - video codec = AV1
+    #   - every audio track in {eac3, opus, or explicitly-configured lossless passthrough}
+    #   - every audio + sub language in KEEP_LANGS (no foreign audio/subs left over)
+    #   - target filename has scene tags cleaned (checked post-replace below, since the
+    #     rename-to-clean-name happens during replace)
+    # If the encoder somehow leaves a non-conforming file we park it in ERROR rather
+    # than commit it to the library. The command builder SHOULD prevent this; the check
+    # is belt-and-braces for edge cases (e.g. strange stream configurations).
+    if output_probe and not output_probe.get("error"):
+        from pipeline.config import KEEP_LANGS
+
+        out_video = output_probe.get("video") or {}
+        out_audio = output_probe.get("audio") or []
+        out_subs = output_probe.get("subs") or []
+        target_audio_codecs = {"eac3", "opus"}
+        lossless_codecs = {c.lower() for c in config.get("lossless_audio_codecs") or []}
+
+        violations: list[str] = []
+        if (out_video.get("codec") or "").lower() not in ("av1", "av1_nvenc"):
+            violations.append(f"video codec {out_video.get('codec')!r} is not AV1")
+        for i, a in enumerate(out_audio):
+            codec = (a.get("codec") or "").lower()
+            lang = (a.get("language") or "").lower().strip()
+            if codec not in target_audio_codecs and codec not in lossless_codecs:
+                violations.append(f"audio track {i}: codec {codec!r} not in target set")
+            if lang and lang not in KEEP_LANGS:
+                violations.append(f"audio track {i}: language {lang!r} not in KEEP_LANGS")
+        for i, s in enumerate(out_subs):
+            lang = (s.get("language") or "").lower().strip()
+            if lang and lang not in KEEP_LANGS:
+                violations.append(f"sub track {i}: language {lang!r} not in KEEP_LANGS")
+
+        if violations:
+            logging.error(f"  Standards compliance FAILED for {final_name}:")
+            for v in violations:
+                logging.error(f"    - {v}")
+            try:
+                os.remove(dest_path)
+            except OSError:
+                pass
+            state.set_file(
+                filepath,
+                FileStatus.ERROR,
+                error=f"standards compliance: {violations[0]}" + (f" (+{len(violations) - 1} more)" if len(violations) > 1 else ""),
+                stage="verify",
+                compliance_violations=violations,
+            )
+            return False
+
     # === Replace original (crash-safe) ===
     # Backup policy: DO NOT auto-delete the .original.bak. We leave it in place so
     # Synology's #recycle captures a safety copy on any subsequent housekeeping, AND
@@ -612,6 +671,36 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
         # NOTE: we intentionally DO NOT remove backup_path here. See commit message.
     except Exception as e:
         state.set_file(filepath, FileStatus.ERROR, error=f"replace failed: {e}", stage="replace")
+        return False
+
+    # === Post-replace: filename standards check ===
+    # If the on-disk filename still matches common scene-tag patterns, clean-filename
+    # silently failed at encode time and we shipped a standards violation. Park in ERROR
+    # with the clean-name we would have used, so a later re-queue can fix it.
+    import re as _re
+    _SCENE_TAG_RE = _re.compile(
+        r"\b(?:1080p|720p|480p|2160p|UHD|BluRay|BDRip|BRRip|WEB-?DL|WEBRip|HDTV|HDRip|"
+        r"DVDRip|REMUX|x264|x265|HEVC|AAC|DDP?\d|AC3|EAC3|DTS|TrueHD|Atmos|"
+        r"NF|AMZN|DSNP|HULU|MAX|ATVP|REPACK|MULTi|PROPER)\b",
+        _re.IGNORECASE,
+    )
+    if _SCENE_TAG_RE.search(final_name):
+        try:
+            from pipeline.filename import clean_filename
+            proposed = clean_filename(final_path, library_type) or final_name
+        except Exception:
+            proposed = final_name
+        logging.error(
+            f"  Standards compliance FAILED (filename): on-disk name still has scene tags: "
+            f"{final_name!r} (proposed clean: {proposed!r})"
+        )
+        state.set_file(
+            filepath,
+            FileStatus.ERROR,
+            error=f"standards compliance: dirty filename {final_name!r}",
+            stage="verify",
+            compliance_violations=[f"filename not cleaned: {final_name!r} -> {proposed!r}"],
+        )
         return False
 
     # === TMDb tags ===
