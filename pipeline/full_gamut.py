@@ -32,6 +32,90 @@ from pipeline.report import update_entry
 from pipeline.state import FileStatus, PipelineState
 
 
+def _probe_full(path: str) -> dict:
+    """Run a single ffprobe that captures everything we want in history + integrity.
+
+    Returns a dict like:
+        {"format": {...}, "video": {...}, "audio": [...], "subs": [...], "error": "..."}
+    Never raises — failures go into the 'error' field so callers can still proceed.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-print_format", "json",
+                "-show_format",
+                "-show_streams",
+                path,
+            ],
+            capture_output=True, text=True, timeout=60,
+            encoding="utf-8", errors="replace",
+        )
+        if result.returncode != 0:
+            return {"error": (result.stderr.strip().splitlines() or ["probe failed"])[-1]}
+        data = json.loads(result.stdout)
+    except Exception as e:
+        return {"error": str(e)}
+
+    fmt = data.get("format") or {}
+    video: dict = {}
+    audio: list = []
+    subs: list = []
+    for s in data.get("streams") or []:
+        st = (s.get("codec_type") or "").lower()
+        if st == "video" and not video:
+            video = {
+                "codec": s.get("codec_name"),
+                "profile": s.get("profile"),
+                "width": s.get("width"),
+                "height": s.get("height"),
+                "pix_fmt": s.get("pix_fmt"),
+                "bit_rate_kbps": int(s["bit_rate"]) // 1000 if str(s.get("bit_rate", "")).isdigit() else None,
+                "r_frame_rate": s.get("r_frame_rate"),
+                "color_transfer": s.get("color_transfer"),
+                "color_space": s.get("color_space"),
+            }
+        elif st == "audio":
+            audio.append({
+                "codec": s.get("codec_name"),
+                "channels": s.get("channels"),
+                "channel_layout": s.get("channel_layout"),
+                "bit_rate_kbps": int(s["bit_rate"]) // 1000 if str(s.get("bit_rate", "")).isdigit() else None,
+                "language": (s.get("tags") or {}).get("language"),
+            })
+        elif st == "subtitle":
+            subs.append({
+                "codec": s.get("codec_name"),
+                "language": (s.get("tags") or {}).get("language"),
+            })
+
+    return {
+        "format": {
+            "name": fmt.get("format_name"),
+            "duration_secs": float(fmt["duration"]) if str(fmt.get("duration", "")).replace(".", "", 1).isdigit() else None,
+            "size_bytes": int(fmt["size"]) if str(fmt.get("size", "")).isdigit() else None,
+            "bit_rate_kbps": int(fmt["bit_rate"]) // 1000 if str(fmt.get("bit_rate", "")).isdigit() else None,
+        },
+        "video": video,
+        "audio": audio,
+        "subs": subs,
+    }
+
+
+def _append_history_jsonl(path, entry: dict) -> None:
+    """Append a single JSONL entry with fsync. JSONL tolerates partial writes at the
+    line level — the worst case from a crash is one truncated trailing line, which
+    readers can skip. fsync after write keeps us honest across power loss."""
+    line = json.dumps(entry, ensure_ascii=False) + "\n"
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(line)
+        f.flush()
+        try:
+            os.fsync(f.fileno())
+        except OSError:
+            pass
+
+
 def full_gamut(
     filepath: str,
     item: dict,
@@ -366,48 +450,27 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
                 # fall through to replace + DONE below
 
     # === Output integrity check ===
-    # Last night's disaster: ffmpeg wrote a few seconds of frames, exited with code 0,
-    # but put the full-length duration in the container header. Duration check passed
-    # cleanly; we renamed garbage over a good original. Two defences now:
-    #   (a) the output must actually contain a video stream, and
-    #   (b) its average video bitrate must be at least 30% of the source's AND >= 200
-    #       kbps absolute. Anything below that is almost certainly an early-exit encode.
-    # A 7-second "encode" of a 1.9 GB H.264 source to a 41 MB output passes neither test.
-    try:
-        probe = subprocess.run(
-            [
-                "ffprobe", "-v", "error",
-                "-select_streams", "v:0",
-                "-show_entries", "stream=codec_name,bit_rate",
-                "-show_entries", "format=bit_rate,size",
-                "-of", "default=noprint_wrappers=1",
-                dest_path,
-            ],
-            capture_output=True, text=True, timeout=30,
-            encoding="utf-8", errors="replace",
+    # Guards against the "ffmpeg exited early, wrote a few seconds of frames, stamped
+    # full duration in the container header" failure mode. Two gates:
+    #   (a) output must have a video stream at all;
+    #   (b) output average bitrate must be >= 30% of source AND >= 200 kbps absolute.
+    # Also captures the full probe for encode_history below — one ffprobe call, reused.
+    output_probe = _probe_full(dest_path)
+    if output_probe.get("error"):
+        logging.warning(f"  Output integrity probe failed ({output_probe['error']}) — proceeding with duration-check-only verify.")
+    else:
+        out_video = output_probe.get("video") or {}
+        out_codec = out_video.get("codec") or ""
+        out_bitrate_kbps = (
+            out_video.get("bit_rate_kbps")
+            or (output_probe.get("format") or {}).get("bit_rate_kbps")
+            or 0
         )
-        probe_out = {}
-        for line in probe.stdout.splitlines():
-            if "=" in line:
-                k, v = line.split("=", 1)
-                probe_out[k] = v
-        out_codec = probe_out.get("codec_name", "")
-        # format.bit_rate is overall file bitrate; use it as the floor if video stream
-        # doesn't advertise its own bit_rate (common for AV1).
-        try:
-            out_bitrate_kbps = int(probe_out.get("bit_rate") or 0) // 1000
-        except ValueError:
-            out_bitrate_kbps = 0
-        if not out_bitrate_kbps:
-            # Fall back to file-level bitrate
-            out_bitrate_kbps = int(probe_out.get("format.bit_rate") or 0) // 1000
-
-        # Compute source bitrate as sanity floor
         input_bitrate_kbps = int((input_size / input_duration * 8 / 1000)) if input_duration > 0 else 0
         min_ratio = 0.3
         min_abs_kbps = 200
         integrity_ok = (
-            out_codec  # has a video codec at all
+            bool(out_codec)
             and out_bitrate_kbps >= min_abs_kbps
             and (input_bitrate_kbps == 0 or out_bitrate_kbps >= input_bitrate_kbps * min_ratio)
         )
@@ -421,7 +484,6 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
                 os.remove(dest_path)
             except OSError:
                 pass
-            # Apply the same retry-count logic as duration mismatch — one retry, then park.
             MAX_INTEGRITY_RETRIES = 1
             prev = state.get_file(filepath) or {}
             retry_count = int(prev.get("integrity_retry_count", 0) or 0)
@@ -443,8 +505,6 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
                     integrity_retry_count=retry_count + 1,
                 )
             return False
-    except Exception as e:
-        logging.warning(f"  Output integrity probe failed ({e}) — proceeding with duration-check-only verify.")
 
     # === Replace original (crash-safe) ===
     # Backup policy: DO NOT auto-delete the .original.bak. We leave it in place so
@@ -511,9 +571,10 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
     state.stats["total_content_duration_secs"] = state.stats.get("total_content_duration_secs", 0) + input_duration
     state.save()
 
-    # === Append to encode_history.jsonl (what the dashboard reads) ===
-    # State entries are flat — video/hdr/resolution live in the media report, which we consult
-    # here rather than rely on state (where those fields aren't reliably populated).
+    # === Append to encode_history.jsonl (what the dashboard + audits read) ===
+    # Rich record: source stream info (from media_report + item) + output stream info
+    # (from the probe we did during integrity verify) + per-stage speeds. Lets us do
+    # post-hoc sense checks without re-probing files.
     try:
         from datetime import datetime, timezone
 
@@ -521,34 +582,101 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
         from server.helpers import read_json_safe
 
         report = read_json_safe(MEDIA_REPORT) or {}
-        video_info = {}
+        report_entry: dict = {}
         for f in report.get("files", []):
             if f.get("filepath") == filepath or f.get("filepath") == final_path:
-                video_info = f.get("video", {}) or {}
+                report_entry = f
                 break
+        report_video = report_entry.get("video", {}) or {}
+
+        fetch_time = entry.get("fetch_time_secs") or 0
+        def _mbps(bytes_, secs):
+            if not bytes_ or not secs:
+                return None
+            return round(bytes_ / secs / (1024 * 1024), 2)
+
+        # Pull output probe if we have it; otherwise do one now on the final file.
+        # output_probe was set on the successful path above but only if integrity block
+        # ran without errors. Safe re-probe if we don't have it — cheap over SMB.
+        out_probe = locals().get("output_probe") or {}
+        if out_probe.get("error") or not out_probe.get("video"):
+            out_probe = _probe_full(final_path)
+
+        input_bitrate_kbps = (
+            report_entry.get("overall_bitrate_kbps")
+            or (int(input_size / input_duration * 8 / 1000) if input_duration > 0 else None)
+        )
 
         history_entry = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "filepath": final_path,
             "filename": final_name,
+            "library_type": library_type,
             "tier": entry.get("tier") or entry.get("tier_name") or "",
-            "res_key": entry.get("res_key") or video_info.get("resolution_class", ""),
+            "mode": entry.get("mode") or "full_gamut",
+
+            # Sizes + timings + speeds
             "input_bytes": input_size,
             "output_bytes": output_size,
             "saved_bytes": saved,
-            "encode_time_secs": encode_time,
-            "fetch_time_secs": entry.get("fetch_time_secs", 0),
-            "upload_time_secs": round(upload_elapsed, 1),
             "compression_ratio": round(output_size / input_size, 3) if input_size > 0 else 0,
-            "codec_from": video_info.get("codec", "") or entry.get("codec", ""),
-            "resolution": video_info.get("resolution_class", ""),
-            "hdr": bool(video_info.get("hdr")),
-            "audio_only": entry.get("mode") == "audio_remux",
-            "library_type": library_type,
+            "encode_time_secs": round(encode_time, 1) if encode_time else 0,
+            "fetch_time_secs": round(fetch_time, 1),
+            "upload_time_secs": round(upload_elapsed, 1),
+            "fetch_speed_mb_s": _mbps(input_size, fetch_time),
+            "upload_speed_mb_s": _mbps(output_size, upload_elapsed),
+            "encode_speed_x_realtime": (
+                round(input_duration / encode_time, 2)
+                if encode_time and input_duration else None
+            ),
+
+            # Durations — catch timestamp-bug outputs via side-by-side comparison
+            "input_duration_secs": round(input_duration, 1) if input_duration else None,
+            "output_duration_secs": (
+                round((out_probe.get("format") or {}).get("duration_secs") or 0, 1) or None
+            ),
+
+            # Source stream details (pre-encode) — preserved so we can compare later
+            "source": {
+                "video": {
+                    "codec": report_video.get("codec") or report_video.get("codec_raw"),
+                    "resolution_class": report_video.get("resolution_class"),
+                    "width": report_video.get("width"),
+                    "height": report_video.get("height"),
+                    "hdr": bool(report_video.get("hdr")),
+                    "bit_depth": report_video.get("bit_depth"),
+                    "bitrate_kbps": input_bitrate_kbps,
+                },
+                "audio": [
+                    {
+                        "codec": a.get("codec") or a.get("codec_raw"),
+                        "language": a.get("language"),
+                        "channels": a.get("channels"),
+                        "bitrate_kbps": a.get("bitrate_kbps"),
+                        "lossless": a.get("lossless"),
+                    }
+                    for a in (report_entry.get("audio_streams") or [])
+                ],
+                "subs": [
+                    {"codec": s.get("codec"), "language": s.get("language")}
+                    for s in (report_entry.get("subtitle_streams") or [])
+                ],
+                "external_subs": [
+                    {"filename": s.get("filename"), "language": s.get("language")}
+                    for s in (report_entry.get("external_subtitles") or [])
+                ],
+            },
+
+            # Output stream details (post-encode) — live probe of the file we just wrote
+            "output": {
+                "video": out_probe.get("video") or {},
+                "audio": out_probe.get("audio") or [],
+                "subs": out_probe.get("subs") or [],
+                "format": out_probe.get("format") or {},
+            },
         }
         history_file = STAGING_DIR / "encode_history.jsonl"
-        with open(history_file, "a", encoding="utf-8") as f:
-            f.write(json.dumps(history_entry) + "\n")
+        _append_history_jsonl(history_file, history_entry)
     except Exception as e:
         logging.debug(f"  History append failed (non-fatal): {e}")
 
