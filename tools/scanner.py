@@ -474,10 +474,16 @@ def main():
 
     # Incremental scan: reuse results from existing report for unchanged files.
     # A file is "unchanged" if its filepath, size, and mtime all match.
+    #
+    # IMPORTANT: two separate concerns here, wrongly collapsed in earlier versions.
+    #   cached      — whole-entry reuse to avoid re-probing. Gated by --full.
+    #   old_by_path — TMDb/language detection preservation across re-probes. ALWAYS
+    #                 populated if an old report exists, even under --full. Otherwise
+    #                 --full wipes all TMDb tags (seen on 2026-04-19 rescan).
     cached = {}
     old_by_path: dict[str, dict] = {}  # filepath -> entry for TMDb/language preservation
     old_by_dir: dict[str, list[dict]] = {}  # directory -> entries (for rename matching)
-    if not args.full and os.path.exists(args.output):
+    if os.path.exists(args.output):
         try:
             with open(args.output, "r", encoding="utf-8") as f:
                 old_report = json.load(f)
@@ -485,11 +491,17 @@ def main():
                 fp = entry.get("filepath", "")
                 sz = entry.get("file_size_bytes", -1)
                 mt = entry.get("file_mtime", 0)
-                cached[(fp, sz, mt)] = entry
+                # Only populate cached (reuse) if not --full. Always populate preservation
+                # maps so TMDb/language-detect data survives a --full rescan.
+                if not args.full:
+                    cached[(fp, sz, mt)] = entry
                 old_by_path[fp] = entry
                 parent = os.path.dirname(fp)
                 old_by_dir.setdefault(parent, []).append(entry)
-            print(f"Loaded {len(cached)} cached entries from previous report")
+            if cached:
+                print(f"Loaded {len(cached)} cached entries from previous report")
+            if old_by_path:
+                print(f"Loaded {len(old_by_path)} entries for TMDb/language preservation")
         except Exception:
             pass
 
