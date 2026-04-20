@@ -365,7 +365,13 @@ _whisper_small = None
 
 
 def _get_whisper_model(size: str = "tiny"):
-    """Lazy-load a faster-whisper model. GPU (CUDA) preferred, CPU fallback."""
+    """Lazy-load a faster-whisper model. CPU-only by policy.
+
+    IMPORTANT: we do NOT use CUDA for whisper. The NVENC encoder pipeline runs
+    concurrently on the same RTX 4080; a dual-NVENC + whisper-on-GPU workload
+    triggered a kernel BSOD (SYSTEM_SERVICE_EXCEPTION 0x3B) on 2026-04-21. CPU
+    is slower (~0.35s/sample for tiny, ~2-3s for small) but zero collision risk.
+    """
     global _whisper_tiny, _whisper_small
     ref = _whisper_tiny if size == "tiny" else _whisper_small
     if ref is not None:
@@ -374,24 +380,147 @@ def _get_whisper_model(size: str = "tiny"):
     try:
         from faster_whisper import WhisperModel
 
-        model = WhisperModel(size, device="cuda", compute_type="float16")
-        logging.info(f"Loaded faster-whisper model ({size}, cuda/float16)")
+        model = WhisperModel(size, device="cpu", compute_type="int8")
+        logging.info(f"Loaded faster-whisper model ({size}, cpu/int8)")
     except Exception as e:
-        logging.warning(f"Whisper GPU failed, falling back to CPU: {e}")
-        try:
-            from faster_whisper import WhisperModel
-
-            model = WhisperModel(size, device="cpu", compute_type="int8")
-            logging.info(f"Loaded faster-whisper model ({size}, cpu/int8)")
-        except Exception as e2:
-            logging.error(f"Failed to load whisper model {size}: {e2}")
-            return None
+        logging.error(f"Failed to load whisper model {size}: {e}")
+        return None
 
     if size == "tiny":
         _whisper_tiny = model
     else:
         _whisper_small = model
     return model
+
+
+def _extract_samples_at_offsets(
+    filepath: str,
+    audio_stream_index: int,
+    offsets_secs: list[int],
+    sample_duration: int,
+) -> list[str]:
+    """Extract audio samples at EXPLICIT time offsets — used by the deep-detect
+    ladder that needs 10 samples at 5%/10%/.../50% of a film's duration.
+
+    Single ffmpeg call, all samples come from one file open.
+    """
+    tmp_dir = os.path.join(str(STAGING_DIR), "whisper_tmp")
+    os.makedirs(tmp_dir, exist_ok=True)
+    base = f"{os.getpid()}_{audio_stream_index}"
+    paths: list[str] = []
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", filepath]
+    for i, off in enumerate(offsets_secs):
+        wav = os.path.join(tmp_dir, f"{base}_deep_{i}.wav")
+        paths.append(wav)
+        cmd.extend([
+            "-ss", str(off),
+            "-t", str(sample_duration),
+            "-map", f"0:a:{audio_stream_index}",
+            "-ac", "1", "-ar", "16000", "-y", wav,
+        ])
+    try:
+        subprocess.run(cmd, capture_output=True, timeout=300)
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+    return [p for p in paths if os.path.exists(p) and os.path.getsize(p) > 10_000]
+
+
+def detect_audio_language_deep(
+    filepath: str,
+    audio_stream_index: int,
+    duration_secs: float,
+    min_confidence: float = 0.8,
+) -> tuple[Optional[str], float, str]:
+    """Progressive-effort detection ladder. Escalates until confidence threshold
+    is met or we run out of moves. All steps run on CPU — no GPU collision risk.
+
+    Ladder:
+        1. 3 × 10s centred samples, whisper-tiny          (current-ish)
+        2. 5 × 30s spread samples, whisper-tiny
+        3. 5 × 30s spread samples, whisper-SMALL
+        4. 10 × 120s at 5/10/15/.../50% of runtime, small (deep sweep)
+
+    Short files (<20 min): step 4 scales sample_duration down so 10 samples fit.
+
+    Returns (lang, confidence, method) — method is the step name that succeeded
+    (e.g. 'whisper_tiny_3x10' / 'whisper_small_deep'). Returns ('und', 0.0,
+    'whisper_exhausted') if every step failed to hit the threshold — caller
+    should record this in state.extras as a 'und_investigated' marker so we
+    don't keep re-running the whole ladder on known-hopeless files.
+    """
+    # --- Step 1: 3 × 10s samples, tiny ---
+    samples_step1 = _extract_all_audio_samples(filepath, [audio_stream_index], duration_secs, sample_duration=10)
+    wavs = samples_step1.get(audio_stream_index, [])[:3]
+    lang, conf = _run_whisper_on(wavs, model_size="tiny")
+    for w in wavs:
+        _safe_remove(w)
+    if lang and conf >= min_confidence:
+        return lang, conf, "whisper_tiny_3x10"
+
+    # --- Step 2: 5 × 30s spread, tiny ---
+    samples_step2 = _extract_all_audio_samples(filepath, [audio_stream_index], duration_secs, sample_duration=30)
+    wavs = samples_step2.get(audio_stream_index, [])
+    lang2, conf2 = _run_whisper_on(wavs, model_size="tiny")
+    for w in wavs:
+        _safe_remove(w)
+    if lang2 and conf2 >= min_confidence:
+        return lang2, conf2, "whisper_tiny_5x30"
+
+    # --- Step 3: 5 × 30s spread, small ---
+    samples_step3 = _extract_all_audio_samples(filepath, [audio_stream_index], duration_secs, sample_duration=30)
+    wavs = samples_step3.get(audio_stream_index, [])
+    lang3, conf3 = _run_whisper_on(wavs, model_size="small")
+    for w in wavs:
+        _safe_remove(w)
+    if lang3 and conf3 >= min_confidence:
+        return lang3, conf3, "whisper_small_5x30"
+
+    # --- Step 4: 10 × 120s at 5%/10%/.../50%, small ---
+    # For short files (<20 min) we scale sample length down so all 10 samples
+    # fit without exceeding the source. Floor at 5s per sample.
+    pct_offsets = [0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50]
+    if duration_secs >= 1200:
+        sample_dur = 120
+    else:
+        # Aim for samples whose total length covers ~66% of the file
+        sample_dur = max(5, int(duration_secs * 0.66 / len(pct_offsets)))
+    offsets = [max(0, int(duration_secs * p)) for p in pct_offsets]
+    wavs4 = _extract_samples_at_offsets(filepath, audio_stream_index, offsets, sample_dur)
+    lang4, conf4 = _run_whisper_on(wavs4, model_size="small")
+    for w in wavs4:
+        _safe_remove(w)
+    if lang4 and conf4 > 0:
+        # Accept whatever the deep sweep returns — if even this couldn't decide,
+        # the source is genuinely ambiguous (instrumental / mixed langs / dubbed)
+        method = "whisper_small_deep" if conf4 >= min_confidence else "whisper_small_deep_low_conf"
+        return lang4, conf4, method
+
+    return "und", 0.0, "whisper_exhausted"
+
+
+def _run_whisper_on(wavs: list[str], model_size: str) -> tuple[Optional[str], float]:
+    """Run whisper on a list of wav samples and majority-vote the result."""
+    if not wavs:
+        return None, 0.0
+    model = _get_whisper_model(model_size)
+    if not model:
+        return None, 0.0
+    detections = []
+    for wav in wavs:
+        try:
+            lang, prob = _whisper_detect_one(model, wav)
+            if lang:
+                detections.append((lang, prob))
+        except Exception as e:
+            logging.debug(f"Whisper {model_size} error on {os.path.basename(wav)}: {e}")
+    return _majority_vote(detections)
+
+
+def _safe_remove(path: str) -> None:
+    try:
+        os.remove(path)
+    except OSError:
+        pass
 
 
 def _extract_all_audio_samples(
