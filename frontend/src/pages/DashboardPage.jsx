@@ -695,10 +695,34 @@ export function DashboardPage({ onClassic, onFileClick }) {
   }, [push]);
 
   useEffect(() => {
-    api
-      .getMediaReport()
-      .then(setReport)
-      .catch((e) => setError(e.message));
+    // media_report.json is a mid-size JSON (~10-20 MB) so we don't push it over WS.
+    // Refresh on three triggers so the UI never goes stale for long:
+    //   1. Initial mount
+    //   2. Every 60s while the tab is visible (cheap, scales with library size)
+    //   3. On window/tab focus change (so returning to the tab is always fresh)
+    let cancelled = false;
+    const refresh = () => {
+      if (document.hidden) return; // don't poll hidden tabs
+      api
+        .getMediaReport()
+        .then((r) => {
+          if (!cancelled) setReport(r);
+        })
+        .catch((e) => !cancelled && setError(e.message));
+    };
+    refresh();
+    const interval = setInterval(refresh, 60_000);
+    const onVisibility = () => {
+      if (!document.hidden) refresh();
+    };
+    window.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("focus", refresh);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+      window.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("focus", refresh);
+    };
   }, []);
 
   useEffect(() => {
