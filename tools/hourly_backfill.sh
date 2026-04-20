@@ -22,8 +22,15 @@ while true; do
   echo "$LOG_PREFIX [2/3] TMDb enrichment for files missing tmdb..."
   uv run python -m tools.tmdb --enrich-and-apply --workers 8 2>&1 | tail -8
 
-  echo "$LOG_PREFIX [3/3] Language detection (text-based, no whisper)..."
+  echo "$LOG_PREFIX [3/4] Language detection (text-based, no whisper)..."
   uv run python -m tools.detect_languages --apply --workers 4 2>&1 | tail -8
+
+  echo "$LOG_PREFIX [4/4] NAS housekeeping (prune stale .bak + gapfill_tmp)..."
+  # Runs /volume1/Media/.scripts/housekeeping.sh on the NAS via SSH. Synology doesn't
+  # expose standard crontab for users so we drive it from here instead. Fast (find +
+  # delete, no network I/O beyond SSH). Quiet when there's nothing to prune.
+  ssh -o ConnectTimeout=10 -o BatchMode=yes nas "/volume1/Media/.scripts/housekeeping.sh && tail -6 /volume1/Media/.scripts/housekeeping.log" 2>&1 \
+    | grep -v -E "post-quantum|store now" | tail -6
 
   ended=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   echo "$LOG_PREFIX === TICK DONE $ended ==="

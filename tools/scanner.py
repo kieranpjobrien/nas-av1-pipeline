@@ -594,18 +594,51 @@ def main():
             "size_gb": round(sum(r["file_size_bytes"] for r in series_results) / (1024**3), 2),
         },
         "errors": len(errors),
-        "error_files": errors[:20],  # First 20 errors for debugging
+        "error_files": errors[:20],
     }
 
-    report = {
-        "summary": summary,
-        "files": results,
-    }
+    # Write report via a single patch that preserves anything the pipeline wrote while
+    # we were scanning. The previous "read then write-much-later" pattern had a latent
+    # race: update_entry() calls between our read (t0) and our write (t30+) got
+    # clobbered. Now we patch atomically, merging our fresh probe results with any
+    # in-flight pipeline updates.
+    from tools.report_lock import patch_report
 
-    # Write report atomically using the shared lock
-    from tools.report_lock import write_report
+    seen_paths = {r["filepath"] for r in results}
+    result_by_path = {r["filepath"]: r for r in results}
 
-    write_report(report)
+    def _scanner_patch(current: dict) -> None:
+        current_files = current.get("files", []) or []
+        merged: list = []
+
+        # 1. Keep/update entries we re-scanned. If a pipeline update happened between
+        #    our read and now, prefer whichever source has the NEWER file_mtime — so
+        #    a post-encode update_entry() after the scanner started takes precedence.
+        for existing in current_files:
+            fp = existing.get("filepath")
+            if fp in seen_paths:
+                fresh = result_by_path[fp]
+                # Pipeline updated this entry AFTER we probed → keep pipeline's version
+                # (identified by higher file_mtime, or by presence of pipeline-owned fields)
+                if existing.get("file_mtime", 0) > fresh.get("file_mtime", 0):
+                    merged.append(existing)
+                else:
+                    merged.append(fresh)
+                seen_paths.discard(fp)  # processed — don't re-add below
+            # else: file wasn't in our scan → file is gone, drop it
+
+        # 2. Add any entries that are in our results but weren't in the current report
+        #    (new files that appeared after the last scan).
+        for fp in seen_paths:
+            merged.append(result_by_path[fp])
+
+        current["files"] = merged
+        # Merge summary — preserve anything like language_scan_date that we don't touch
+        current_summary = current.get("summary", {}) or {}
+        current_summary.update(summary)
+        current["summary"] = current_summary
+
+    patch_report(_scanner_patch)
     output_path = args.output
 
     print(f"\n{'=' * 60}")

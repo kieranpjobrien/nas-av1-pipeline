@@ -512,14 +512,23 @@ def _enrich_one(entry: dict, force: bool = False) -> tuple[str, dict | None]:
 def enrich_report(report: dict, workers: int = 4, force: bool = False) -> dict:
     """Enrich all files in the report with TMDb metadata.
 
+    Per-file patch model: each enrichment result is written back via patch_report()
+    immediately. Avoids the giant end-of-run write that tonight blocked for >120s
+    and lost the whole run's work. Trade-off: thousands of small file-rename ops
+    instead of one big one, but each patch holds the lock for <50ms and is fsync'd
+    atomically. Crash in the middle → work already-done is already saved.
+
     Args:
-        report: The full media_report dict (must contain "files" key).
+        report: The full media_report dict (passed for reference; only used to pick
+                which files to process — writes go through patch_report()).
         workers: Number of threads for concurrent lookups.
         force: If True, re-enrich files that already have tmdb data.
 
     Returns:
-        The modified report dict (mutated in place).
+        The same report dict (kept up-to-date in-memory as patches land).
     """
+    from tools.report_lock import patch_report
+
     files = report.get("files", [])
     to_process = files if force else [f for f in files if not f.get("tmdb")]
 
@@ -527,16 +536,20 @@ def enrich_report(report: dict, workers: int = 4, force: bool = False) -> dict:
         print("All files already have TMDb metadata. Use --force to re-enrich.")
         return report
 
-    print(f"Enriching {len(to_process)} files with TMDb metadata ({workers} workers)...")
+    print(f"Enriching {len(to_process)} files with TMDb metadata ({workers} workers, per-file patch model)...")
 
     completed = 0
     enriched = 0
     failed = 0
 
-    # Build a path -> index lookup for fast updates
-    path_to_idx: dict[str, int] = {}
-    for i, f in enumerate(files):
-        path_to_idx[f["filepath"]] = i
+    def _apply_tmdb(filepath: str, meta: dict) -> None:
+        """Patch exactly one file's tmdb field under lock. <50ms hold typically."""
+        def _patch(r: dict) -> None:
+            for e in r.get("files", []):
+                if e.get("filepath") == filepath:
+                    e["tmdb"] = meta
+                    return
+        patch_report(_patch)
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {pool.submit(_enrich_one, entry, force): entry for entry in to_process}
@@ -545,18 +558,25 @@ def enrich_report(report: dict, workers: int = 4, force: bool = False) -> dict:
             filepath, meta = future.result()
 
             if meta:
-                idx = path_to_idx.get(filepath)
-                if idx is not None:
-                    files[idx]["tmdb"] = meta
-                enriched += 1
+                try:
+                    _apply_tmdb(filepath, meta)
+                    # Also keep our in-memory copy consistent so the caller sees it
+                    for f in files:
+                        if f.get("filepath") == filepath:
+                            f["tmdb"] = meta
+                            break
+                    enriched += 1
+                except Exception as e:
+                    print(f"  Patch failed for {filepath}: {e}", flush=True)
+                    failed += 1
             else:
                 if not futures[future].get("tmdb"):
                     failed += 1
 
             if completed % 50 == 0 or completed == len(to_process):
-                print(f"  Progress: {completed}/{len(to_process)} — {enriched} enriched, {failed} unmatched")
+                print(f"  Progress: {completed}/{len(to_process)} — {enriched} enriched, {failed} unmatched", flush=True)
 
-    print(f"\nTMDb enrichment complete: {enriched} enriched, {failed} unmatched out of {len(to_process)}")
+    print(f"\nTMDb enrichment complete: {enriched} enriched, {failed} unmatched out of {len(to_process)}", flush=True)
     return report
 
 
@@ -723,10 +743,10 @@ def main() -> None:
         # Apply-only mode: just write existing TMDb data to MKV files, no enrichment
         apply_tmdb_to_files(report)
     elif args.enrich_and_apply:
-        # Enrich report AND write to files in one go
+        # Enrich report (per-file patches — no big end-write) AND write to MKVs
         report = enrich_report(report, workers=args.workers, force=args.force)
-        write_report(report)
-        print(f"Saved: {MEDIA_REPORT}", flush=True)
+        # patches already landed per-file; no final write_report needed
+        print(f"Report patched incrementally: {MEDIA_REPORT}", flush=True)
         apply_tmdb_to_files(report)
     elif args.file:
         # Single-file mode
@@ -750,10 +770,9 @@ def main() -> None:
         write_report(report)
         print(f"Saved: {MEDIA_REPORT}")
     else:
-        # Enrichment mode
-        report = enrich_report(report, workers=args.workers, force=args.force)
-        write_report(report)
-        print(f"Saved: {MEDIA_REPORT}")
+        # Enrichment mode (per-file patches)
+        enrich_report(report, workers=args.workers, force=args.force)
+        print(f"Report patched incrementally: {MEDIA_REPORT}")
 
 
 if __name__ == "__main__":
