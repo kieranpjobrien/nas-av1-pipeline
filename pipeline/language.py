@@ -364,27 +364,54 @@ _whisper_tiny = None
 _whisper_small = None
 
 
-def _get_whisper_model(size: str = "tiny"):
-    """Lazy-load a faster-whisper model. CPU-only by policy.
+def _assert_encoder_not_running() -> None:
+    """Raise if the NVENC encoder is currently active — whisper on GPU + NVENC
+    on the same chip triggered the 2026-04-21 BSOD. Caller must stop the pipeline
+    before invoking the whisper ladder. Sample extraction (CPU/ffmpeg-decode) is
+    safe while encoder is running; only whisper inference is the exclusive-GPU step.
+    """
+    try:
+        import urllib.request as _req
+        resp = _req.urlopen("http://localhost:8002/api/process/pipeline/status", timeout=2)
+        data = json.loads(resp.read())
+        if data.get("status") == "running":
+            raise RuntimeError(
+                "Pipeline is currently encoding — stop it before running whisper on GPU "
+                "(POST /api/process/pipeline/stop). Sample extraction is safe concurrently; "
+                "only the whisper inference step needs exclusive GPU access."
+            )
+    except (ConnectionError, OSError, TimeoutError):
+        pass  # backend not reachable, assume stand-alone run
 
-    IMPORTANT: we do NOT use CUDA for whisper. The NVENC encoder pipeline runs
-    concurrently on the same RTX 4080; a dual-NVENC + whisper-on-GPU workload
-    triggered a kernel BSOD (SYSTEM_SERVICE_EXCEPTION 0x3B) on 2026-04-21. CPU
-    is slower (~0.35s/sample for tiny, ~2-3s for small) but zero collision risk.
+
+def _get_whisper_model(size: str = "tiny"):
+    """Lazy-load a faster-whisper model on GPU (CUDA / float16).
+
+    Falls back to CPU on load failure but the expectation is GPU — tiny at
+    ~0.05s/sample on GPU, small at ~0.15s/sample. The encoder pipeline must be
+    stopped before running whisper (see _assert_encoder_not_running) because
+    NVENC + whisper on the same RTX 4080 triggered a kernel BSOD on 2026-04-21.
     """
     global _whisper_tiny, _whisper_small
     ref = _whisper_tiny if size == "tiny" else _whisper_small
     if ref is not None:
         return ref
 
+    _assert_encoder_not_running()
+
     try:
         from faster_whisper import WhisperModel
-
-        model = WhisperModel(size, device="cpu", compute_type="int8")
-        logging.info(f"Loaded faster-whisper model ({size}, cpu/int8)")
+        model = WhisperModel(size, device="cuda", compute_type="float16")
+        logging.info(f"Loaded faster-whisper model ({size}, cuda/float16)")
     except Exception as e:
-        logging.error(f"Failed to load whisper model {size}: {e}")
-        return None
+        logging.warning(f"Whisper GPU load failed for {size}, falling back to CPU: {e}")
+        try:
+            from faster_whisper import WhisperModel
+            model = WhisperModel(size, device="cpu", compute_type="int8")
+            logging.info(f"Loaded faster-whisper model ({size}, cpu/int8)")
+        except Exception as e2:
+            logging.error(f"Failed to load whisper model {size}: {e2}")
+            return None
 
     if size == "tiny":
         _whisper_tiny = model
