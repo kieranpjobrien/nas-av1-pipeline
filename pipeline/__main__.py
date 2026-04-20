@@ -36,6 +36,13 @@ def build_queues(report_path: str, config: dict, state: PipelineState, control: 
     full_gamut_queue = []
     gap_filler_queue = []
 
+    # reencode.json is the escape hatch for "re-process this file even if state DB
+    # says it's DONE" — used by the compliance audit and by force-requeues. Files
+    # listed here bypass the DONE-skip below.
+    reencode_paths = {
+        os.path.normpath(p).lower() for p in control.get_reencode_list().keys()
+    }
+
     for entry in report.get("files", []):
         filepath = entry.get("filepath", "")
         video = entry.get("video", {})
@@ -48,9 +55,12 @@ def build_queues(report_path: str, config: dict, state: PipelineState, control: 
         if control.should_skip(filepath):
             continue
 
-        # Already done in pipeline?
+        norm_path = os.path.normpath(filepath).lower()
+        in_reencode = norm_path in reencode_paths
+
+        # Already done in pipeline? Skip unless it's explicitly in reencode.json
         existing = state.get_file(filepath)
-        if existing and existing["status"] == "done":
+        if existing and existing["status"] == "done" and not in_reencode:
             continue
 
         if codec_raw == "av1":

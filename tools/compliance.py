@@ -139,15 +139,25 @@ def main() -> None:
         print(f"CSV: {args.csv}")
 
     if args.queue == "reencode":
+        # reencode.json format: {"files": {path: override_dict, ...}, "patterns": {pattern: override}}.
+        # An empty override dict just means "re-queue with default params".
         out = CONTROL_DIR / "reencode.json"
-        paths = [p for p, _ in non_compliant]
         try:
             existing = json.loads(out.read_text(encoding="utf-8")) if out.exists() else {}
         except Exception:
             existing = {}
-        merged = list({*existing.get("files", []), *paths})
-        out.write_text(json.dumps({"files": merged, "patterns": existing.get("patterns", {})}, indent=2), encoding="utf-8")
-        print(f"Queued {len(paths)} files (total now {len(merged)} in reencode.json)")
+        # Normalise legacy list-form if we previously wrote it wrong
+        existing_files = existing.get("files", {})
+        if isinstance(existing_files, list):
+            existing_files = {p: {} for p in existing_files}
+        for path, _vs in non_compliant:
+            if path not in existing_files:
+                existing_files[path] = {}
+        out.write_text(
+            json.dumps({"files": existing_files, "patterns": existing.get("patterns", {})}, indent=2),
+            encoding="utf-8",
+        )
+        print(f"Queued {len(non_compliant)} files (total now {len(existing_files)} in reencode.json)")
 
 
 if __name__ == "__main__":
