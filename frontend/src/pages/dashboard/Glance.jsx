@@ -68,6 +68,7 @@ function ActiveRow({ f }) {
 
 export function Glance({ data, pipelineData, throughputPerDay, workersActive, workersTotal, onNavigate }) {
   const [historySummary, setHistorySummary] = useState(null);
+  const [completion, setCompletion] = useState(null);
   useEffect(() => {
     let cancelled = false;
     api
@@ -78,6 +79,27 @@ export function Glance({ data, pipelineData, throughputPerDay, workersActive, wo
       .catch(() => {});
     return () => {
       cancelled = true;
+    };
+  }, []);
+
+  // Library standards compliance — polled alongside the media_report refresh so
+  // "remaining work per standard" stays current after encodes land.
+  useEffect(() => {
+    let cancelled = false;
+    const refresh = () => {
+      if (document.hidden) return;
+      api.getLibraryCompletion().then((c) => !cancelled && setCompletion(c)).catch(() => {});
+    };
+    refresh();
+    const id = setInterval(refresh, 60_000);
+    const onVis = () => { if (!document.hidden) refresh(); };
+    window.addEventListener("visibilitychange", onVis);
+    window.addEventListener("focus", refresh);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+      window.removeEventListener("visibilitychange", onVis);
+      window.removeEventListener("focus", refresh);
     };
   }, []);
 
@@ -331,6 +353,98 @@ export function Glance({ data, pipelineData, throughputPerDay, workersActive, wo
           ))}
         </div>
       </div>
+
+      {/* Standards compliance breakdown — the "what's left to do" view per standard.
+          Same metrics as the classic Pipeline page, but with remaining counts front
+          and centre rather than just completed percentages. */}
+      {completion && (
+        <div className="encode-progress" style={{ marginTop: 16 }}>
+          <h3>
+            Standards compliance
+            <span
+              className="mono"
+              style={{ color: "var(--ink-3)", fontSize: 11, fontWeight: 400, marginLeft: "auto" }}
+            >
+              {fmtNum(completion.fully_done || 0)} / {fmtNum(completion.total || 0)} fully compliant · click to drill in
+            </span>
+          </h3>
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))",
+              gap: 12,
+              marginTop: 12,
+            }}
+          >
+            {[
+              { k: "video", label: "AV1 Video", pct: completion.pct_video, done: completion.av1, colour: "var(--accent)" },
+              { k: "audio", label: "EAC-3 Audio", pct: completion.pct_audio, done: completion.eac3_done, colour: "#22d3ee" },
+              { k: "subs", label: "English Subs", pct: completion.pct_subs, done: completion.subs_done, colour: "#a78bfa" },
+              { k: "foreign_subs", label: "No Foreign Subs", pct: completion.pct_no_foreign_subs, done: completion.no_foreign_subs, colour: "#c084fc" },
+              { k: "tmdb", label: "TMDb Metadata", pct: completion.pct_tmdb, done: completion.has_tmdb, colour: "#f59e0b" },
+              { k: "langs", label: "Langs Known", pct: completion.pct_langs_known, done: completion.total - (completion.und_audio_files || 0) - (completion.und_sub_files || 0), colour: "#10b981" },
+              { k: "filename", label: "Clean Filename", pct: completion.pct_filename, done: completion.has_clean_filename, colour: "#6366f1" },
+            ].map(({ k, label, pct, done, colour }) => {
+              const total2 = completion.total || 0;
+              const remaining = Math.max(0, total2 - (done || 0));
+              return (
+                <div
+                  key={k}
+                  style={{
+                    padding: 12,
+                    borderRadius: 8,
+                    background: "var(--surface)",
+                    border: "1px solid var(--line)",
+                    textAlign: "center",
+                  }}
+                >
+                  <div
+                    className="mono"
+                    style={{ fontSize: 22, fontWeight: 600, color: colour, lineHeight: 1 }}
+                  >
+                    {(pct ?? 0).toFixed(1)}%
+                  </div>
+                  <div
+                    style={{
+                      margin: "6px auto",
+                      width: "80%",
+                      height: 4,
+                      background: "var(--line)",
+                      borderRadius: 2,
+                      overflow: "hidden",
+                    }}
+                  >
+                    <div
+                      style={{
+                        height: "100%",
+                        width: `${Math.min(pct ?? 0, 100)}%`,
+                        background: colour,
+                      }}
+                    />
+                  </div>
+                  <div style={{ fontSize: 11, color: "var(--ink-2)", marginTop: 4 }}>{label}</div>
+                  <div
+                    className="mono"
+                    style={{
+                      fontSize: 11,
+                      color: remaining > 0 ? "#f59e0b" : "var(--ink-3)",
+                      marginTop: 2,
+                    }}
+                  >
+                    {remaining > 0 ? `${fmtNum(remaining)} to go` : "✓ all done"}
+                  </div>
+                  <div
+                    className="mono"
+                    style={{ fontSize: 9, color: "var(--ink-4)", marginTop: 2 }}
+                  >
+                    {fmtNum(done || 0)} / {fmtNum(total2)}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       <div className="two-col">
         <div className="card">
