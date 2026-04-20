@@ -849,6 +849,7 @@ def process_file(
     use_whisper: bool = False,
     whisper_all: bool = False,
     audio_only: bool = False,
+    deep: bool = False,
 ) -> list[dict]:
     """Return a list of detection results for all undetermined tracks in a file."""
     filepath = file_entry["filepath"]
@@ -997,17 +998,37 @@ def process_file(
     # (they're still und with no detection — previous short samples failed)
     whisper_results: dict[int, tuple] = {}
     if whisper_candidates:
-        # Check if any candidate was previously attempted (has whisper_attempted marker)
         audio_streams = file_entry.get("audio_streams", [])
-        previously_failed = any(
-            audio_streams[i].get("whisper_attempted") for i in whisper_candidates if i < len(audio_streams)
-        )
-        whisper_results = detect_audio_languages_for_file(
-            filepath,
-            whisper_candidates,
-            file_entry.get("duration_seconds", 0),
-            aggressive=previously_failed,
-        )
+        if deep:
+            # Deep mode — run the full pipeline.language ladder per candidate.
+            # Steps: tiny 3×10s → tiny 5×30s → small 5×30s → small 10×120s at
+            # 5/10/.../50%. Slower but resolves residual und-audio files that
+            # tiny-only detection gave up on. Records the method used so we
+            # can see which files needed how much effort.
+            from pipeline.language import detect_audio_language_deep
+
+            for aidx in whisper_candidates:
+                lang, conf, method = detect_audio_language_deep(
+                    filepath,
+                    aidx,
+                    file_entry.get("duration_seconds", 0),
+                )
+                whisper_results[aidx] = (lang, conf)
+                # Annotate stream with deep-method marker so the status field
+                # shows which escalation step succeeded
+                if aidx < len(audio_streams):
+                    audio_streams[aidx]["deep_detect_method"] = method
+        else:
+            # Check if any candidate was previously attempted (has whisper_attempted marker)
+            previously_failed = any(
+                audio_streams[i].get("whisper_attempted") for i in whisper_candidates if i < len(audio_streams)
+            )
+            whisper_results = detect_audio_languages_for_file(
+                filepath,
+                whisper_candidates,
+                file_entry.get("duration_seconds", 0),
+                aggressive=previously_failed,
+            )
 
     # Merge heuristic + whisper results
     audio_streams = file_entry.get("audio_streams", [])
@@ -1360,12 +1381,17 @@ def enrich_report(
     workers: int = 6,
     min_confidence: float = 0.80,
     retry_unresolved: bool = False,
+    deep: bool = False,
 ) -> dict:
     """Run language detection on all files and patch results into report entries.
 
     Modifies the report dict in-place — adds `detected_language`, `detection_confidence`,
     and `detection_method` fields to each audio_stream and subtitle_stream entry that
     has an undetermined language tag.
+
+    deep=True uses the pipeline.language escalation ladder (tiny 3×10s → tiny 5×30s
+    → small 5×30s → small 10×120s deep sweep). Requires the pipeline encoder to be
+    stopped — whisper on GPU can't coexist with NVENC. Sequential, not parallel.
 
     Returns the modified report.
     """
@@ -1417,7 +1443,30 @@ def enrich_report(
     # and to prevent overwriting concurrent changes (TMDb, scanner, etc.)
     SAVE_INTERVAL = 25
 
-    if use_whisper:
+    if use_whisper and deep:
+        logging.info("  Whisper: DEEP mode (escalation ladder, sequential)")
+        from tools.report_lock import patch_report
+
+        for i, entry in enumerate(to_process, 1):
+            results = process_file(
+                entry, use_whisper=True, whisper_all=whisper_all, audio_only=True, deep=True,
+            )
+            _patch_entry_from_results(entry, results, min_confidence, detection_stats)
+            # Persist this file's result immediately so a crash doesn't lose work
+            fp = entry.get("filepath")
+            def _patch(r: dict, _fp=fp, _new=entry) -> None:
+                for e in r.get("files", []):
+                    if e.get("filepath") == _fp:
+                        e["audio_streams"] = _new.get("audio_streams", e.get("audio_streams"))
+                        e["subtitle_streams"] = _new.get("subtitle_streams", e.get("subtitle_streams"))
+                        break
+            try:
+                patch_report(_patch)
+            except Exception as e:
+                logging.warning(f"  Patch failed for {os.path.basename(fp or '?')}: {e}")
+            if i % 10 == 0 or i == len(to_process):
+                logging.info(f"  Deep progress: {i}/{len(to_process)} — {detection_stats['detected']} detected, {detection_stats['failed']} failed")
+    elif use_whisper:
         logging.info("  Whisper: parallel mode (extract threads + GPU/CPU inference)")
         _run_whisper_parallel(
             to_process,
@@ -1505,10 +1554,17 @@ def _apply_detections_to_entry(
     whisper_all: bool,
     min_confidence: float,
     stats: dict,
+    deep: bool = False,
 ) -> None:
     """Process a single file entry and patch detection results in-place (whisper mode)."""
     # When running whisper, skip subtitle work entirely — audio only
-    results = process_file(entry, use_whisper=use_whisper, whisper_all=whisper_all, audio_only=use_whisper)
+    results = process_file(
+        entry,
+        use_whisper=use_whisper,
+        whisper_all=whisper_all,
+        audio_only=use_whisper,
+        deep=deep,
+    )
     _patch_entry_from_results(entry, results, min_confidence, stats)
 
 
@@ -1691,6 +1747,15 @@ def main():
         "--whisper-all", action="store_true", help="Run whisper on ALL audio tracks (verify existing tags)"
     )
     parser.add_argument(
+        "--deep",
+        action="store_true",
+        help=(
+            "Use the pipeline.language escalation ladder — tiny 3×10s, tiny 5×30s, "
+            "small 5×30s, small 10×120s spread across the runtime. Needs the encoder "
+            "stopped (whisper on GPU). Designed to resolve the last residual und files."
+        ),
+    )
+    parser.add_argument(
         "--retry-unresolved",
         action="store_true",
         help="Retry previously unresolved whisper tracks with longer samples at different offsets",
@@ -1705,7 +1770,7 @@ def main():
     parser.add_argument("--workers", type=int, default=6, help="Parallel workers for subtitle extraction (default: 6)")
     args = parser.parse_args()
 
-    use_whisper = args.whisper or args.whisper_all or args.spot_check > 0 or args.retry_unresolved
+    use_whisper = args.whisper or args.whisper_all or args.spot_check > 0 or args.retry_unresolved or args.deep
 
     # Check pipeline isn't encoding (whisper competes for GPU)
     if use_whisper:
@@ -1800,6 +1865,7 @@ def main():
             workers=args.workers,
             min_confidence=args.min_confidence,
             retry_unresolved=getattr(args, "retry_unresolved", False),
+            deep=getattr(args, "deep", False),
         )
         # Reload report after detection (enrich_report saves incrementally)
         report = read_report()
