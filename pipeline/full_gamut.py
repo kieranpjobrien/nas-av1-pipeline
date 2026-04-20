@@ -365,11 +365,94 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
                 )
                 # fall through to replace + DONE below
 
+    # === Output integrity check ===
+    # Last night's disaster: ffmpeg wrote a few seconds of frames, exited with code 0,
+    # but put the full-length duration in the container header. Duration check passed
+    # cleanly; we renamed garbage over a good original. Two defences now:
+    #   (a) the output must actually contain a video stream, and
+    #   (b) its average video bitrate must be at least 30% of the source's AND >= 200
+    #       kbps absolute. Anything below that is almost certainly an early-exit encode.
+    # A 7-second "encode" of a 1.9 GB H.264 source to a 41 MB output passes neither test.
+    try:
+        probe = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=codec_name,bit_rate",
+                "-show_entries", "format=bit_rate,size",
+                "-of", "default=noprint_wrappers=1",
+                dest_path,
+            ],
+            capture_output=True, text=True, timeout=30,
+            encoding="utf-8", errors="replace",
+        )
+        probe_out = {}
+        for line in probe.stdout.splitlines():
+            if "=" in line:
+                k, v = line.split("=", 1)
+                probe_out[k] = v
+        out_codec = probe_out.get("codec_name", "")
+        # format.bit_rate is overall file bitrate; use it as the floor if video stream
+        # doesn't advertise its own bit_rate (common for AV1).
+        try:
+            out_bitrate_kbps = int(probe_out.get("bit_rate") or 0) // 1000
+        except ValueError:
+            out_bitrate_kbps = 0
+        if not out_bitrate_kbps:
+            # Fall back to file-level bitrate
+            out_bitrate_kbps = int(probe_out.get("format.bit_rate") or 0) // 1000
+
+        # Compute source bitrate as sanity floor
+        input_bitrate_kbps = int((input_size / input_duration * 8 / 1000)) if input_duration > 0 else 0
+        min_ratio = 0.3
+        min_abs_kbps = 200
+        integrity_ok = (
+            out_codec  # has a video codec at all
+            and out_bitrate_kbps >= min_abs_kbps
+            and (input_bitrate_kbps == 0 or out_bitrate_kbps >= input_bitrate_kbps * min_ratio)
+        )
+        if not integrity_ok:
+            logging.error(
+                f"  Output integrity check FAILED: codec={out_codec!r} "
+                f"output_bitrate={out_bitrate_kbps}kbps input_bitrate={input_bitrate_kbps}kbps "
+                f"(minimum: {min_abs_kbps}kbps and >={min_ratio * 100:.0f}% of source)"
+            )
+            try:
+                os.remove(dest_path)
+            except OSError:
+                pass
+            # Apply the same retry-count logic as duration mismatch — one retry, then park.
+            MAX_INTEGRITY_RETRIES = 1
+            prev = state.get_file(filepath) or {}
+            retry_count = int(prev.get("integrity_retry_count", 0) or 0)
+            if retry_count < MAX_INTEGRITY_RETRIES:
+                state.set_file(
+                    filepath,
+                    FileStatus.PENDING,
+                    error=None,
+                    stage=None,
+                    reason=f"auto-retry {retry_count + 1}/{MAX_INTEGRITY_RETRIES}: output bitrate {out_bitrate_kbps}kbps too low",
+                    integrity_retry_count=retry_count + 1,
+                )
+            else:
+                state.set_file(
+                    filepath,
+                    FileStatus.ERROR,
+                    error=f"output integrity failed after {retry_count} retries (bitrate {out_bitrate_kbps}kbps)",
+                    stage="verify",
+                    integrity_retry_count=retry_count + 1,
+                )
+            return False
+    except Exception as e:
+        logging.warning(f"  Output integrity probe failed ({e}) — proceeding with duration-check-only verify.")
+
     # === Replace original (crash-safe) ===
+    # Backup policy: DO NOT auto-delete the .original.bak. We leave it in place so
+    # Synology's #recycle captures a safety copy on any subsequent housekeeping, AND
+    # any tool that wants to verify the replacement (e.g. a nightly audit) can still
+    # compare the sizes. Cleanup of old .bak files is a separate, manual/scheduled step.
     backup_path = filepath + ".original.bak"
     try:
-        # If clean-named target already exists (e.g. from a previous encode of a
-        # duplicate scene-tagged file), delete it first so rename succeeds
         if os.path.exists(final_path) and final_path != filepath:
             os.remove(final_path)
             logging.info(f"  Removed existing target: {final_name}")
@@ -377,9 +460,8 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
             os.rename(filepath, backup_path)
         if os.path.exists(dest_path):
             os.rename(dest_path, final_path)
-            logging.info(f"  Replaced: {final_name}")
-        if os.path.exists(backup_path):
-            os.remove(backup_path)
+            logging.info(f"  Replaced: {final_name} (backup kept at .original.bak)")
+        # NOTE: we intentionally DO NOT remove backup_path here. See commit message.
     except Exception as e:
         state.set_file(filepath, FileStatus.ERROR, error=f"replace failed: {e}", stage="replace")
         return False
@@ -418,6 +500,7 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
         upload_time_secs=round(upload_elapsed, 1),
         mode="full_gamut",
         duration_retry_count=0,
+        integrity_retry_count=0,
     )
 
     # Update global stats
