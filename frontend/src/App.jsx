@@ -61,7 +61,26 @@ export default function App() {
         zIndex: 100,
       }}>
         <span style={{ fontWeight: 700, fontSize: 16, marginRight: 16 }}>AV1 Pipeline</span>
-        {TABS.map(({ id, label }) => (
+        {/* Prominent "back to new UI" button — previously the Dashboard tab was styled
+            identically to the other tabs and easy to miss. This one jumps out. */}
+        <button
+          onClick={() => setTabPersist("dashboard")}
+          title="Back to the operator console"
+          style={{
+            background: PALETTE.accent,
+            color: "#fff",
+            border: "none",
+            borderRadius: 8,
+            padding: "8px 16px",
+            fontSize: 13,
+            fontWeight: 600,
+            cursor: "pointer",
+            marginRight: 8,
+          }}
+        >
+          ← Dashboard
+        </button>
+        {TABS.filter(({ id }) => id !== "dashboard").map(({ id, label }) => (
           <button
             key={id}
             onClick={() => setTabPersist(id)}

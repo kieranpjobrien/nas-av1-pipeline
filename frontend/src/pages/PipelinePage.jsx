@@ -491,18 +491,29 @@ export function PipelinePage({ wsData, onFileClick }) {
                 { key: "tmdb", label: "TMDb Metadata", pct: completion.pct_tmdb || 0, count: completion.has_tmdb || 0, colour: "#f59e0b" },
                 { key: "langs", label: "Langs Known", pct: completion.pct_langs_known || 0, count: completion.total - (completion.und_audio_files || 0) - (completion.und_sub_files || 0), colour: "#10b981" },
                 { key: "filename", label: "Clean Filenames", pct: completion.pct_filename || 0, count: completion.has_clean_filename || 0, colour: "#6366f1" },
-              ].map(({ key, label, pct: p, count, colour }) => (
-                <div key={key} onClick={() => handleBarClick(key)}
-                  style={{ minWidth: 100, textAlign: "center", cursor: "pointer", opacity: missingCategory && missingCategory !== key ? 0.5 : 1 }}>
-                  <div style={{ fontSize: 16, fontWeight: 700, fontFamily: "'JetBrains Mono', monospace", color: colour }}>
-                    {p.toFixed(1)}%
+              ].map(({ key, label, pct: p, count, colour }) => {
+                const remaining = Math.max(0, completion.total - count);
+                return (
+                  <div key={key} onClick={() => handleBarClick(key)}
+                    style={{ minWidth: 110, textAlign: "center", cursor: "pointer", opacity: missingCategory && missingCategory !== key ? 0.5 : 1 }}>
+                    <div style={{ fontSize: 16, fontWeight: 700, fontFamily: "'JetBrains Mono', monospace", color: colour }}>
+                      {p.toFixed(1)}%
+                    </div>
+                    <div style={{ margin: "4px auto", width: 80, height: 4, background: PALETTE.surfaceLight, borderRadius: 2, overflow: "hidden" }}>
+                      <div style={{ height: "100%", width: `${Math.min(p, 100)}%`, background: colour, borderRadius: 2 }} />
+                    </div>
+                    <div style={{ fontSize: 9, color: PALETTE.textMuted, lineHeight: 1.4 }}>
+                      {label}
+                      <br />
+                      <span style={{ color: remaining > 0 ? "#f59e0b" : PALETTE.textMuted, fontFamily: "'JetBrains Mono', monospace" }}>
+                        {remaining > 0 ? `${remaining.toLocaleString()} to go` : "✓ all done"}
+                      </span>
+                      <br />
+                      <span style={{ fontSize: 8, opacity: 0.7 }}>{count.toLocaleString()} / {completion.total.toLocaleString()}</span>
+                    </div>
                   </div>
-                  <div style={{ margin: "4px auto", width: 80, height: 4, background: PALETTE.surfaceLight, borderRadius: 2, overflow: "hidden" }}>
-                    <div style={{ height: "100%", width: `${Math.min(p, 100)}%`, background: colour, borderRadius: 2 }} />
-                  </div>
-                  <div style={{ fontSize: 9, color: PALETTE.textMuted }}>{label} ({count.toLocaleString()})</div>
-                </div>
-              ))}
+                );
+              })}
             </div>
 
             {/* Missing files drill-down */}

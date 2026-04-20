@@ -687,21 +687,32 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
     if _SCENE_TAG_RE.search(final_name):
         try:
             from pipeline.filename import clean_filename
-            proposed = clean_filename(final_path, library_type) or final_name
+            proposed = clean_filename(final_path, library_type)
         except Exception:
-            proposed = final_name
-        logging.error(
-            f"  Standards compliance FAILED (filename): on-disk name still has scene tags: "
-            f"{final_name!r} (proposed clean: {proposed!r})"
-        )
-        state.set_file(
-            filepath,
-            FileStatus.ERROR,
-            error=f"standards compliance: dirty filename {final_name!r}",
-            stage="verify",
-            compliance_violations=[f"filename not cleaned: {final_name!r} -> {proposed!r}"],
-        )
-        return False
+            proposed = None
+        # Only reject if the cleaner can actually propose a BETTER name. If the cleaner
+        # returns None or the same name, the dirty token (e.g. "MULTI" on Outlander
+        # S08E03 MULTI.mkv) is something our cleaner doesn't know how to strip — parking
+        # in ERROR forever just creates a stalemate. Accept with a warning instead.
+        if proposed and proposed != final_name:
+            logging.error(
+                f"  Standards compliance FAILED (filename): on-disk name has scene tags: "
+                f"{final_name!r} (cleaner proposes: {proposed!r})"
+            )
+            state.set_file(
+                filepath,
+                FileStatus.ERROR,
+                error=f"standards compliance: dirty filename {final_name!r}",
+                stage="verify",
+                compliance_violations=[f"filename not cleaned: {final_name!r} -> {proposed!r}"],
+            )
+            return False
+        else:
+            logging.warning(
+                f"  Filename has scene-tag-like token but cleaner can't propose a better "
+                f"alternative: {final_name!r} — accepting. Add a rule to pipeline.filename "
+                f"if this should be stripped."
+            )
 
     # === TMDb tags ===
     try:
