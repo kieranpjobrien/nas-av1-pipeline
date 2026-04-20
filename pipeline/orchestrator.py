@@ -66,11 +66,99 @@ class Orchestrator:
         logging.info(f"Received signal {signum}, shutting down...")
         self._shutdown.set()
 
+    def _write_session_env(self) -> None:
+        """Capture run-once environment (GPU, ffmpeg, git commit, config) to
+        pipeline_env.json so each encode_history entry can reference a small
+        session_id instead of carrying MBs of duplicate env info.
+        """
+        import json as _json
+        import platform
+        import subprocess as _sp
+        import uuid
+        from datetime import datetime, timezone
+
+        session_id = uuid.uuid4().hex[:12]
+
+        def _run(cmd, timeout=10):
+            try:
+                r = _sp.run(cmd, capture_output=True, text=True, timeout=timeout, encoding="utf-8", errors="replace")
+                return r.stdout.strip() if r.returncode == 0 else None
+            except Exception:
+                return None
+
+        # ffmpeg version — first line only
+        ffmpeg_v = _run(["ffmpeg", "-version"])
+        if ffmpeg_v:
+            ffmpeg_v = ffmpeg_v.splitlines()[0]
+
+        # GPU info via nvidia-smi
+        gpu_line = _run(["nvidia-smi", "--query-gpu=name,driver_version", "--format=csv,noheader"])
+        gpu_name, driver = (None, None)
+        if gpu_line:
+            parts = [p.strip() for p in gpu_line.split(",")]
+            gpu_name = parts[0] if parts else None
+            driver = parts[1] if len(parts) > 1 else None
+
+        # Project git commit (for bisection)
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        git_commit = _run(["git", "-C", project_root, "rev-parse", "HEAD"])
+        git_branch = _run(["git", "-C", project_root, "rev-parse", "--abbrev-ref", "HEAD"])
+        git_dirty = _run(["git", "-C", project_root, "status", "--porcelain"])
+
+        env = {
+            "session_id": session_id,
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "pid": os.getpid(),
+            "host": platform.node(),
+            "os": f"{platform.system()} {platform.release()}",
+            "python": platform.python_version(),
+            "ffmpeg_version": ffmpeg_v,
+            "gpu_name": gpu_name,
+            "gpu_driver": driver,
+            "git": {
+                "commit": git_commit,
+                "branch": git_branch,
+                "dirty": bool(git_dirty),
+            },
+            # A trimmed view of the effective config — full dump would be too noisy,
+            # but the encode-shaping fields are the ones we'd bisect against.
+            "config_subset": {
+                "gpu_concurrency": self.config.get("gpu_concurrency"),
+                "fetch_concurrency": self.config.get("fetch_concurrency"),
+                "video_codec": self.config.get("video_codec"),
+                "audio_mode": self.config.get("audio_mode"),
+                "audio_eac3_surround_bitrate": self.config.get("audio_eac3_surround_bitrate"),
+                "audio_eac3_stereo_bitrate": self.config.get("audio_eac3_stereo_bitrate"),
+                "strip_non_english_audio": self.config.get("strip_non_english_audio"),
+                "strip_non_english_subs": self.config.get("strip_non_english_subs"),
+                "verify_duration_tolerance_secs": self.config.get("verify_duration_tolerance_secs"),
+                "verify_duration_tolerance_pct": self.config.get("verify_duration_tolerance_pct"),
+                "history_source_hash": self.config.get("history_source_hash"),
+                "history_vmaf": self.config.get("history_vmaf"),
+            },
+        }
+        try:
+            env_path = os.path.join(self.staging_dir, "pipeline_env.json")
+            tmp = env_path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                _json.dump(env, f, indent=2, ensure_ascii=False)
+            os.replace(tmp, env_path)
+            logging.info(
+                f"  Session {session_id}: {gpu_name or '?'} · driver {driver or '?'} · "
+                f"{ffmpeg_v.split()[2] if ffmpeg_v else '?'} · git {(git_commit or '?')[:8]}{'-dirty' if git_dirty else ''}"
+            )
+        except Exception as e:
+            logging.warning(f"Failed to write pipeline_env.json: {e}")
+
     def run(self, full_gamut_queue: list[dict], gap_filler_queue: list[dict], enable_gap_filler: bool = True):
         """Main entry point."""
         logging.info("Orchestrator starting:")
         logging.info(f"  Full gamut: {len(full_gamut_queue)} files")
         logging.info(f"  Gap filler: {len(gap_filler_queue)} files ({'enabled' if enable_gap_filler else 'disabled'})")
+
+        # Write the per-session env snapshot so every encode_history entry can reference
+        # it via session_id rather than duplicating MBs of environment across thousands of rows.
+        self._write_session_env()
 
         for subdir in ("fetch", "encoded", "force", "whisper_tmp", "ocr_tmp"):
             os.makedirs(os.path.join(self.staging_dir, subdir), exist_ok=True)

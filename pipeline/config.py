@@ -64,6 +64,11 @@ DEFAULT_CONFIG = {
     # from reaching the other GPU. fetch_file uses an atomic state-lock claim so two workers
     # can never pick the same path.
     "fetch_concurrency": 2,
+    # Tier-3 telemetry opt-ins — both significantly slow encodes, leave off by default.
+    # history_source_hash: sha256 the source before replace. Adds ~60-90s/2GB over SMB.
+    # history_vmaf:        run libvmaf on a 10s sample vs output. Adds ~10-30s per encode.
+    "history_source_hash": False,
+    "history_vmaf": False,
     # Encoding: NVENC AV1 (RTX 4080)
     "video_codec": "av1_nvenc",
     "cq": {

@@ -102,6 +102,83 @@ def _probe_full(path: str) -> dict:
     }
 
 
+_RELEASE_GROUP_RE = re.compile(r"-([A-Za-z0-9]+)(?:\.(?:mkv|mp4|avi|m4v|ts))?$")
+_SOURCE_TYPE_RE = re.compile(
+    r"\b(BluRay|BDRip|BRRip|WEB-?DL|WEBRip|HDTV|HDRip|DVDRip|REMUX|UHD|4K|HDCAM)\b",
+    re.IGNORECASE,
+)
+
+
+def _parse_release_info(filename: str) -> dict:
+    """Extract release group + source type from a scene-tagged filename.
+
+    `Scrubs.S08E12.1080p.BluRay.DD5.1.x264-GRiMM.mkv` → {group: "GRiMM", source: "BluRay"}
+    `Scrubs - S08E12 - My Nah Nah Nah.mkv`            → {group: None, source: None}
+    """
+    stem = Path(filename).stem
+    group_m = _RELEASE_GROUP_RE.search(stem)
+    source_m = _SOURCE_TYPE_RE.search(stem)
+    return {
+        "group": group_m.group(1) if group_m else None,
+        "source_type": source_m.group(1).upper() if source_m else None,
+    }
+
+
+def _sha256_file(path: str) -> str | None:
+    """Streamed sha256. ~60-90s per 2 GB over SMB — use sparingly.
+
+    Returns None on I/O failure.
+    """
+    try:
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError:
+        return None
+
+
+def _vmaf_sample(source_path: str, output_path: str, sample_secs: int = 10) -> float | None:
+    """Compute VMAF on a `sample_secs` window centred on the middle of the output.
+
+    Returns the mean VMAF score (higher = better; ~90+ is excellent for most content)
+    or None if the probe fails. Runs at real-time or faster on NVENC hardware.
+    """
+    duration = get_duration(output_path) or 0
+    if duration < sample_secs:
+        return None
+    seek = max(0, (duration - sample_secs) / 2)
+    try:
+        result = subprocess.run(
+            [
+                "ffmpeg", "-nostdin",
+                "-ss", f"{seek:.1f}", "-t", f"{sample_secs}", "-i", output_path,
+                "-ss", f"{seek:.1f}", "-t", f"{sample_secs}", "-i", source_path,
+                "-lavfi",
+                "[0:v]setpts=PTS-STARTPTS[ref];"
+                "[1:v]setpts=PTS-STARTPTS[dist];"
+                "[dist][ref]libvmaf=log_fmt=json:log_path=-",
+                "-f", "null", "-",
+            ],
+            capture_output=True, text=True, timeout=180,
+            encoding="utf-8", errors="replace",
+        )
+        # libvmaf prints JSON to stdout when log_path=-
+        out = result.stdout or result.stderr
+        # Extract "VMAF score: X.XX" from stderr if JSON parsing fails
+        import re as _re
+        m = _re.search(r'"mean"\s*:\s*([0-9.]+)', out)
+        if m:
+            return round(float(m.group(1)), 2)
+        m = _re.search(r"VMAF score:\s*([0-9.]+)", result.stderr or "")
+        if m:
+            return round(float(m.group(1)), 2)
+    except Exception:
+        pass
+    return None
+
+
 def _append_history_jsonl(path, entry: dict) -> None:
     """Append a single JSONL entry with fsync. JSONL tolerates partial writes at the
     line level — the worst case from a crash is one truncated trailing line, which
@@ -282,10 +359,21 @@ def full_gamut(
         )
 
         # === STEP 6: Execute encode ===
-        success = _run_encode(cmd, actual_input, output_path, item, config, state, filepath)
+        encode_info: dict = {}
+        success = _run_encode(cmd, actual_input, output_path, item, config, state, filepath, result_out=encode_info)
         if not success:
             _cleanup(local_path, remuxed_path, output_path)
             return False
+        # Stash for later history write — full_gamut spans two functions so shuttle via
+        # state.extras. Temporary: cleared again on DONE.
+        state.set_file(
+            filepath,
+            FileStatus.PROCESSING,  # unchanged status, just extras
+            encode_retry_mode=encode_info.get("retry_mode"),
+            encode_attempts=encode_info.get("attempts"),
+            ffmpeg_stats={k: v for k, v in encode_info.items() if k.startswith("ffmpeg_")},
+            encode_params_used=dict(params),
+        )
 
         encode_elapsed = time.time() - encode_start
         output_size = os.path.getsize(output_path)
@@ -596,8 +684,6 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
             return round(bytes_ / secs / (1024 * 1024), 2)
 
         # Pull output probe if we have it; otherwise do one now on the final file.
-        # output_probe was set on the successful path above but only if integrity block
-        # ran without errors. Safe re-probe if we don't have it — cheap over SMB.
         out_probe = locals().get("output_probe") or {}
         if out_probe.get("error") or not out_probe.get("video"):
             out_probe = _probe_full(final_path)
@@ -607,13 +693,38 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
             or (int(input_size / input_duration * 8 / 1000) if input_duration > 0 else None)
         )
 
+        # Pull Tier 1 telemetry stashed earlier during encode
+        state_extras = state.get_file(filepath) or {}
+        ffmpeg_stats = state_extras.get("ffmpeg_stats") or {}
+        encode_retry_mode = state_extras.get("encode_retry_mode") or "none"
+        encode_attempts = state_extras.get("encode_attempts") or 1
+        encode_params_used = state_extras.get("encode_params_used") or {}
+
+        # Tier 2: session env (written once by orchestrator to pipeline_env.json)
+        session_env = read_json_safe(STAGING_DIR / "pipeline_env.json") or {}
+        session_id = session_env.get("session_id")
+
+        # Release-info (always on, cheap)
+        release_info = _parse_release_info(entry.get("filename") or final_name)
+
+        # Tier 3 opt-ins
+        extras_out: dict = {}
+        if config.get("history_source_hash"):
+            extras_out["source_sha256"] = _sha256_file(final_path + ".original.bak")  # source is in .bak after replace
+        if config.get("history_vmaf"):
+            vmaf_source = final_path + ".original.bak"
+            if os.path.exists(vmaf_source):
+                extras_out["vmaf_mean"] = _vmaf_sample(vmaf_source, final_path, sample_secs=10)
+
         history_entry = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
+            "session_id": session_id,
             "filepath": final_path,
             "filename": final_name,
             "library_type": library_type,
             "tier": entry.get("tier") or entry.get("tier_name") or "",
             "mode": entry.get("mode") or "full_gamut",
+            "release": release_info,
 
             # Sizes + timings + speeds
             "input_bytes": input_size,
@@ -635,6 +746,16 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
             "output_duration_secs": (
                 round((out_probe.get("format") or {}).get("duration_secs") or 0, 1) or None
             ),
+
+            # Tier 1 — encoder config + retry telemetry
+            "encode_params": encode_params_used,         # cq, preset, multipass, lookahead, maxrate, bufsize
+            "ffmpeg_stats": ffmpeg_stats,                # speed, fps, dup, drop, frame, size from stderr
+            "retry": {
+                "ffmpeg_retry_mode": encode_retry_mode,  # none / no_subs / audio_copy
+                "ffmpeg_attempts": encode_attempts,
+                "duration_retry_count": state_extras.get("duration_retry_count", 0),
+                "integrity_retry_count": state_extras.get("integrity_retry_count", 0),
+            },
 
             # Source stream details (pre-encode) — preserved so we can compare later
             "source": {
@@ -674,6 +795,9 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
                 "subs": out_probe.get("subs") or [],
                 "format": out_probe.get("format") or {},
             },
+
+            # Tier 3 opt-ins (empty unless enabled via config)
+            **extras_out,
         }
         history_file = STAGING_DIR / "encode_history.jsonl"
         _append_history_jsonl(history_file, history_entry)
@@ -684,6 +808,42 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
     return True
 
 
+def _parse_ffmpeg_final_stats(stderr: str) -> dict:
+    """Parse ffmpeg's final frame=/speed=/dup=/drop= summary line from captured stderr.
+
+    Returns whatever fields were found — all missing is valid too. Example input line:
+        frame= 1904 fps=15.3 q=-1.0 Lsize=62231KiB time=00:01:23.45 bitrate=... speed=1.5x dup=3 drop=7
+    """
+    stats: dict = {}
+    # Walk lines backwards, pick the last one that has frame= at the start
+    for line in reversed(stderr.splitlines()):
+        s = line.strip()
+        if s.startswith("frame=") or s.startswith("video:") or "speed=" in s:
+            # Extract k=v pairs (ffmpeg uses "key=value" with whitespace-padded values)
+            # Split on whitespace then key=val
+            import re as _re
+            for m in _re.finditer(r"(\w+)=\s*([^\s]+)", s):
+                k, v = m.group(1), m.group(2)
+                if k in ("frame", "fps", "q", "bitrate", "speed", "dup", "drop", "time", "Lsize", "size"):
+                    stats[f"ffmpeg_{k}"] = v
+            if stats:
+                break
+    # Clean up: frame/dup/drop to int, speed to float (strip trailing 'x')
+    for k in ("ffmpeg_frame", "ffmpeg_dup", "ffmpeg_drop"):
+        if k in stats:
+            try:
+                stats[k] = int(stats[k])
+            except ValueError:
+                pass
+    if "ffmpeg_speed" in stats:
+        v = stats["ffmpeg_speed"].rstrip("x")
+        try:
+            stats["ffmpeg_speed"] = float(v)
+        except ValueError:
+            pass
+    return stats
+
+
 def _run_encode(
     cmd: list[str],
     input_path: str,
@@ -692,6 +852,7 @@ def _run_encode(
     config: dict,
     state: PipelineState,
     filepath: str,
+    result_out: dict | None = None,
 ) -> bool:
     """Execute the ffmpeg encode command with up to three attempts.
 
@@ -701,14 +862,19 @@ def _run_encode(
 
     Progress is parsed from stderr (frame=/fps=/time=/speed= lines) and pushed into
     pipeline state so the dashboard can show live % / speed / ETA per file.
+
+    If `result_out` is provided, on success it is populated with:
+        retry_mode        — "none" | "no_subs" | "audio_copy"
+        attempts          — number of attempts taken (1..3)
+        ffmpeg_speed etc. — ffmpeg's own final stats line
     """
     from pipeline.ffmpeg import build_ffmpeg_cmd
 
-    retry_mode = "none"  # tracks what retry strategy we applied
-    attempts = 3  # up to 3 attempts total (original + 2 retries)
+    retry_mode = "none"
+    attempts_total = 3
     duration_secs = item.get("duration_seconds") or 0
 
-    for attempt in range(attempts):
+    for attempt in range(attempts_total):
         if attempt == 0:
             pass  # original cmd
         elif retry_mode == "no_subs":
@@ -718,7 +884,7 @@ def _run_encode(
             cmd = _build_audio_copy_cmd(cmd)
             logging.warning("  Retrying with audio passthrough (DTS timestamp workaround)")
         else:
-            break  # no more retry strategies
+            break
 
         try:
             process = subprocess.Popen(
@@ -733,19 +899,20 @@ def _run_encode(
             if process.returncode == 0:
                 if not os.path.exists(output_path):
                     continue
+                if result_out is not None:
+                    result_out["retry_mode"] = retry_mode
+                    result_out["attempts"] = attempt + 1
+                    result_out.update(_parse_ffmpeg_final_stats(stderr))
                 return True
 
             if os.path.exists(output_path):
                 os.remove(output_path)
 
             stderr_low = stderr.lower()
-            # Decide what to retry next
             if attempt == 0 and ("subtitle" in stderr_low or "codec none" in stderr_low):
                 retry_mode = "no_subs"
                 continue
             if "non-monotonic dts" in stderr_low or "non monotonic dts" in stderr_low:
-                # The DTS timestamp error mostly hits the output EAC-3 from DTS-HD MA sources.
-                # Falling back to audio copy skips the transcode and mostly sidesteps the bug.
                 if retry_mode != "audio_copy":
                     retry_mode = "audio_copy"
                     continue
