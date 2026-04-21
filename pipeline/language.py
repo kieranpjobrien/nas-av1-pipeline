@@ -460,70 +460,89 @@ def detect_audio_language_deep(
     audio_stream_index: int,
     duration_secs: float,
     min_confidence: float = 0.8,
+    enable_deep_sweep: bool = False,
 ) -> tuple[Optional[str], float, str]:
     """Progressive-effort detection ladder on GPU (whisper cuda/float16).
 
-    Optimised for SMB: extract once per stage rather than re-opening the source
-    for every step. Steps 1-2 share the 5 × 30s extraction (use first 3 for
-    step 1, all 5 for step 2). Step 3 reuses the same wavs with the small model.
-    Step 4 does a fresh spread-extraction because the offsets are different.
+    Steps (all on same pre-extracted 5 × 30s samples):
+        1. 3 × 30s, whisper-tiny
+        2. 5 × 30s, whisper-tiny (all samples)
+        3. 5 × 30s, whisper-SMALL
 
-    Ladder:
-        1. 3 × 30s samples, whisper-tiny (quick pass)
-        2. 5 × 30s samples, whisper-tiny (same wavs, all 5)
-        3. 5 × 30s samples, whisper-SMALL (same wavs, bigger model)
-        4. 10 × 120s at 5/10/15/.../50% of runtime, small — fresh extraction
+    enable_deep_sweep=True adds step 4:
+        4. 10 × 120s at 5/10/.../50% of runtime, whisper-small.
 
-    Short files (<20 min): step 4 scales sample_duration down so 10 samples fit.
+    Step 4 is an ADDITIONAL ~15-30 min per REMUX file on SMB — don't run it
+    automatically across the whole library. Use it as a surgical follow-up on
+    files that stopped at `whisper_small_5x30_low_conf` in the first pass.
 
-    Returns (lang, confidence, method) — method names the winning step.
-    Caller MUST ensure the NVENC encoder is stopped — whisper owns the GPU.
+    Returns (lang, confidence, method). Logs timing per file so you can see
+    which files got stuck where. Caller MUST stop the NVENC encoder first.
     """
-    # --- Extract once: 5 × 30s spread samples. Used for steps 1, 2 AND 3. ---
+    import time as _time
+
+    name = os.path.basename(filepath)
+    t0 = _time.monotonic()
+
+    # --- Extract once: 5 × 30s spread samples. Used for steps 1, 2, 3. ---
     samples = _extract_all_audio_samples(
         filepath, [audio_stream_index], duration_secs, sample_duration=30
     )
     wavs = samples.get(audio_stream_index, [])
+    t_extract = _time.monotonic() - t0
     if not wavs:
+        logging.info(f"    {name} a:{audio_stream_index} — extraction failed ({t_extract:.1f}s)")
         return "und", 0.0, "whisper_exhausted"
 
     try:
-        # --- Step 1: first 3 samples, tiny ---
         lang, conf = _run_whisper_on(wavs[:3], model_size="tiny")
         if lang and conf >= min_confidence:
+            logging.info(f"    {name} a:{audio_stream_index} → {lang} ({conf:.2f}) tiny_3x30  {_time.monotonic() - t0:.1f}s")
             return lang, conf, "whisper_tiny_3x30"
 
-        # --- Step 2: all 5 samples, tiny ---
         if len(wavs) > 3:
             lang2, conf2 = _run_whisper_on(wavs, model_size="tiny")
             if lang2 and conf2 >= min_confidence:
+                logging.info(f"    {name} a:{audio_stream_index} → {lang2} ({conf2:.2f}) tiny_5x30  {_time.monotonic() - t0:.1f}s")
                 return lang2, conf2, "whisper_tiny_5x30"
 
-        # --- Step 3: same 5 samples, whisper-SMALL ---
         lang3, conf3 = _run_whisper_on(wavs, model_size="small")
         if lang3 and conf3 >= min_confidence:
+            logging.info(f"    {name} a:{audio_stream_index} → {lang3} ({conf3:.2f}) small_5x30  {_time.monotonic() - t0:.1f}s")
             return lang3, conf3, "whisper_small_5x30"
     finally:
         for w in wavs:
             _safe_remove(w)
 
-    # --- Step 4: deep sweep — 10 × 120s at 5/10/.../50%, small ---
+    # Step 3 gave a best-guess but below threshold — record it even if we don't
+    # escalate to the expensive step 4.
+    if not enable_deep_sweep:
+        if lang3 and conf3 > 0:
+            logging.info(f"    {name} a:{audio_stream_index} → {lang3} ({conf3:.2f}) small_5x30_low_conf  {_time.monotonic() - t0:.1f}s")
+            return lang3, conf3, "whisper_small_5x30_low_conf"
+        logging.info(f"    {name} a:{audio_stream_index} → und (step 3 exhausted)  {_time.monotonic() - t0:.1f}s")
+        return "und", 0.0, "whisper_exhausted_step3"
+
+    # --- Step 4: deep sweep (opt-in via enable_deep_sweep) ---
     pct_offsets = [0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50]
     if duration_secs >= 1200:
         sample_dur = 120
     else:
         sample_dur = max(5, int(duration_secs * 0.66 / len(pct_offsets)))
     offsets = [max(0, int(duration_secs * p)) for p in pct_offsets]
+    t_step4 = _time.monotonic()
     wavs4 = _extract_samples_at_offsets(filepath, audio_stream_index, offsets, sample_dur)
     try:
         lang4, conf4 = _run_whisper_on(wavs4, model_size="small")
         if lang4 and conf4 > 0:
             method = "whisper_small_deep" if conf4 >= min_confidence else "whisper_small_deep_low_conf"
+            logging.info(f"    {name} a:{audio_stream_index} → {lang4} ({conf4:.2f}) {method}  step4 {_time.monotonic() - t_step4:.1f}s, total {_time.monotonic() - t0:.1f}s")
             return lang4, conf4, method
     finally:
         for w in wavs4:
             _safe_remove(w)
 
+    logging.info(f"    {name} a:{audio_stream_index} → und (fully exhausted)  {_time.monotonic() - t0:.1f}s")
     return "und", 0.0, "whisper_exhausted"
 
 
