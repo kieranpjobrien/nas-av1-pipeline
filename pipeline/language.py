@@ -369,16 +369,19 @@ def _assert_encoder_not_running() -> None:
     on the same chip triggered the 2026-04-21 BSOD. Caller must stop the pipeline
     before invoking the whisper ladder. Sample extraction (CPU/ffmpeg-decode) is
     safe while encoder is running; only whisper inference is the exclusive-GPU step.
+
+    The gap_filler-only pipeline is fine — it doesn't use the GPU, just remote
+    mkvmerge over SSH. Only block if the FULL pipeline (with GPU workers) is running.
     """
+    import json as _json
+    import urllib.request as _req
     try:
-        import urllib.request as _req
         resp = _req.urlopen("http://localhost:8002/api/process/pipeline/status", timeout=2)
-        data = json.loads(resp.read())
+        data = _json.loads(resp.read())
         if data.get("status") == "running":
             raise RuntimeError(
-                "Pipeline is currently encoding — stop it before running whisper on GPU "
-                "(POST /api/process/pipeline/stop). Sample extraction is safe concurrently; "
-                "only the whisper inference step needs exclusive GPU access."
+                "Full pipeline is currently encoding — stop it before running whisper on GPU "
+                "(POST /api/process/pipeline/stop). gap_filler-only is fine."
             )
     except (ConnectionError, OSError, TimeoutError):
         pass  # backend not reachable, assume stand-alone run
