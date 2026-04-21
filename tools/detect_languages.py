@@ -1225,115 +1225,87 @@ def _escalating_whisper_detect(
     return (lang, conf or 0.0)
 
 
+_whisper_gpu_lock = None  # Set lazily — faster-whisper isn't thread-safe for concurrent transcribe
+
+
 def _run_deep_parallel(
     to_process: list,
     whisper_all: bool,
     min_confidence: float,
     detection_stats: dict,
 ) -> None:
-    """Deep-mode orchestration with parallel SMB extraction + serial GPU inference.
+    """Deep-mode orchestration: N workers each run the full ladder per file.
+    SMB extraction happens in parallel across workers (that's the slow part).
+    Whisper inference is serialised via a module-level GPU lock.
 
-    3 extractor threads do the ffmpeg work (SMB-bound, thread-friendly). Main
-    thread owns the GPU and drives the whisper ladder. Each file is processed
-    ONCE by process_file(...deep=True) which runs the ladder and mutates the
-    entry's stream data in-place. Results are persisted per-file via patch_report.
-
-    Architecture justifies the complexity: a single-threaded sequential loop
-    spends 90% wallclock waiting on ~20 GB REMUX SMB reads for audio extraction.
-    Three parallel extractors keep the GPU fed.
+    The previous prefetch-then-inference design double-extracted (prefetch +
+    process_file both called ffmpeg). This one avoids that: each worker does
+    extract-then-infer once per file, and only the inference step is blocked
+    on the GPU.
     """
     import threading
-    from queue import Queue, Empty
+    from concurrent.futures import ThreadPoolExecutor, as_completed
 
     from tools.report_lock import patch_report
 
+    global _whisper_gpu_lock
+    if _whisper_gpu_lock is None:
+        _whisper_gpu_lock = threading.Lock()
+
+    # Monkey-patch pipeline.language._run_whisper_on to hold the GPU lock
+    # during inference. Sample extraction (the slow SMB step) runs free.
+    from pipeline import language as _lang
+    _orig_run_whisper_on = _lang._run_whisper_on
+
+    def _locked_run_whisper_on(wavs, model_size):
+        with _whisper_gpu_lock:
+            return _orig_run_whisper_on(wavs, model_size)
+
+    _lang._run_whisper_on = _locked_run_whisper_on
     total = len(to_process)
-    logging.info(f"  Deep parallel: 3 extractors feeding GPU for {total} files")
+    logging.info(f"  Deep parallel: 3 workers (extract parallel, GPU inference serialised) for {total} files")
 
-    # Producer/consumer queues:
-    #   work_q: (idx, entry) → extractor threads
-    #   ready_q: (idx, entry) when the extractor has finished its SMB pre-read.
-    # Because process_file(deep=True) itself calls _extract_all_audio_samples
-    # internally, the "extraction" step here is really just making sure the
-    # source file is fresh in the OS cache / SMB cache. We do this by reading
-    # the first + middle + tail portions of each source into the cache via a
-    # cheap ffmpeg -c copy to null, so by the time the main GPU thread processes
-    # the file, its samples extract quickly.
-    work_q: Queue = Queue()
-    ready_q: Queue = Queue(maxsize=3)  # small buffer — don't over-prefetch
-    done = threading.Event()
+    patch_lock = threading.Lock()
+    completed_count = [0]
 
-    def _prefetch(filepath: str) -> None:
-        """Warm the OS/SMB cache for this source by streaming a bit of audio.
-        Cheap fire-and-forget — we don't need the output, just the reads."""
+    def _work(idx: int, entry: dict) -> None:
         try:
-            subprocess.run(
-                [
-                    "ffmpeg", "-hide_banner", "-loglevel", "error",
-                    "-i", filepath,
-                    "-map", "0:a?", "-c", "copy",
-                    "-t", "120",  # seed ~2 min of audio into OS cache
-                    "-f", "null", "-",
-                ],
-                capture_output=True, timeout=60,
+            results = process_file(
+                entry, use_whisper=True, whisper_all=whisper_all, audio_only=True, deep=True,
             )
-        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-            pass
+            _patch_entry_from_results(entry, results, min_confidence, detection_stats)
 
-    def _extractor_worker() -> None:
-        while not done.is_set():
+            fp = entry.get("filepath")
+            def _patch(r: dict, _fp=fp, _new=entry) -> None:
+                for e in r.get("files", []):
+                    if e.get("filepath") == _fp:
+                        e["audio_streams"] = _new.get("audio_streams", e.get("audio_streams"))
+                        e["subtitle_streams"] = _new.get("subtitle_streams", e.get("subtitle_streams"))
+                        break
             try:
-                item = work_q.get(timeout=1)
-            except Empty:
-                continue
-            if item is None:
-                work_q.task_done()
-                break
-            idx, entry = item
-            _prefetch(entry.get("filepath", ""))
-            ready_q.put((idx, entry))
-            work_q.task_done()
-
-    # Kick off 3 extractor threads
-    threads = [threading.Thread(target=_extractor_worker, daemon=True) for _ in range(3)]
-    for t in threads:
-        t.start()
-
-    # Enqueue all work
-    for idx, entry in enumerate(to_process, 1):
-        work_q.put((idx, entry))
-    for _ in threads:
-        work_q.put(None)  # sentinel
-
-    # Main thread: consume prefetched files, run ladder (GPU), persist
-    for i in range(total):
-        idx, entry = ready_q.get()
-        results = process_file(
-            entry, use_whisper=True, whisper_all=whisper_all, audio_only=True, deep=True,
-        )
-        _patch_entry_from_results(entry, results, min_confidence, detection_stats)
-
-        fp = entry.get("filepath")
-        def _patch(r: dict, _fp=fp, _new=entry) -> None:
-            for e in r.get("files", []):
-                if e.get("filepath") == _fp:
-                    e["audio_streams"] = _new.get("audio_streams", e.get("audio_streams"))
-                    e["subtitle_streams"] = _new.get("subtitle_streams", e.get("subtitle_streams"))
-                    break
-        try:
-            patch_report(_patch)
+                with patch_lock:
+                    patch_report(_patch)
+            except Exception as e:
+                logging.warning(f"  Patch failed for {os.path.basename(fp or '?')}: {e}")
         except Exception as e:
-            logging.warning(f"  Patch failed for {os.path.basename(fp or '?')}: {e}")
+            logging.warning(f"  Worker failed for file {idx}: {e}")
+        finally:
+            completed_count[0] += 1
+            c = completed_count[0]
+            if c % 10 == 0 or c == total:
+                logging.info(
+                    f"  Deep progress: {c}/{total} — "
+                    f"{detection_stats.get('detected', 0)} detected, "
+                    f"{detection_stats.get('failed', 0)} failed"
+                )
 
-        if idx % 10 == 0 or idx == total:
-            logging.info(
-                f"  Deep progress: {idx}/{total} — "
-                f"{detection_stats['detected']} detected, {detection_stats['failed']} failed"
-            )
-
-    done.set()
-    for t in threads:
-        t.join(timeout=5)
+    try:
+        with ThreadPoolExecutor(max_workers=3, thread_name_prefix="deep") as pool:
+            futures = [pool.submit(_work, i + 1, entry) for i, entry in enumerate(to_process)]
+            for _ in as_completed(futures):
+                pass
+    finally:
+        _lang._run_whisper_on = _orig_run_whisper_on  # restore
 
 
 def _run_whisper_parallel(
