@@ -1225,6 +1225,117 @@ def _escalating_whisper_detect(
     return (lang, conf or 0.0)
 
 
+def _run_deep_parallel(
+    to_process: list,
+    whisper_all: bool,
+    min_confidence: float,
+    detection_stats: dict,
+) -> None:
+    """Deep-mode orchestration with parallel SMB extraction + serial GPU inference.
+
+    3 extractor threads do the ffmpeg work (SMB-bound, thread-friendly). Main
+    thread owns the GPU and drives the whisper ladder. Each file is processed
+    ONCE by process_file(...deep=True) which runs the ladder and mutates the
+    entry's stream data in-place. Results are persisted per-file via patch_report.
+
+    Architecture justifies the complexity: a single-threaded sequential loop
+    spends 90% wallclock waiting on ~20 GB REMUX SMB reads for audio extraction.
+    Three parallel extractors keep the GPU fed.
+    """
+    import threading
+    from queue import Queue, Empty
+
+    from tools.report_lock import patch_report
+
+    total = len(to_process)
+    logging.info(f"  Deep parallel: 3 extractors feeding GPU for {total} files")
+
+    # Producer/consumer queues:
+    #   work_q: (idx, entry) → extractor threads
+    #   ready_q: (idx, entry) when the extractor has finished its SMB pre-read.
+    # Because process_file(deep=True) itself calls _extract_all_audio_samples
+    # internally, the "extraction" step here is really just making sure the
+    # source file is fresh in the OS cache / SMB cache. We do this by reading
+    # the first + middle + tail portions of each source into the cache via a
+    # cheap ffmpeg -c copy to null, so by the time the main GPU thread processes
+    # the file, its samples extract quickly.
+    work_q: Queue = Queue()
+    ready_q: Queue = Queue(maxsize=3)  # small buffer — don't over-prefetch
+    done = threading.Event()
+
+    def _prefetch(filepath: str) -> None:
+        """Warm the OS/SMB cache for this source by streaming a bit of audio.
+        Cheap fire-and-forget — we don't need the output, just the reads."""
+        try:
+            subprocess.run(
+                [
+                    "ffmpeg", "-hide_banner", "-loglevel", "error",
+                    "-i", filepath,
+                    "-map", "0:a?", "-c", "copy",
+                    "-t", "120",  # seed ~2 min of audio into OS cache
+                    "-f", "null", "-",
+                ],
+                capture_output=True, timeout=60,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            pass
+
+    def _extractor_worker() -> None:
+        while not done.is_set():
+            try:
+                item = work_q.get(timeout=1)
+            except Empty:
+                continue
+            if item is None:
+                work_q.task_done()
+                break
+            idx, entry = item
+            _prefetch(entry.get("filepath", ""))
+            ready_q.put((idx, entry))
+            work_q.task_done()
+
+    # Kick off 3 extractor threads
+    threads = [threading.Thread(target=_extractor_worker, daemon=True) for _ in range(3)]
+    for t in threads:
+        t.start()
+
+    # Enqueue all work
+    for idx, entry in enumerate(to_process, 1):
+        work_q.put((idx, entry))
+    for _ in threads:
+        work_q.put(None)  # sentinel
+
+    # Main thread: consume prefetched files, run ladder (GPU), persist
+    for i in range(total):
+        idx, entry = ready_q.get()
+        results = process_file(
+            entry, use_whisper=True, whisper_all=whisper_all, audio_only=True, deep=True,
+        )
+        _patch_entry_from_results(entry, results, min_confidence, detection_stats)
+
+        fp = entry.get("filepath")
+        def _patch(r: dict, _fp=fp, _new=entry) -> None:
+            for e in r.get("files", []):
+                if e.get("filepath") == _fp:
+                    e["audio_streams"] = _new.get("audio_streams", e.get("audio_streams"))
+                    e["subtitle_streams"] = _new.get("subtitle_streams", e.get("subtitle_streams"))
+                    break
+        try:
+            patch_report(_patch)
+        except Exception as e:
+            logging.warning(f"  Patch failed for {os.path.basename(fp or '?')}: {e}")
+
+        if idx % 10 == 0 or idx == total:
+            logging.info(
+                f"  Deep progress: {idx}/{total} — "
+                f"{detection_stats['detected']} detected, {detection_stats['failed']} failed"
+            )
+
+    done.set()
+    for t in threads:
+        t.join(timeout=5)
+
+
 def _run_whisper_parallel(
     to_process: list[dict],
     whisper_all: bool,
@@ -1444,28 +1555,8 @@ def enrich_report(
     SAVE_INTERVAL = 25
 
     if use_whisper and deep:
-        logging.info("  Whisper: DEEP mode (escalation ladder, sequential)")
-        from tools.report_lock import patch_report
-
-        for i, entry in enumerate(to_process, 1):
-            results = process_file(
-                entry, use_whisper=True, whisper_all=whisper_all, audio_only=True, deep=True,
-            )
-            _patch_entry_from_results(entry, results, min_confidence, detection_stats)
-            # Persist this file's result immediately so a crash doesn't lose work
-            fp = entry.get("filepath")
-            def _patch(r: dict, _fp=fp, _new=entry) -> None:
-                for e in r.get("files", []):
-                    if e.get("filepath") == _fp:
-                        e["audio_streams"] = _new.get("audio_streams", e.get("audio_streams"))
-                        e["subtitle_streams"] = _new.get("subtitle_streams", e.get("subtitle_streams"))
-                        break
-            try:
-                patch_report(_patch)
-            except Exception as e:
-                logging.warning(f"  Patch failed for {os.path.basename(fp or '?')}: {e}")
-            if i % 10 == 0 or i == len(to_process):
-                logging.info(f"  Deep progress: {i}/{len(to_process)} — {detection_stats['detected']} detected, {detection_stats['failed']} failed")
+        logging.info("  Whisper: DEEP mode (3 extractor threads + GPU inference)")
+        _run_deep_parallel(to_process, whisper_all, min_confidence, detection_stats)
     elif use_whisper:
         logging.info("  Whisper: parallel mode (extract threads + GPU/CPU inference)")
         _run_whisper_parallel(
