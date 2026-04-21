@@ -1225,87 +1225,197 @@ def _escalating_whisper_detect(
     return (lang, conf or 0.0)
 
 
-_whisper_gpu_lock = None  # Set lazily — faster-whisper isn't thread-safe for concurrent transcribe
-
-
 def _run_deep_parallel(
     to_process: list,
     whisper_all: bool,
     min_confidence: float,
     detection_stats: dict,
 ) -> None:
-    """Deep-mode orchestration: N workers each run the full ladder per file.
-    SMB extraction happens in parallel across workers (that's the slow part).
-    Whisper inference is serialised via a module-level GPU lock.
+    """Pass-based deep detection — sweeps ALL files at each pass before moving on.
 
-    The previous prefetch-then-inference design double-extracted (prefetch +
-    process_file both called ffmpeg). This one avoids that: each worker does
-    extract-then-infer once per file, and only the inference step is blocked
-    on the GPU.
+    Previous per-file ladder spent minutes processing one file through all steps
+    before touching file 2. On an SMB-bound residual pool of 433 REMUX files,
+    that meant GPU idle 90% of the time waiting on extraction.
+
+    New architecture (all on GPU, sample extraction in parallel):
+
+      Pass 1 — extract 5 × 30s per file (concurrent via N extractor threads),
+               run tiny on first 3 samples. Most files resolve here.
+      Pass 2 — same wavs, tiny on ALL 5 samples. Slightly more signal.
+      Pass 3 — same wavs, whisper-SMALL on all 5. Smarter model.
+      (Pass 4 / deep sweep is opt-in elsewhere.)
+
+    Samples reused across all 3 passes (same 5 × 30s wavs). Extraction cost
+    is paid ONCE per file. GPU stays busy because pass 1 inference overlaps
+    with subsequent files' extraction.
     """
     import threading
     from concurrent.futures import ThreadPoolExecutor, as_completed
+    from queue import Queue, Empty
 
     from tools.report_lock import patch_report
+    from pipeline.language import (
+        _extract_all_audio_samples,
+        _run_whisper_on,
+        _safe_remove,
+        UND_LANGS,
+    )
 
-    global _whisper_gpu_lock
-    if _whisper_gpu_lock is None:
-        _whisper_gpu_lock = threading.Lock()
-
-    # Monkey-patch pipeline.language._run_whisper_on to hold the GPU lock
-    # during inference. Sample extraction (the slow SMB step) runs free.
-    from pipeline import language as _lang
-    _orig_run_whisper_on = _lang._run_whisper_on
-
-    def _locked_run_whisper_on(wavs, model_size):
-        with _whisper_gpu_lock:
-            return _orig_run_whisper_on(wavs, model_size)
-
-    _lang._run_whisper_on = _locked_run_whisper_on
     total = len(to_process)
-    logging.info(f"  Deep parallel: 3 workers (extract parallel, GPU inference serialised) for {total} files")
-
     patch_lock = threading.Lock()
-    completed_count = [0]
 
-    def _work(idx: int, entry: dict) -> None:
+    # --- Build the work list: (entry, audio_idx, duration) for every und audio track ---
+    def _und_audio_tracks(entry: dict):
+        for i, a in enumerate(entry.get("audio_streams", []) or []):
+            lang = (a.get("language") or "und").lower().strip()
+            if whisper_all or lang in UND_LANGS:
+                yield (entry, i, entry.get("duration_seconds", 0))
+
+    work_items = []
+    for e in to_process:
+        work_items.extend(_und_audio_tracks(e))
+
+    total_tracks = len(work_items)
+    logging.info(
+        f"  Deep pass-based: {total} files, {total_tracks} audio tracks to detect. "
+        f"3 extractor threads feeding GPU passes."
+    )
+
+    # --- Persist a detection for one track ---
+    def _persist(entry, aidx, lang, conf, method):
+        if aidx >= len(entry.get("audio_streams", []) or []):
+            return
+        stream = entry["audio_streams"][aidx]
+        if lang and lang != "und" and conf >= min_confidence:
+            stream["detected_language"] = lang
+            stream["detection_confidence"] = round(conf, 3)
+            stream["detection_method"] = method
+            detection_stats["detected"] = detection_stats.get("detected", 0) + 1
+        else:
+            stream["detected_language"] = lang if lang else None
+            stream["detection_confidence"] = round(conf, 3) if conf else 0.0
+            stream["detection_method"] = method
+            detection_stats["failed"] = detection_stats.get("failed", 0) + 1
+        stream["whisper_attempted"] = True
+
+        fp = entry.get("filepath")
+        def _patch(r: dict, _fp=fp, _new=entry) -> None:
+            for e in r.get("files", []):
+                if e.get("filepath") == _fp:
+                    e["audio_streams"] = _new.get("audio_streams", e.get("audio_streams"))
+                    break
         try:
-            results = process_file(
-                entry, use_whisper=True, whisper_all=whisper_all, audio_only=True, deep=True,
-            )
-            _patch_entry_from_results(entry, results, min_confidence, detection_stats)
-
-            fp = entry.get("filepath")
-            def _patch(r: dict, _fp=fp, _new=entry) -> None:
-                for e in r.get("files", []):
-                    if e.get("filepath") == _fp:
-                        e["audio_streams"] = _new.get("audio_streams", e.get("audio_streams"))
-                        e["subtitle_streams"] = _new.get("subtitle_streams", e.get("subtitle_streams"))
-                        break
-            try:
-                with patch_lock:
-                    patch_report(_patch)
-            except Exception as e:
-                logging.warning(f"  Patch failed for {os.path.basename(fp or '?')}: {e}")
+            with patch_lock:
+                patch_report(_patch)
         except Exception as e:
-            logging.warning(f"  Worker failed for file {idx}: {e}")
-        finally:
-            completed_count[0] += 1
-            c = completed_count[0]
-            if c % 10 == 0 or c == total:
-                logging.info(
-                    f"  Deep progress: {c}/{total} — "
-                    f"{detection_stats.get('detected', 0)} detected, "
-                    f"{detection_stats.get('failed', 0)} failed"
-                )
+            logging.warning(f"  Patch failed for {os.path.basename(fp or '?')}: {e}")
 
-    try:
-        with ThreadPoolExecutor(max_workers=3, thread_name_prefix="deep") as pool:
-            futures = [pool.submit(_work, i + 1, entry) for i, entry in enumerate(to_process)]
-            for _ in as_completed(futures):
-                pass
-    finally:
-        _lang._run_whisper_on = _orig_run_whisper_on  # restore
+    # --- Extractor pool (parallel SMB) ---
+    extract_q: Queue = Queue(maxsize=6)  # bounded buffer
+
+    def _extract_worker(items):
+        for entry, aidx, dur in items:
+            try:
+                samples = _extract_all_audio_samples(
+                    entry.get("filepath", ""), [aidx], dur, sample_duration=30
+                )
+                wavs = samples.get(aidx, [])
+            except Exception as e:
+                logging.debug(f"  extract failed {entry.get('filename')}: {e}")
+                wavs = []
+            extract_q.put((entry, aidx, dur, wavs))
+        extract_q.put(None)  # sentinel per worker
+
+    # Split work across 3 extractor threads (round-robin)
+    extractor_count = 3
+    chunks = [work_items[i::extractor_count] for i in range(extractor_count)]
+    extractor_threads = [
+        threading.Thread(target=_extract_worker, args=(c,), daemon=True) for c in chunks
+    ]
+    for t in extractor_threads:
+        t.start()
+
+    # --- Pass 1: tiny on first 3 samples, consume extract_q as it fills ---
+    residuals_p2: list = []  # (entry, aidx, dur, wavs) that failed pass 1
+    sentinels_seen = 0
+    consumed = 0
+    p1_logged = 0
+    while sentinels_seen < extractor_count:
+        item = extract_q.get()
+        if item is None:
+            sentinels_seen += 1
+            continue
+        entry, aidx, dur, wavs = item
+        consumed += 1
+        name = entry.get("filename", "?")
+        if not wavs:
+            _persist(entry, aidx, "und", 0.0, "whisper_exhausted_no_samples")
+            continue
+        lang, conf = _run_whisper_on(wavs[:3], model_size="tiny")
+        if lang and conf >= min_confidence:
+            _persist(entry, aidx, lang, conf, "whisper_tiny_3x30")
+            for w in wavs:
+                _safe_remove(w)
+        else:
+            residuals_p2.append((entry, aidx, dur, wavs))
+
+        if consumed % 25 == 0 or consumed == total_tracks:
+            logging.info(
+                f"  Pass 1: {consumed}/{total_tracks} attempted — "
+                f"{detection_stats.get('detected', 0)} resolved, "
+                f"{len(residuals_p2)} queued for pass 2"
+            )
+
+    for t in extractor_threads:
+        t.join(timeout=5)
+
+    logging.info(f"  Pass 1 done — {len(residuals_p2)} residuals for pass 2 (tiny all-5)")
+
+    # --- Pass 2: tiny on ALL 5 samples (same wavs) ---
+    residuals_p3: list = []
+    for i, (entry, aidx, dur, wavs) in enumerate(residuals_p2, 1):
+        lang, conf = _run_whisper_on(wavs, model_size="tiny")
+        if lang and conf >= min_confidence:
+            _persist(entry, aidx, lang, conf, "whisper_tiny_5x30")
+            for w in wavs:
+                _safe_remove(w)
+        else:
+            residuals_p3.append((entry, aidx, dur, wavs))
+        if i % 25 == 0 or i == len(residuals_p2):
+            logging.info(
+                f"  Pass 2: {i}/{len(residuals_p2)} attempted — "
+                f"{len(residuals_p3)} residuals so far"
+            )
+
+    logging.info(f"  Pass 2 done — {len(residuals_p3)} residuals for pass 3 (small all-5)")
+
+    # --- Pass 3: small on ALL 5 samples (same wavs) ---
+    exhausted: list = []
+    for i, (entry, aidx, dur, wavs) in enumerate(residuals_p3, 1):
+        lang, conf = _run_whisper_on(wavs, model_size="small")
+        if lang and conf >= min_confidence:
+            _persist(entry, aidx, lang, conf, "whisper_small_5x30")
+        else:
+            # Record the best guess even if below threshold — useful signal
+            if lang and conf > 0:
+                _persist(entry, aidx, lang, conf, "whisper_small_5x30_low_conf")
+            else:
+                _persist(entry, aidx, "und", 0.0, "whisper_exhausted_step3")
+            exhausted.append((entry, aidx, dur, wavs))
+        for w in wavs:
+            _safe_remove(w)
+        if i % 25 == 0 or i == len(residuals_p3):
+            logging.info(
+                f"  Pass 3: {i}/{len(residuals_p3)} attempted — "
+                f"{len(exhausted)} still ambiguous"
+            )
+
+    logging.info(
+        f"  Deep pass-based complete — "
+        f"{detection_stats.get('detected', 0)} detected, "
+        f"{detection_stats.get('failed', 0)} failed/ambiguous, "
+        f"{len(exhausted)} files where even whisper-small-5x30 couldn't decide"
+    )
 
 
 def _run_whisper_parallel(
