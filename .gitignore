@@ -23,8 +23,17 @@ frontend/dist/
 # Generated data / reports
 media_report.json
 *.csv
+*.tsv
+library_catalog.tsv
+library_summary.txt
 series_filenames.txt
 series_fix_ext_report.txt
+
+# Local scratch scripts (one-offs, smoke tests)
+scratch/
+
+# Runtime locks
+.claude/scheduled_tasks.lock
 
 # Database files
 databaseBackup*

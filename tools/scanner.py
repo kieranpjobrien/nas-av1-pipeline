@@ -230,12 +230,16 @@ def extract_info(filepath: str, probe_data: dict, library_type: str) -> dict:
             if not (sib_stem == stem or sib_stem.startswith(stem + ".")):
                 continue
             # Parse language from the portion after the stem (e.g. ".en" or ".en.hi" -> "en").
+            # First language-looking token wins — subsequent ones go into flags (so
+            # ".en.hi.srt" correctly parses as lang="en" flags=["hi"] not lang="hi").
+            # The old check `not flags` was always True because we only APPEND to flags,
+            # causing every English-Hearing-Impaired sidecar to be mis-labelled as Hindi.
             suffix = sib_stem[len(stem) :].lstrip(".")
             parts = suffix.split(".") if suffix else []
             lang = "und"
             flags = []
             for part in parts:
-                if len(part) in (2, 3) and part.isalpha() and not flags:
+                if len(part) in (2, 3) and part.isalpha() and lang == "und":
                     lang = part
                 else:
                     flags.append(part)

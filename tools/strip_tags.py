@@ -14,6 +14,21 @@ from pathlib import Path
 from paths import NAS_MOVIES, NAS_SERIES, PLEX_TOKEN, PLEX_URL, STAGING_DIR
 
 VIDEO_EXTS = {".mkv", ".mp4", ".avi", ".m4v", ".wmv", ".flv", ".mov", ".ts", ".webm"}
+SIDECAR_EXTS = {".srt", ".ass", ".ssa", ".sub", ".idx", ".vtt", ".nfo", ".smi", ".sup"}
+
+
+def _find_sidecars(video_path: Path) -> list[Path]:
+    """Find .srt/.nfo/etc sharing the video's stem (incl. .lang[.hi] suffixes)."""
+    stem = video_path.stem
+    results = []
+    for f in video_path.parent.iterdir():
+        if not f.is_file():
+            continue
+        if f.suffix.lower() not in SIDECAR_EXTS:
+            continue
+        if f.stem == stem or f.stem.startswith(stem + "."):
+            results.append(f)
+    return results
 
 # Regex for SxxExx (case-insensitive). Captures season+episode marker.
 # Also matches "Season.01.Episode.01" long-form format.
@@ -30,12 +45,12 @@ _BASE_TAG_PARTS = (
     # Resolution / quality
     r"|1080[pi]|720[pi]|480[pi]|2160[pi]|4K|UHD|DS4K"
     # Source
-    r"|WEB[-.]?DL|WEBRip|BluRay|Blu[-.]?Ray|BDRip|BDRemux|HDTV|DVDRip|REMUX|WEB"
+    r"|WEB[-.]?DL|WEBRip|BluRay|Blu[-.]?Ray|BDRip|BDRemux|BDMux|HDTV|DVDRip|DVDR|REMUX|WEB|UpScaled"
     # Streaming services
-    r"|NF|AMZN|DSNP|HULU|MAX|HBO|ATVP|PCOK|PMTP|STAN|CRAV|Netflix"
+    r"|NF|AMZN|DSNP|HULU|MAX|HBO|ATVP|PCOK|PMTP|STAN|CRAV|Netflix|ALL4|TOD"
     r"|BINGE|ROKU|(?-i:iT)|MA|CRITERION|MUBI|TUBI|SHUDDER|PMNP|SHO|STRP"
     # Video codecs
-    r"|x264|x265|H\.?264|H\.?265|HEVC|AVC|AV1|XviD|DivX|VP9|VP8|MPEG[24]"
+    r"|x264|x265|H\s?264|H\s?265|H\.?264|H\.?265|HEVC|AVC|AV1|XviD|DivX|VP9|VP8|VC[-.]?1|MPEG[24]"
     # Audio codecs / channels
     r"|TrueHD\d*\.?\d*|AAC\d*\.?\d*|DDP?\d*\.?\d*|DD\+?\d*\.?\d*"
     r"|Atmos|DTS(?:[-.]?HD(?:[\s.]?MA)?)?|FLAC|AC3|EAC3|LPCM|Opus"
@@ -49,9 +64,14 @@ _BASE_TAG_PARTS = (
     r"|HUNGARIAN|TURKISH|ARABIC|DL"
     r"|PORTUGUESE|RUSSIAN|JAPANESE|KOREAN|CHINESE|HINDI|THAI"
     r"|ROMANIAN|GREEK|BULGARIAN|CROATIAN|SERBIAN|UKRAINIAN"
+    # ISO 639-2 three-letter language codes (common on multi-audio scene releases)
+    r"|ITA|ENG|GER|FRE|FRA|SPA|JPN|CHI|RUS|POR|DUT|KOR|ARA|HIN|THA"
+    r"|POL|RUM|ROM|SWE|NOR|DAN|FIN|CZE|HUN|TUR|GRE|BUL|CRO|SRP|UKR"
     # Release tags
     r"|REPACK\d*|INTERNAL|PROPER|HYBRID|Hybrid"
     r"|EXTENDED|UNRATED|THEATRICAL|IMAX|OPEN[\s.]?MATTE"
+    # Scene/tracker markers + subtitle markers + promoted-from-series-only
+    r"|xpost|subs?|DS4K|N[-.]?Z[-.]?B"
     # Lone resolution "p" (from stripped "1080p") — lowercase only, as standalone token
     # Uses inline (?-i:p) to match only lowercase despite global IGNORECASE flag
     r"|(?<=[\s.])(?-i:p)(?=[\s.]|$|[A-Z])"
@@ -486,19 +506,37 @@ def execute_renames(plan: list[dict], dry_run: bool) -> None:
     # Save stripped tag patterns for future reference
     _save_stripped_tags(plan)
 
-    # Print renames
+    # Print renames + follow sidecars
+    sidecars_done = 0
     for entry in renames:
-        old_rel = entry["old_path"].name
-        new_rel = entry["new_path"].name
+        old_path = entry["old_path"]
+        new_path = entry["new_path"]
+        old_rel = old_path.name
+        new_rel = new_path.name
+        old_stem = old_path.stem
+        new_stem = new_path.stem
+        # Pull sidecars BEFORE renaming the video
+        sidecars = _find_sidecars(old_path) if not dry_run else []
+
         if dry_run:
             print(f"  {old_rel}")
             print(f"    -> {new_rel}")
         else:
             try:
-                entry["old_path"].rename(entry["new_path"])
+                old_path.rename(new_path)
                 print(f"  RENAMED: {old_rel} -> {new_rel}")
+                for sc in sidecars:
+                    new_sc = sc.with_name(new_stem + sc.name[len(old_stem):])
+                    try:
+                        if not new_sc.exists():
+                            sc.rename(new_sc)
+                            sidecars_done += 1
+                    except OSError as se:
+                        print(f"    sidecar ERR {sc.name}: {se}")
             except OSError as e:
                 print(f"  ERROR: {old_rel}: {e}")
+    if not dry_run and sidecars_done:
+        print(f"  + {sidecars_done} sidecars renamed alongside")
 
     # Print collisions
     if collisions:
