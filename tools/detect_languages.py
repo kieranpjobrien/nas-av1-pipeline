@@ -1268,6 +1268,10 @@ def _run_deep_parallel(
     def _und_audio_tracks(entry: dict):
         for i, a in enumerate(entry.get("audio_streams", []) or []):
             lang = (a.get("language") or "und").lower().strip()
+            detected = (a.get("detected_language") or "").lower().strip()
+            # Skip if already detected by a prior whisper run (and not told to redo)
+            if not whisper_all and detected and detected not in UND_LANGS:
+                continue
             if whisper_all or lang in UND_LANGS:
                 yield (entry, i, entry.get("duration_seconds", 0))
 
@@ -1369,44 +1373,45 @@ def _run_deep_parallel(
     for t in extractor_threads:
         t.join(timeout=5)
 
-    logging.info(f"  Pass 1 done — {len(residuals_p2)} residuals for pass 2 (tiny all-5)")
+    logging.info(f"  Pass 1 done — {len(residuals_p2)} residuals for pass 2 (small all-5)")
 
-    # --- Pass 2: tiny on ALL 5 samples (same wavs) ---
-    residuals_p3: list = []
+    # --- Pass 2: small on ALL 5 samples (was pass 3). Old tiny-all-5 pass dropped:
+    # it resolved <2% of residuals because the same weak samples + 5-vs-3 doesn't
+    # actually unblock anything — model capability is the bottleneck, not sample count.
+    residuals_p3: list = []  # for pass 3 (medium) on what small still can't crack
     for i, (entry, aidx, dur, wavs) in enumerate(residuals_p2, 1):
-        lang, conf = _run_whisper_on(wavs, model_size="tiny")
+        lang, conf = _run_whisper_on(wavs, model_size="small")
         if lang and conf >= min_confidence:
-            _persist(entry, aidx, lang, conf, "whisper_tiny_5x30")
+            _persist(entry, aidx, lang, conf, "whisper_small_5x30")
             for w in wavs:
                 _safe_remove(w)
         else:
             residuals_p3.append((entry, aidx, dur, wavs))
         if i % 25 == 0 or i == len(residuals_p2):
             logging.info(
-                f"  Pass 2: {i}/{len(residuals_p2)} attempted — "
-                f"{len(residuals_p3)} residuals so far"
+                f"  Pass 2 (small): {i}/{len(residuals_p2)} attempted — "
+                f"{len(residuals_p3)} residuals for pass 3"
             )
 
-    logging.info(f"  Pass 2 done — {len(residuals_p3)} residuals for pass 3 (small all-5)")
+    logging.info(f"  Pass 2 done — {len(residuals_p3)} residuals for pass 3 (medium all-5)")
 
-    # --- Pass 3: small on ALL 5 samples (same wavs) ---
+    # --- Pass 3: medium on ALL 5 samples. Last-resort before giving up.
     exhausted: list = []
     for i, (entry, aidx, dur, wavs) in enumerate(residuals_p3, 1):
-        lang, conf = _run_whisper_on(wavs, model_size="small")
+        lang, conf = _run_whisper_on(wavs, model_size="medium")
         if lang and conf >= min_confidence:
-            _persist(entry, aidx, lang, conf, "whisper_small_5x30")
+            _persist(entry, aidx, lang, conf, "whisper_medium_5x30")
+        elif lang and conf > 0:
+            _persist(entry, aidx, lang, conf, "whisper_medium_5x30_low_conf")
+            exhausted.append((entry, aidx, dur, wavs))
         else:
-            # Record the best guess even if below threshold — useful signal
-            if lang and conf > 0:
-                _persist(entry, aidx, lang, conf, "whisper_small_5x30_low_conf")
-            else:
-                _persist(entry, aidx, "und", 0.0, "whisper_exhausted_step3")
+            _persist(entry, aidx, "und", 0.0, "whisper_exhausted_medium")
             exhausted.append((entry, aidx, dur, wavs))
         for w in wavs:
             _safe_remove(w)
-        if i % 25 == 0 or i == len(residuals_p3):
+        if i % 10 == 0 or i == len(residuals_p3):
             logging.info(
-                f"  Pass 3: {i}/{len(residuals_p3)} attempted — "
+                f"  Pass 3 (medium): {i}/{len(residuals_p3)} attempted — "
                 f"{len(exhausted)} still ambiguous"
             )
 
@@ -1414,7 +1419,7 @@ def _run_deep_parallel(
         f"  Deep pass-based complete — "
         f"{detection_stats.get('detected', 0)} detected, "
         f"{detection_stats.get('failed', 0)} failed/ambiguous, "
-        f"{len(exhausted)} files where even whisper-small-5x30 couldn't decide"
+        f"{len(exhausted)} files where even whisper-medium-5x30 couldn't decide"
     )
 
 

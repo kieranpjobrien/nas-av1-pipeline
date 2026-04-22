@@ -13,6 +13,8 @@ authors = [{name = "Kieran O'Brien"}]
 dependencies = [
     "fastapi>=0.115",
     "langdetect>=1.0.9",
+    "nvidia-cublas-cu12>=12.9.2.10",
+    "nvidia-cudnn-cu12>=9.20.0.48",
     "psutil>=7.2.2",
     "uvicorn[standard]>=0.34",
 ]

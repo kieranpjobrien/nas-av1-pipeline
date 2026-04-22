@@ -371,6 +371,8 @@ source = { editable = "." }
 dependencies = [
     { name = "fastapi" },
     { name = "langdetect" },
+    { name = "nvidia-cublas-cu12" },
+    { name = "nvidia-cudnn-cu12" },
     { name = "psutil" },
     { name = "uvicorn", extra = ["standard"] },
 ]
@@ -395,7 +397,9 @@ requires-dist = [
     { name = "faster-whisper", marker = "extra == 'ml'", specifier = ">=1.2.1" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27" },
     { name = "langdetect", specifier = ">=1.0.9" },
+    { name = "nvidia-cublas-cu12", specifier = ">=12.9.2.10" },
     { name = "nvidia-cublas-cu12", marker = "extra == 'ml'", specifier = ">=12.9.2.10" },
+    { name = "nvidia-cudnn-cu12", specifier = ">=9.20.0.48" },
     { name = "nvidia-cudnn-cu12", marker = "extra == 'ml'", specifier = ">=9.20.0.48" },
     { name = "psutil", specifier = ">=7.2.2" },
     { name = "pytesseract", marker = "extra == 'ml'", specifier = ">=0.3.13" },

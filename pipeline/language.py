@@ -402,12 +402,60 @@ def _get_whisper_model(size: str = "tiny"):
 
     _assert_encoder_not_running()
 
+    # CTranslate2 was built against CUDA 12 but this machine has CUDA 13.2 —
+    # we install cublas64_12.dll + cudnn*.dll via pip (nvidia-cublas-cu12 /
+    # nvidia-cudnn-cu12) into the venv. But the loader won't see them until we
+    # explicitly add the dirs to the DLL search path. Do that before import.
     try:
-        from faster_whisper import WhisperModel
-        model = WhisperModel(size, device="cuda", compute_type="float16")
-        logging.info(f"Loaded faster-whisper model ({size}, cuda/float16)")
+        import site
+        for base in site.getsitepackages():
+            for sub in ("nvidia/cublas/bin", "nvidia/cudnn/bin"):
+                dll_dir = os.path.join(base, *sub.split("/"))
+                if os.path.isdir(dll_dir):
+                    if hasattr(os, "add_dll_directory"):
+                        os.add_dll_directory(dll_dir)
+                    # Also prepend to PATH as a belt-and-braces measure
+                    if dll_dir not in os.environ.get("PATH", ""):
+                        os.environ["PATH"] = dll_dir + os.pathsep + os.environ.get("PATH", "")
     except Exception as e:
-        logging.warning(f"Whisper GPU load failed for {size}, falling back to CPU: {e}")
+        logging.debug(f"Couldn't add nvidia DLL dirs: {e}")
+
+    force_cpu = os.environ.get("WHISPER_FORCE_CPU", "").strip() in {"1", "true", "yes"}
+
+    model = None
+    if not force_cpu:
+        try:
+            from faster_whisper import WhisperModel
+            model = WhisperModel(size, device="cuda", compute_type="float16")
+            # Warmup: run a 0.5s silent sample to trigger any late CUDA errors.
+            # If cublas/cudnn DLLs are missing, this raises; without this we
+            # discover it mid-sweep and the error path deadlocks the consumer.
+            import tempfile, subprocess
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tf:
+                silent_wav = tf.name
+            try:
+                subprocess.run(
+                    ["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "lavfi",
+                     "-i", "anullsrc=r=16000:cl=mono", "-t", "0.5", "-y", silent_wav],
+                    capture_output=True, timeout=10,
+                )
+                _segs, _info = model.transcribe(
+                    silent_wav, beam_size=1, best_of=1, language=None, without_timestamps=True,
+                )
+                # Force eager evaluation — errors may only surface on iteration
+                try:
+                    next(iter(_segs))
+                except StopIteration:
+                    pass
+                logging.info(f"Loaded faster-whisper model ({size}, cuda/float16) — warmup OK")
+            finally:
+                try: os.unlink(silent_wav)
+                except OSError: pass
+        except Exception as e:
+            logging.warning(f"Whisper GPU path failed for {size} ({e}) — falling back to CPU")
+            model = None
+
+    if model is None:
         try:
             from faster_whisper import WhisperModel
             model = WhisperModel(size, device="cpu", compute_type="int8")
