@@ -150,6 +150,23 @@ def remote_strip_and_mux(
         external_sub_paths: list of (container_path, language) for external subs
         timeout: seconds
     """
+    # Safety gate: an empty audio_keep_ids list would send mkvmerge
+    # `--audio-tracks ` with no track list, which mkvmerge interprets as
+    # "keep zero audio tracks". This destroyed 256 files on 2026-04-22.
+    # Hard-reject the empty-list case with a clear error.
+    if audio_keep_ids is not None and len(audio_keep_ids) == 0:
+        raise ValueError(
+            "remote_strip_and_mux refused: audio_keep_ids is an empty list. "
+            "Pass None to keep all audio tracks, or a non-empty list. "
+            "Sending --audio-tracks with no IDs would strip all audio (destructive)."
+        )
+    if sub_keep_ids is not None and len(sub_keep_ids) == 0 and not no_subs:
+        raise ValueError(
+            "remote_strip_and_mux refused: sub_keep_ids is an empty list "
+            "without no_subs=True. Pass no_subs=True to strip all subs "
+            "explicitly, or pass None to keep all."
+        )
+
     args = ["-o", output_path]
 
     if audio_keep_ids is not None:

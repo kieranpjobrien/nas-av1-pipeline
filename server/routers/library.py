@@ -221,17 +221,12 @@ def get_library_completion() -> dict:
             # Leave unchanged so the metric reflects uncertainty.
             _cf_failed += 1
 
-        # English filename check: matches_folder flag (populated by scanner).
-        # A file whose title portion ascii_key-matches its parent folder is
-        # treated as having an English (or library-canonical) filename.
-        # Files whose TMDb original_language is a non-English language are also
-        # OK — the filename being in that language is a legit keeper.
+        # English filename check: filename title portion must ascii_key-match
+        # its parent folder. Parent folders are canonically English-titled even
+        # for foreign-origin films (e.g. Howl's Moving Castle folder with
+        # Japanese audio inside). So NO TMDb-foreign bypass here.
         if f.get("filename_matches_folder", True):
             has_english_filename += 1
-        else:
-            orig_lang = (((f.get("tmdb") or {}).get("original_language") or "")).lower()
-            if orig_lang and orig_lang != "en":
-                has_english_filename += 1
 
         # Union check: is this file "und" (audio or subs)?
         # Use detected_language as a fallback, and treat a detected_language of "und"

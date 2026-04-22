@@ -528,11 +528,51 @@ def _strip_tracks_on_nas(filepath: str, gaps: GapAnalysis, machine: dict | None 
             os.remove(tmp_unc)
             return False
 
+        # Safety gate: ffprobe the output and assert it has at least the
+        # minimum stream counts we expected. This catches the destructive
+        # bug where mkvmerge accepted an empty --audio-tracks and produced a
+        # video-only file (256 files lost 2026-04-22). Size check alone was
+        # insufficient — AV1 video alone easily passes the 30%-of-source check.
+        # If we passed audio_keep_indices: expect exactly that many.
+        # If we passed None (keep all): expect >= 1 audio stream.
+        expected_audio = len(gaps.audio_keep_indices) if gaps.audio_keep_indices else 1
+        try:
+            probe_cmd = ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_streams", tmp_unc]
+            pr = subprocess.run(probe_cmd, capture_output=True, text=True, timeout=60)
+            if pr.returncode != 0:
+                logging.error(f"  Post-mkvmerge ffprobe failed (rc={pr.returncode})")
+                os.remove(tmp_unc)
+                return False
+            import json as _json
+            probed = _json.loads(pr.stdout or "{}")
+            streams = probed.get("streams", []) or []
+            audio_n = sum(1 for s in streams if s.get("codec_type") == "audio")
+            video_n = sum(1 for s in streams if s.get("codec_type") == "video")
+            if video_n < 1:
+                logging.error(f"  Post-mkvmerge verify: 0 video streams in output — aborting replace")
+                os.remove(tmp_unc)
+                return False
+            if expected_audio > 0 and audio_n < 1:
+                logging.error(
+                    f"  Post-mkvmerge verify: expected {expected_audio} audio stream(s), "
+                    f"got {audio_n} — aborting replace (would destroy audio like the 256-file bug)"
+                )
+                os.remove(tmp_unc)
+                return False
+        except (subprocess.TimeoutExpired, FileNotFoundError, Exception) as ve:
+            logging.error(f"  Post-mkvmerge verify errored: {ve} — aborting replace to be safe")
+            try:
+                os.remove(tmp_unc)
+            except OSError:
+                pass
+            return False
+
         os.replace(tmp_unc, filepath)
         saved = src_size - dst_size
         logging.info(
             f"  Stripped ({machine['label']}): {format_bytes(src_size)} -> {format_bytes(dst_size)} "
-            f"({format_bytes(abs(saved))} {'saved' if saved > 0 else 'added'})"
+            f"({format_bytes(abs(saved))} {'saved' if saved > 0 else 'added'})  "
+            f"[verify: {video_n}v {audio_n}a]"
         )
         return True
     except Exception as e:
