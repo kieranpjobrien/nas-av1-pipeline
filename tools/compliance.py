@@ -40,44 +40,135 @@ SCENE_TAG_RE = re.compile(
     re.IGNORECASE,
 )
 
-TARGET_VIDEO = {"av1", "av1_nvenc"}
-TARGET_AUDIO = {"eac3", "opus", "e-ac-3"}
+TARGET_VIDEO = {"av1"}  # post-encode codec_name — "av1_nvenc" is the encoder, not the codec
+TARGET_AUDIO = {"eac3", "opus"}  # after hyphen-strip normalisation
+ENG_LANGS = {"en", "eng", "english"}
+UND_LANGS = {"und", "unk", ""}
+
+# Per-language equivalence map for "original language" audio rule.
+# TMDb original_language is ISO 639-1; ffprobe usually emits ISO 639-2/639-3 codes.
+ORIG_LANG_EQUIVS: dict[str, set[str]] = {
+    "en":  {"en", "eng"},
+    "ja":  {"ja", "jpn"},
+    "ko":  {"ko", "kor"},
+    "zh":  {"zh", "chi", "zho", "cmn", "yue"},
+    "cn":  {"zh", "chi", "zho", "cmn", "yue"},
+    "fr":  {"fr", "fre", "fra"},
+    "de":  {"de", "ger", "deu"},
+    "es":  {"es", "spa", "esp"},
+    "it":  {"it", "ita"},
+    "pt":  {"pt", "por", "pt-br", "pt-pt"},
+    "ru":  {"ru", "rus"},
+    "sv":  {"sv", "swe"},
+    "no":  {"no", "nor", "nob", "nno"},
+    "da":  {"da", "dan"},
+    "fi":  {"fi", "fin"},
+    "nl":  {"nl", "dut", "nld"},
+    "pl":  {"pl", "pol"},
+    "cs":  {"cs", "cze", "ces"},
+    "hu":  {"hu", "hun"},
+    "tr":  {"tr", "tur"},
+    "ar":  {"ar", "ara"},
+    "hi":  {"hi", "hin"},
+    "th":  {"th", "tha"},
+    "he":  {"he", "heb", "iw"},
+    "el":  {"el", "gre", "ell"},
+    "fa":  {"fa", "per", "fas"},
+    "xx":  set(),  # no linguistic content — skip original-language check
+    "zxx": set(),
+}
+
+
+def _is_hi(stream: dict) -> bool:
+    """Detect HI/SDH/captions sub streams."""
+    disp = stream.get("disposition") or {}
+    if disp.get("hearing_impaired") or disp.get("captions"):
+        return True
+    title = (stream.get("title") or "").lower()
+    return bool(re.search(r"\b(hi|sdh|hearing|cc|closed.caption)\b", title))
+
+
+def _is_hi_external(s: dict) -> bool:
+    parts = (s.get("filename") or "").lower().split(".")
+    return any(p in ("hi", "sdh", "cc") for p in parts[1:-1])
 
 
 def check_file(entry: dict, config: dict) -> list[str]:
-    """Return a list of violation strings (empty if compliant)."""
+    """Return a list of violation strings (empty if compliant).
+
+    Rules (matching dashboard):
+      - Video codec == AV1
+      - Every audio codec in {EAC-3, Opus} (or configured lossless passthrough)
+      - Every audio language matches TMDb original_language (plus und/"")
+      - Exactly ONE non-HI English sub (internal or external), zero HI/SDH,
+        zero foreign subs
+      - Filename has no scene tags
+      - TMDb metadata present (movies only; series episode has no per-episode
+        TMDb — show-level tags are sufficient but not modelled here)
+    """
     violations: list[str] = []
     lossless = {c.lower() for c in config.get("lossless_audio_codecs") or []}
 
     # Video
     v = entry.get("video") or {}
-    vcodec = (v.get("codec") or v.get("codec_raw") or "").lower()
+    vcodec = (v.get("codec_raw") or v.get("codec") or "").lower()
     if vcodec and vcodec not in TARGET_VIDEO:
         violations.append(f"video codec {vcodec} (target: av1)")
 
-    # Audio: every track must be target codec + language in KEEP_LANGS
-    for i, a in enumerate(entry.get("audio_streams") or []):
-        codec = (a.get("codec") or a.get("codec_raw") or "").lower().replace("-", "")
-        lang = (a.get("language") or "").lower().strip()
-        if codec and codec not in TARGET_AUDIO and codec not in lossless:
-            violations.append(f"audio[{i}] codec {a.get('codec')}")
-        if lang and lang not in KEEP_LANGS:
-            violations.append(f"audio[{i}] language {lang}")
+    # Audio codec + original-language check
+    tmdb = entry.get("tmdb") or {}
+    orig_lang = (tmdb.get("original_language") or "").lower().strip()
+    keeper_langs = ORIG_LANG_EQUIVS.get(orig_lang, {orig_lang} if orig_lang else set())
+    keeper_langs = keeper_langs | UND_LANGS
+    enforce_orig = bool(orig_lang) and orig_lang not in ("xx", "zxx")
 
-    # Subs
-    for i, s in enumerate(entry.get("subtitle_streams") or []):
-        lang = (s.get("language") or "").lower().strip()
-        if lang and lang not in KEEP_LANGS:
-            violations.append(f"sub[{i}] language {lang}")
+    for i, a in enumerate(entry.get("audio_streams") or []):
+        codec = (a.get("codec_raw") or a.get("codec", "")).lower().replace("-", "")
+        lang = (a.get("language") or a.get("detected_language") or "").lower().strip()
+        if codec and codec not in TARGET_AUDIO and codec not in lossless:
+            violations.append(f"audio[{i}] codec {a.get('codec_raw') or a.get('codec')}")
+        if enforce_orig and lang and lang not in keeper_langs:
+            violations.append(f"audio[{i}] language {lang} (original: {orig_lang})")
+
+    # Sub language check — exactly ONE non-HI English sub, zero HI, zero foreign
+    int_subs = entry.get("subtitle_streams") or []
+    ext_subs = entry.get("external_subtitles") or []
+    regular_eng = sum(
+        1 for s in int_subs
+        if (s.get("language") or s.get("detected_language") or "").lower().strip() in ENG_LANGS
+        and not _is_hi(s)
+    )
+    regular_eng += sum(
+        1 for s in ext_subs
+        if (s.get("language") or "").lower().strip() in ENG_LANGS and not _is_hi_external(s)
+    )
+    hi_count = sum(1 for s in int_subs if _is_hi(s)) + sum(1 for s in ext_subs if _is_hi_external(s))
+    foreign_internal = sum(
+        1 for s in int_subs
+        if (s.get("language") or s.get("detected_language") or "und").lower().strip() not in (ENG_LANGS | UND_LANGS)
+    )
+    foreign_external = sum(
+        1 for s in ext_subs
+        if (s.get("language") or "und").lower().strip() not in (ENG_LANGS | UND_LANGS)
+    )
+    if regular_eng == 0:
+        violations.append("sub: missing non-HI English sub")
+    elif regular_eng > 1:
+        violations.append(f"sub: {regular_eng} English subs (want exactly 1)")
+    if hi_count > 0:
+        violations.append(f"sub: {hi_count} HI/SDH sub(s) present")
+    if foreign_internal + foreign_external > 0:
+        violations.append(f"sub: {foreign_internal + foreign_external} foreign sub(s)")
 
     # Filename
     fname = entry.get("filename") or ""
     if SCENE_TAG_RE.search(fname):
         violations.append(f"filename has scene tags: {fname}")
 
-    # TMDb (proxy — if the report has no tmdb block, MKV probably has no tags either)
-    if not (entry.get("tmdb") and entry["tmdb"].get("tmdb_id")):
-        violations.append("no tmdb metadata")
+    # TMDb — only enforce on movies (series episodes don't have per-episode TMDb)
+    if entry.get("library_type") == "movie":
+        if not (entry.get("tmdb") and entry["tmdb"].get("tmdb_id")):
+            violations.append("no tmdb metadata")
 
     return violations
 

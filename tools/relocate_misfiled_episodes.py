@@ -64,7 +64,23 @@ def execute(plan: list[dict], dry_run: bool) -> None:
         seasons = sorted({e["season"] for e in items})
         print(f"  {show}: {len(items)} files into Season {seasons}")
 
+    SIDECAR_EXTS = {".srt", ".ass", ".ssa", ".sub", ".idx", ".vtt", ".nfo", ".smi", ".sup"}
+
+    def _find_sidecars(video_path):
+        stem = video_path.stem
+        results = []
+        try:
+            for f in video_path.parent.iterdir():
+                if not f.is_file() or f.suffix.lower() not in SIDECAR_EXTS:
+                    continue
+                if f.stem == stem or f.stem.startswith(stem + "."):
+                    results.append(f)
+        except OSError:
+            pass
+        return results
+
     done = 0
+    sidecars_moved = 0
     errors = []
     for e in plan:
         old_path = e["old_path"]
@@ -74,9 +90,21 @@ def execute(plan: list[dict], dry_run: bool) -> None:
             continue
         if dry_run:
             print(f"  MOVE: {old_path} -> {new_path}")
+            for sc in _find_sidecars(old_path):
+                print(f"    + sidecar: {sc.name}")
             continue
         try:
-            new_path.parent.mkdir(exist_ok=True)
+            new_path.parent.mkdir(parents=True, exist_ok=True)
+            # Move sidecars FIRST so the video is still discoverable if a sidecar fails
+            sidecars = _find_sidecars(old_path)
+            for sc in sidecars:
+                new_sc = new_path.parent / (new_path.stem + sc.name[len(old_path.stem):])
+                try:
+                    if not new_sc.exists():
+                        sc.rename(new_sc)
+                        sidecars_moved += 1
+                except OSError as se:
+                    errors.append(f"sidecar {sc.name}: {se}")
             old_path.rename(new_path)
             done += 1
         except OSError as err:

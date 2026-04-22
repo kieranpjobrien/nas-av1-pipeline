@@ -379,21 +379,52 @@ def execute_renames(plan: list[dict], dry_run: bool) -> dict:
                 new_sc_name = new_stem + sc.name[len(old_stem):]
                 print(f"      sidecar: {sc.name} -> {new_sc_name}")
         else:
+            # Rename sidecars FIRST, then video. If a sidecar rename fails, the
+            # video still has its original name so Plex can still match via the
+            # fallback name pattern until the user intervenes. The old order
+            # (video first, sidecars after) left a window where video had the
+            # new name but sidecars still had the old — Plex couldn't pair them.
+            planned_sidecars = []
+            for sc in sidecars:
+                new_sc = sc.with_name(new_stem + sc.name[len(old_stem):])
+                if new_sc.exists():
+                    errors.append(f"sidecar collision: {new_sc.name}")
+                    continue
+                planned_sidecars.append((sc, new_sc))
+
+            renamed_sidecars = []
+            abort = False
+            for sc, new_sc in planned_sidecars:
+                try:
+                    sc.rename(new_sc)
+                    renamed_sidecars.append((sc, new_sc))
+                except OSError as se:
+                    errors.append(f"sidecar {sc.name}: {se}")
+                    abort = True
+                    break
+
+            if abort:
+                # Roll back any sidecar renames that succeeded
+                for orig, moved in renamed_sidecars:
+                    try:
+                        moved.rename(orig)
+                    except OSError:
+                        pass
+                continue
+
             try:
                 e["old_path"].rename(e["new_path"])
                 done += 1
-                # Rename matching sidecars
-                for sc in sidecars:
-                    new_sc = sc.with_name(new_stem + sc.name[len(old_stem):])
-                    try:
-                        if not new_sc.exists():
-                            sc.rename(new_sc)
-                            sidecars_done += 1
-                    except OSError as se:
-                        errors.append(f"sidecar {sc.name}: {se}")
+                sidecars_done += len(renamed_sidecars)
                 if done <= 50 or done % 25 == 0:
                     print(f"  [{fixes}] {old_rel} -> {new_rel}")
             except OSError as err:
+                # Video rename failed — roll sidecars back so we don't leave a mismatch
+                for orig, moved in renamed_sidecars:
+                    try:
+                        moved.rename(orig)
+                    except OSError:
+                        pass
                 errors.append(f"{old_rel}: {err}")
 
     if collisions:

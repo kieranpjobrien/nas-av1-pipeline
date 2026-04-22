@@ -36,8 +36,11 @@ _DIRTY_MARKERS = re.compile(
     r"|\bBOLUM\b|\bB[ÖO]L[ÜU]M\b"                            # Turkish episode marker
     r"|\s\d{3}NH?\d*(?:\s|$)"                                # 710N, 710NH1 codec junk
     r"|\[TAo\s*E\]"                                          # [TAo E] copy marker
-    r"|\(\s*Kappa\s*\)"                                      # ( Kappa) weird copy
-    r"|\bEpisode\s?\d+\b",                                   # "Episode 6" placeholder
+    r"|\(\s*Kappa\s*\)",                                     # ( Kappa) weird copy
+    # NOTE: previously also matched `\bEpisode\s?\d+\b` ("Episode 6" placeholder)
+    # but that eats real anime/doc titles like "Episode 50". Dropped to avoid
+    # deleting genuinely-named episodes. Files with literal "Episode N" as the
+    # full title need human review.
     re.IGNORECASE,
 )
 
