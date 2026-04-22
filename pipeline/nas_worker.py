@@ -59,16 +59,42 @@ def _ssh_docker(machine: dict, tool: str, args: list[str], timeout: int = 900) -
     safe_parts = [_shell_quote(tool)] + [_shell_quote(a) for a in args]
     docker_cmd = f"{prefix} {' '.join(safe_parts)}"
 
-    ssh_cmd = ["ssh", "-o", "ConnectTimeout=10", "-o", "BatchMode=yes", machine["host"], docker_cmd]
+    # -tt forces a pseudo-TTY so SSH propagates SIGHUP to the remote shell when
+    # the client disconnects. ServerAlive pings detect dead connections quickly.
+    # Without these, a client-side timeout leaves the remote mkvmerge orphaned —
+    # burning NAS CPU for hours until manually killed.
+    ssh_cmd = [
+        "ssh",
+        "-o", "ConnectTimeout=10",
+        "-o", "BatchMode=yes",
+        "-o", "ServerAliveInterval=30",
+        "-o", "ServerAliveCountMax=3",
+        "-tt",
+        machine["host"],
+        docker_cmd,
+    ]
 
-    return subprocess.run(
-        ssh_cmd,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        encoding="utf-8",
-        errors="replace",
-    )
+    try:
+        return subprocess.run(
+            ssh_cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except subprocess.TimeoutExpired:
+        # subprocess.run on timeout kills the ssh client but the remote shell may
+        # still be running. Fire a best-effort remote-kill for the tool we started.
+        try:
+            subprocess.run(
+                ["ssh", "-o", "ConnectTimeout=5", "-o", "BatchMode=yes", machine["host"],
+                 f"{prefix} pkill -9 {_shell_quote(tool)}"],
+                capture_output=True, timeout=15,
+            )
+        except Exception:
+            pass
+        raise
 
 
 def remote_mkvmerge(machine: dict, args: list[str], timeout: int = 900) -> subprocess.CompletedProcess:

@@ -458,6 +458,12 @@ def _strip_tracks_on_nas(filepath: str, gaps: GapAnalysis, machine: dict | None 
     if gaps.external_subs:
         external_sub_args = []
         for sub_path in gaps.external_subs:
+            # Verify sidecar still exists — dedupe may have deleted it since
+            # media_report was written. A missing sidecar would make mkvmerge
+            # hang on SMB I/O for minutes before timeout.
+            if not os.path.exists(sub_path):
+                logging.warning(f"  skip stale sidecar (not on NAS): {os.path.basename(sub_path)}")
+                continue
             container_sub = unc_to_container_path(sub_path)
             lang = "eng"
             external_sub_args.append((container_sub, lang))
@@ -482,8 +488,19 @@ def _strip_tracks_on_nas(filepath: str, gaps: GapAnalysis, machine: dict | None 
     )
 
     if result.returncode >= 2:
-        err = result.stderr.strip() or result.stdout.strip()
-        logging.error(f"  mkvmerge failed ({machine['label']}): {err[:300]}")
+        # Filter cosmetic OpenSSH post-quantum warning block ("** ..." lines) and
+        # mkvmerge's own banner so the real error is visible. Combine stdout+stderr
+        # since SSH can interleave them, and widen the truncation to see the full
+        # diagnostic.
+        combined = (result.stderr or "") + "\n" + (result.stdout or "")
+        err_lines = [
+            ln for ln in combined.splitlines()
+            if not ln.lstrip().startswith("**")
+            and not ln.lstrip().lower().startswith("mkvmerge v")
+            and ln.strip()
+        ]
+        err = "\n".join(err_lines).strip() or "(no diagnostic output)"
+        logging.error(f"  mkvmerge failed ({machine['label']}) rc={result.returncode}: {err[:1000]}")
         return False
 
     # Verify and replace — check via the UNC path (accessible from this PC)

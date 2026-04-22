@@ -807,16 +807,17 @@ class Orchestrator:
         from pipeline.nas_worker import NAS, SERVER
 
         threads = []
-        # Media server workers (faster Docker, NFS mount) — 10 workers. Only spawn if
-        # SERVER_SSH_HOST is set; otherwise every job would defer with an error log line.
+        # Media server workers — 3 (was 10). With 16 concurrent mkvmerge calls we
+        # were OOM-killing mkvworker on big REMUX files (rc=137 SIGKILL) and
+        # saturating SSH/SMB on the Synology. 3+2 = 5 concurrent is plenty.
         if SERVER.get("host"):
-            for i in range(10):
+            for i in range(3):
                 threads.append(threading.Thread(target=heavy_worker, args=(f"SRV-{i}", SERVER), daemon=True))
         else:
             logging.info("  SRV workers skipped (SERVER_SSH_HOST not set)")
-        # NAS workers (local disk, persistent Docker container — no startup overhead)
+        # NAS workers — 2 (was 6). Same OOM/SSH-overload reasoning.
         if NAS.get("host"):
-            for i in range(6):
+            for i in range(2):
                 threads.append(threading.Thread(target=heavy_worker, args=(f"NAS-{i}", NAS), daemon=True))
         else:
             logging.info("  NAS workers skipped (NAS_SSH_HOST not set)")
