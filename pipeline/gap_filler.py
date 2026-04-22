@@ -214,6 +214,12 @@ def analyse_gaps(file_entry: dict, config: dict) -> GapAnalysis:
 
     # External subtitle check — deferred to gap_fill() to avoid slow NAS scans
     # during queue building. Set a flag so gap_fill knows to check.
+    #
+    # DO NOT auto-set needs_sub_mux from file_entry.external_subtitles here:
+    # the strip+mux path uses audio_keep_indices, which is ONLY populated for
+    # already-EAC-3 audio tracks. If we flag sub_mux on files that also need
+    # audio transcode, mkvmerge strips all audio (destructive — 256 files lost
+    # 2026-04-22 when this was patched in incorrectly).
     gaps._check_external_subs = True
     if gaps.external_subs:
         gaps.needs_sub_mux = True
