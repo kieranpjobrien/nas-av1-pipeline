@@ -15,8 +15,10 @@ import argparse
 import csv
 import json
 import os
+import re
 import subprocess
 import sys
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
@@ -259,9 +261,12 @@ def extract_info(filepath: str, probe_data: dict, library_type: str) -> dict:
     except OSError:
         file_mtime = 0
 
+    filename = os.path.basename(filepath)
+    filename_matches_folder = _filename_matches_folder(filepath, library_type)
+
     return {
         "filepath": str(filepath),
-        "filename": os.path.basename(filepath),
+        "filename": filename,
         "extension": Path(filepath).suffix.lower(),
         "library_type": library_type,
         "file_size_bytes": file_size_bytes,
@@ -278,6 +283,7 @@ def extract_info(filepath: str, probe_data: dict, library_type: str) -> dict:
         "subtitle_count": len(subtitle_info),
         "external_subtitles": external_subs,
         "external_subtitle_count": len(external_subs),
+        "filename_matches_folder": filename_matches_folder,
     }
 
 
@@ -358,6 +364,50 @@ def update_report_entry(filepath: str, report_path: str, library_type: str) -> b
 
 
 EN_TOKENS = {"eng", "en", "english"}
+
+_SXXEXX_RE = re.compile(r"S(\d{1,4})E(\d{1,2})", re.IGNORECASE)
+_YEAR_PAREN_RE = re.compile(r"\((19[2-9]\d|20[0-2]\d)\)")
+
+
+def _ascii_key(s: str) -> str:
+    """Normalise a title for fuzzy comparison: strip diacritics + punctuation, lowercase."""
+    s = "".join(c for c in unicodedata.normalize("NFKD", s) if not unicodedata.combining(c))
+    return re.sub(r"[^\w]+", " ", s).lower().strip()
+
+
+def _filename_matches_folder(filepath: str, library_type: str) -> bool:
+    """Check if the filename's title portion matches its parent folder's title.
+
+    The "English Filename" hero stat treats True as compliant. False means the
+    filename looks foreign-language or otherwise out of sync with the folder.
+    Genuine foreign-origin films live in English-titled folders per library
+    convention, so folder match is a good proxy for "English keeper name".
+    """
+    try:
+        filename = os.path.splitext(os.path.basename(filepath))[0]
+        parent = os.path.basename(os.path.dirname(filepath))
+        grandparent = os.path.basename(os.path.dirname(os.path.dirname(filepath)))
+    except Exception:
+        return True
+
+    # Extract title portion
+    if library_type == "movie":
+        # strip year: "Title (2024)" → "Title"
+        m = _YEAR_PAREN_RE.search(filename)
+        fn_title = filename[: m.start()].rstrip(" .-") if m else filename
+        folder = _YEAR_PAREN_RE.sub("", parent).strip()
+    elif library_type == "series":
+        # strip SxxExx and everything after: "Show S01E01 Title" → "Show"
+        m = _SXXEXX_RE.search(filename)
+        fn_title = filename[: m.start()].rstrip(" .-") if m else filename
+        folder = grandparent  # show folder
+    else:
+        return True
+
+    if not fn_title or not folder:
+        return True
+
+    return _ascii_key(fn_title) == _ascii_key(folder)
 
 
 def _has_english_audio(file_info: dict) -> bool:
