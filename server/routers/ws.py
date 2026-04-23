@@ -17,7 +17,7 @@ router = APIRouter()
 
 
 class ConnectionManager:
-    """Manage WebSocket connections for live pipeline updates."""
+    """Track live WebSocket connections (connect/disconnect only)."""
 
     def __init__(self) -> None:
         self.connections: list[WebSocket] = []
@@ -31,17 +31,6 @@ class ConnectionManager:
         """Remove a WebSocket connection from tracking."""
         if ws in self.connections:
             self.connections.remove(ws)
-
-    async def broadcast(self, data: dict) -> None:
-        """Send data to all connected clients, pruning dead connections."""
-        dead: list[WebSocket] = []
-        for ws in self.connections:
-            try:
-                await ws.send_json(data)
-            except Exception:
-                dead.append(ws)
-        for ws in dead:
-            self.disconnect(ws)
 
 
 ws_manager = ConnectionManager()
