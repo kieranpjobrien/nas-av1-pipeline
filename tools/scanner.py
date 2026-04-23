@@ -671,6 +671,32 @@ def main():
     seen_paths = {r["filepath"] for r in results}
     result_by_path = {r["filepath"]: r for r in results}
 
+    # Fields the pipeline / tmdb-tool owns — scanner probes don't produce
+    # these, so we must always carry them forward from the existing entry.
+    _PRESERVED_FIELDS = ("tmdb",)
+    _PRESERVED_STREAM_FIELDS = (
+        "detected_language",
+        "detection_confidence",
+        "detection_method",
+        "whisper_attempted",
+    )
+
+    def _merge_preserved(fresh: dict, existing: dict) -> dict:
+        """Copy pipeline-owned fields from existing onto a fresh probe result."""
+        for k in _PRESERVED_FIELDS:
+            if existing.get(k) and not fresh.get(k):
+                fresh[k] = existing[k]
+        # Copy per-stream detection data (audio + subs). Match by stream index.
+        for kind in ("audio_streams", "subtitle_streams"):
+            old_list = existing.get(kind) or []
+            new_list = fresh.get(kind) or []
+            for i, s in enumerate(new_list):
+                if i < len(old_list):
+                    for f in _PRESERVED_STREAM_FIELDS:
+                        if old_list[i].get(f) and not s.get(f):
+                            s[f] = old_list[i][f]
+        return fresh
+
     def _scanner_patch(current: dict) -> None:
         current_files = current.get("files", []) or []
         merged: list = []
@@ -678,16 +704,15 @@ def main():
         # 1. Keep/update entries we re-scanned. If a pipeline update happened between
         #    our read and now, prefer whichever source has the NEWER file_mtime — so
         #    a post-encode update_entry() after the scanner started takes precedence.
+        #    Either way, always carry tmdb + per-stream detection data forward.
         for existing in current_files:
             fp = existing.get("filepath")
             if fp in seen_paths:
                 fresh = result_by_path[fp]
-                # Pipeline updated this entry AFTER we probed → keep pipeline's version
-                # (identified by higher file_mtime, or by presence of pipeline-owned fields)
                 if existing.get("file_mtime", 0) > fresh.get("file_mtime", 0):
                     merged.append(existing)
                 else:
-                    merged.append(fresh)
+                    merged.append(_merge_preserved(fresh, existing))
                 seen_paths.discard(fp)  # processed — don't re-add below
             # else: file wasn't in our scan → file is gone, drop it
 
