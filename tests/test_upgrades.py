@@ -10,6 +10,7 @@ guards against silent regressions when we tune the regexes.
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 import time
 from pathlib import Path
@@ -19,10 +20,11 @@ from unittest.mock import patch
 import pytest
 
 from tools.upgrades import db as updb
-from tools.upgrades import matcher, scorer
+from tools.upgrades import matcher, resolver, scorer
 from tools.upgrades.scrapers import bluray_com
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "bluray_example.html"
+DDG_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "ddg_dune.html"
 
 
 # ---------- helpers ----------
@@ -42,6 +44,34 @@ def fresh_db(tmp_path: Path) -> sqlite3.Connection:
 def fixture_html() -> str:
     """Return the committed bluray.com example HTML as a string."""
     return FIXTURE_PATH.read_text(encoding="utf-8")
+
+
+@pytest.fixture
+def ddg_dune_html() -> str:
+    """Return the committed DDG "Dune 2021" HTML search result as a string."""
+    return DDG_FIXTURE_PATH.read_text(encoding="utf-8")
+
+
+def _mock_urlopen(body: str) -> Any:
+    """Build a context-manager mock that mimics ``urllib.request.urlopen``.
+
+    Returned object has the same ``.read()`` + ``.headers.get_content_charset()``
+    duo used by the resolver's ``_http_get``.
+    """
+
+    class _Resp:
+        headers = type("H", (), {"get_content_charset": staticmethod(lambda: "utf-8")})()
+
+        def __enter__(self) -> "_Resp":
+            return self
+
+        def __exit__(self, *_a: Any) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return body.encode("utf-8")
+
+    return _Resp()
 
 
 # ---------- matcher ----------
@@ -356,3 +386,93 @@ def test_db_read_public_dict_roundtrip(fresh_db: sqlite3.Connection) -> None:
     public = updb.row_to_public_dict(row)
     assert public["upgrade_reasons"] == ["4k-hdr-upgrade"]
     assert public["has_4k_hdr_available"] is True
+
+
+# ---------- resolver (DDG HTML search) ----------
+
+
+def test_resolve_url_matches_top_ddg_hit(
+    fresh_db: sqlite3.Connection, ddg_dune_html: str
+) -> None:
+    """A DDG page with the Dune 2021 bluray.com result yields the product URL."""
+    with patch("urllib.request.urlopen", return_value=_mock_urlopen(ddg_dune_html)):
+        url = resolver.resolve_url("Dune", 2021, cache=fresh_db)
+    assert url == "https://www.blu-ray.com/movies/Dune-Blu-ray/305895/"
+
+
+def test_resolve_url_returns_none_when_no_match_in_ddg(
+    fresh_db: sqlite3.Connection,
+) -> None:
+    """Unrelated DDG hits (no bluray.com product URL) yield None."""
+    body = """
+    <html><body><div id="links">
+      <div class="result results_links results_links_deep web-result ">
+        <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.amazon.com%2Fdp%2FB00XYZ%2F">
+          Amazon Listing
+        </a>
+        <a class="result__snippet" href="#">Some unrelated (2021) snippet.</a>
+        <div class="clear"></div>
+      </div>
+    </div></body></html>
+    """
+    with patch("urllib.request.urlopen", return_value=_mock_urlopen(body)):
+        url = resolver.resolve_url("Totally Unknown Movie", 2021, cache=fresh_db)
+    assert url is None
+
+
+def test_resolve_url_respects_year_gate(
+    fresh_db: sqlite3.Connection,
+) -> None:
+    """If DDG returns a 1984 Dune and we ask for 2021, the matcher rejects it."""
+    body = """
+    <html><body><div id="links">
+      <div class="result results_links results_links_deep web-result ">
+        <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.blu%2Dray.com%2Fmovies%2FDune%2DBlu%2Dray%2F999%2F">
+          Dune Blu-ray
+        </a>
+        <a class="result__snippet" href="#"><b>Dune</b> (<b>1984</b>) classic sci-fi.</a>
+        <div class="clear"></div>
+      </div>
+    </div></body></html>
+    """
+    with patch("urllib.request.urlopen", return_value=_mock_urlopen(body)):
+        url = resolver.resolve_url("Dune", 2021, cache=fresh_db)
+    assert url is None
+
+
+def test_resolve_url_caches_ddg_response(
+    fresh_db: sqlite3.Connection, ddg_dune_html: str
+) -> None:
+    """A second resolve_url within TTL must not issue a second HTTP request."""
+    call_count = {"n": 0}
+
+    def _counted(*_a: Any, **_kw: Any) -> Any:
+        call_count["n"] += 1
+        return _mock_urlopen(ddg_dune_html)
+
+    with patch("urllib.request.urlopen", side_effect=_counted):
+        first = resolver.resolve_url("Dune", 2021, cache=fresh_db)
+        second = resolver.resolve_url("Dune", 2021, cache=fresh_db)
+
+    assert first == second
+    assert first is not None
+    assert call_count["n"] == 1, "second call should hit the scraper_cache, not the network"
+
+
+def test_resolve_url_detects_captcha_page(
+    fresh_db: sqlite3.Connection,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A CAPTCHA / anomaly page returns None and logs a WARNING."""
+    captcha_body = (
+        "<html><body><h1>DuckDuckGo</h1>"
+        "<p>Unfortunately, bots use DuckDuckGo too. "
+        "In order to continue using DuckDuckGo, please complete the following challenge. "
+        "anomaly detected.</p></body></html>"
+    )
+    caplog.set_level(logging.WARNING, logger="tools.upgrades.resolver")
+    with patch("urllib.request.urlopen", return_value=_mock_urlopen(captcha_body)):
+        url = resolver.resolve_url("Dune", 2021, cache=fresh_db)
+    assert url is None
+    assert any("CAPTCHA" in rec.message or "anomaly" in rec.message
+               for rec in caplog.records), "expected a captcha/anomaly warning"
