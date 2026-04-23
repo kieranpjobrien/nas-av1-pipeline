@@ -20,6 +20,7 @@ Requires:
 """
 
 import argparse
+import json
 import logging
 import os
 import re
@@ -1814,15 +1815,85 @@ def _apply_file_mkvpropedit(filepath: str, detections: list[dict]) -> tuple[int,
         return 0, len(detections)
 
 
+def _probe_stream_counts(filepath: str) -> tuple[int, int, int] | None:
+    """Return ``(video, audio, subtitle)`` stream counts for ``filepath``.
+
+    Counts only real video streams (skips ``attached_pic`` cover art).
+    Returns ``None`` on any ffprobe error or non-JSON output.
+    """
+    cmd = [
+        "ffprobe",
+        "-v",
+        "quiet",
+        "-print_format",
+        "json",
+        "-show_streams",
+        filepath,
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        data = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return None
+    video = audio = sub = 0
+    for s in data.get("streams") or []:
+        ctype = s.get("codec_type")
+        disposition = s.get("disposition") or {}
+        if ctype == "video":
+            if disposition.get("attached_pic"):
+                continue
+            video += 1
+        elif ctype == "audio":
+            audio += 1
+        elif ctype == "subtitle":
+            sub += 1
+    return video, audio, sub
+
+
 def _apply_file_ffmpeg(filepath: str, detections: list[dict]) -> tuple[int, int]:
     """Apply all language detections for a file in a single ffmpeg -c copy call.
 
     Writes to a temp file then replaces the original. Slower than mkvpropedit
     but requires no extra install beyond ffmpeg.
+
+    Safety contract:
+    * ``-map 0`` is passed so ALL source streams are explicitly mapped. Without
+      it ffmpeg silently drops streams past its default selection — the exact
+      bug class that caused the 1,787-file incident.
+    * Pre-probe source counts; post-probe staged output; refuse replacement
+      if any count dropped (v/a/s regression is a hard fail).
+    * Absolute zero-audio floor: refuse replacement if staged file has zero
+      audio regardless of source count.
+
     Returns (applied_count, failed_count).
     """
+    src_counts = _probe_stream_counts(filepath)
+    if src_counts is None:
+        logging.error(f"  source ffprobe failed for {Path(filepath).name}; refusing apply")
+        return 0, len(detections)
+    src_v, src_a, src_s = src_counts
+
     tmp_path = filepath + ".langfix_tmp.mkv"
-    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", filepath, "-c", "copy"]
+    # -map 0 is the safety-contract requirement: every source stream is mapped
+    # explicitly. We do NOT use -map 0:a? or any optional maps — those silently
+    # drop streams when resolution fails.
+    cmd = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        filepath,
+        "-map",
+        "0",
+        "-c",
+        "copy",
+    ]
     for det in detections:
         track_type = det["track_type"]
         stream_index = det["stream_index"]
@@ -1834,17 +1905,38 @@ def _apply_file_ffmpeg(filepath: str, detections: list[dict]) -> tuple[int, int]
 
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-        if proc.returncode == 0:
-            os.replace(tmp_path, filepath)
-            for det in detections:
-                logging.info(
-                    f"  Applied {to_iso2(det['detected_language'])} to {det['track_type']} "
-                    f"track {det['stream_index'] + 1}: {Path(filepath).name}"
-                )
-            return len(detections), 0
-        else:
+        if proc.returncode != 0:
             logging.error(f"  ffmpeg failed for {Path(filepath).name}: {proc.stderr.strip()}")
             return 0, len(detections)
+
+        # Post-verify: probe the staged output and refuse replacement on any
+        # stream regression. Matches the naslib runner's three-step contract.
+        dst_counts = _probe_stream_counts(tmp_path)
+        if dst_counts is None:
+            logging.error(f"  post-verify ffprobe failed for {Path(filepath).name}; refusing replace")
+            return 0, len(detections)
+        dst_v, dst_a, dst_s = dst_counts
+        # Absolute zero-audio refuse floor — regardless of source count.
+        if dst_a < 1:
+            logging.error(
+                f"  REFUSE replace: output has zero audio streams for {Path(filepath).name} "
+                f"(src v={src_v} a={src_a} s={src_s}, dst v={dst_v} a={dst_a} s={dst_s})"
+            )
+            return 0, len(detections)
+        if dst_v < src_v or dst_a < src_a or dst_s < src_s:
+            logging.error(
+                f"  REFUSE replace: stream regression for {Path(filepath).name} "
+                f"(src v={src_v} a={src_a} s={src_s}, dst v={dst_v} a={dst_a} s={dst_s})"
+            )
+            return 0, len(detections)
+
+        os.replace(tmp_path, filepath)
+        for det in detections:
+            logging.info(
+                f"  Applied {to_iso2(det['detected_language'])} to {det['track_type']} "
+                f"track {det['stream_index'] + 1}: {Path(filepath).name}"
+            )
+        return len(detections), 0
     except subprocess.TimeoutExpired:
         logging.error(f"  ffmpeg timed out for {Path(filepath).name}")
         return 0, len(detections)
