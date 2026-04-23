@@ -334,7 +334,12 @@ def get_library_completion() -> dict:
             a_clean = False
         else:
             a_ok = all((a.get("codec_raw") or a.get("codec", "")).lower() in ("eac3", "e-ac-3") for a in a_streams)
-            a_clean = all(i == 0 or _stream_lang(a) in KEEP_LANGS for i, a in enumerate(a_streams))
+            # Apply the language policy uniformly across ALL tracks. Previously
+            # track 0 was exempted via `i == 0 or ...`, but that contradicted the
+            # main compliance path (`_compliance_for_entry`) which applies the
+            # keeper set to every stream. Aligning both code paths avoids the
+            # tier breakdown and completion bar disagreeing on the same file.
+            a_clean = all(_stream_lang(a) in KEEP_LANGS for a in a_streams)
         s_ok = all(_stream_lang(s) in KEEP_LANGS for s in f.get("subtitle_streams", []))
 
         if is_av1 and a_ok and a_clean and s_ok:
