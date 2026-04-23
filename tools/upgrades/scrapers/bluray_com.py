@@ -43,7 +43,10 @@ logger = logging.getLogger(__name__)
 
 USER_AGENT = "NASCleanup/1.0 (personal-use)"
 BASE_URL = "https://www.bluray.com"
-SEARCH_URL = f"{BASE_URL}/search/"
+# Live site uses /search.php — the trailing-slash /search/ path returns a
+# noindex stub. Keep the keyword param for backward compatibility with the
+# query builder.
+SEARCH_URL = f"{BASE_URL}/search.php"
 
 # 1 request per second — plenty of headroom over bluray.com's tolerance
 # for polite public scraping. Do NOT increase without pre-approval.
@@ -176,8 +179,11 @@ def search_title(
         conn = updb.connect()
     assert conn is not None  # for type-checkers
     try:
+        # bluray.com's search uses `keyword` (with the year appended to
+        # disambiguate) and the `section=bluraymovies` filter restricts
+        # to movie product pages (vs. reviews, news, forum threads).
         q = urllib.parse.urlencode(
-            {"section": "bluraymovies", "query": f"{title} {year}".strip()}
+            {"section": "bluraymovies", "keyword": f"{title} {year}".strip()}
         )
         url = f"{SEARCH_URL}?{q}"
         body = _fetch_cached(conn, url)

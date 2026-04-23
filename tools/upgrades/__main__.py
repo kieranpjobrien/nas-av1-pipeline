@@ -102,11 +102,17 @@ def _derive_current_state(entry: dict[str, Any]) -> dict[str, Any]:
 
     tmdb = entry.get("tmdb") or {}
 
+    # Prefer TMDb title if enriched; else parse "(YYYY)" cleanly off the filename
+    # using the same parser the rest of the pipeline uses.
+    from pipeline.metadata import parse_movie_filename
+    parsed_title, parsed_year = parse_movie_filename(entry.get("filename", ""))
+    clean_title = tmdb.get("title") or parsed_title
+
     return {
         "filepath": entry["filepath"],
         "tmdb_id": tmdb.get("id") or tmdb.get("tmdb_id"),
-        "title": tmdb.get("title") or entry.get("filename", "").rsplit(".", 1)[0],
-        "year": tmdb.get("release_year") or _year_from_filename(entry.get("filename", "")),
+        "title": clean_title,
+        "year": tmdb.get("release_year") or parsed_year,
         "library_type": entry.get("library_type"),
         "current_video_codec": video.get("codec"),
         "current_video_res": res,
@@ -116,13 +122,6 @@ def _derive_current_state(entry: dict[str, Any]) -> dict[str, Any]:
         "tmdb_popularity": tmdb.get("popularity"),
         "tmdb_vote_average": tmdb.get("vote_average"),
     }
-
-
-def _year_from_filename(filename: str) -> int | None:
-    """Extract the first ``(YYYY)`` group from a filename; None if absent."""
-    import re
-    m = re.search(r"\((\d{4})\)", filename)
-    return int(m.group(1)) if m else None
 
 
 # ---------- refresh ----------
