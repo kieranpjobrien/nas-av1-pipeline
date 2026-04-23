@@ -14,7 +14,6 @@ from typing import Optional
 from pipeline.circuit_breaker import CircuitBreaker, CircuitBreakerOpen
 from pipeline.ffmpeg import format_bytes
 from pipeline.full_gamut import finalize_upload, full_gamut
-from pipeline.gap_filler import analyse_gaps, gap_fill
 from pipeline.state import FileStatus, PipelineState
 from pipeline.transfer import fetch_file
 

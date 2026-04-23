@@ -36,13 +36,6 @@ def build_queues(report_path: str, config: dict, state: PipelineState, control: 
     full_gamut_queue = []
     gap_filler_queue = []
 
-    # reencode.json is the escape hatch for "re-process this file even if state DB
-    # says it's DONE" — used by the compliance audit and by force-requeues. Files
-    # listed here bypass the DONE-skip below.
-    reencode_paths = {
-        os.path.normpath(p).lower() for p in control.get_reencode_list().keys()
-    }
-
     for entry in report.get("files", []):
         filepath = entry.get("filepath", "")
         video = entry.get("video", {})
@@ -55,12 +48,10 @@ def build_queues(report_path: str, config: dict, state: PipelineState, control: 
         if control.should_skip(filepath):
             continue
 
-        norm_path = os.path.normpath(filepath).lower()
-        in_reencode = norm_path in reencode_paths
-
-        # Already done in pipeline? Skip unless it's explicitly in reencode.json
+        # Already done in pipeline? Skip. To force re-processing, delete the
+        # state DB row for the file.
         existing = state.get_file(filepath)
-        if existing and existing["status"] == "done" and not in_reencode:
+        if existing and existing["status"] == "done":
             continue
 
         if codec_raw == "av1":
@@ -70,25 +61,9 @@ def build_queues(report_path: str, config: dict, state: PipelineState, control: 
                 gap_filler_queue.append(entry)
         else:
             # Needs full encode
-            # Assign priority tier
-
             res = video.get("resolution_class", "")
             codec = video.get("codec", codec_raw)
             bitrate = entry.get("overall_bitrate_kbps", 0) or 0
-
-            tier_idx = 99
-            tier_name = f"{codec} {res}"
-            for idx, tier in enumerate(config.get("priority_tiers", [])):
-                tier_codec = tier.get("codec")
-                tier_res = tier.get("resolution")
-                min_br = tier.get("min_bitrate_kbps", 0)
-                max_br = tier.get("max_bitrate_kbps", float("inf"))
-                if tier_codec is None or tier_codec.lower() in codec_raw.lower() or tier_codec.lower() in codec.lower():
-                    if tier_res is None or tier_res.lower() == res.lower():
-                        if min_br <= bitrate <= max_br:
-                            tier_idx = idx
-                            tier_name = tier.get("name", tier_name)
-                            break
 
             full_gamut_queue.append(
                 {
@@ -106,15 +81,10 @@ def build_queues(report_path: str, config: dict, state: PipelineState, control: 
                     "subtitle_streams": entry.get("subtitle_streams", []),
                     "subtitle_count": entry.get("subtitle_count", 0),
                     "library_type": entry.get("library_type", ""),
-                    "priority_tier": tier_idx,
-                    "tier_name": tier_name,
                 }
             )
 
-    # Sort: smallest-first ("easiest quick wins"). Tier info is still on each
-    # item so operators can reason about it, but the scheduler always picks the
-    # fastest next encode. Force/priority overrides applied AFTER this sort via
-    # control.apply_queue_overrides still win — pushes go to the front.
+    # Smallest-first: easiest quick wins run before the big remuxes.
     full_gamut_queue.sort(key=lambda x: x["file_size_bytes"])
 
     # Gap filler: NAS-only work first (no fetch), then by size
@@ -205,7 +175,9 @@ def main():
     if args.dry_run:
         logging.info("\nDRY RUN -- full gamut queue:")
         for item in full_gamut_queue[:20]:
-            logging.info(f"  {item['tier_name']:25s} {item['filename']}")
+            codec = item.get("video_codec", "?")
+            res = item.get("resolution", "?")
+            logging.info(f"  {codec} {res:6s} {item['filename']}")
         if len(full_gamut_queue) > 20:
             logging.info(f"  ... and {len(full_gamut_queue) - 20} more")
         logging.info("\nDRY RUN -- gap filler queue:")

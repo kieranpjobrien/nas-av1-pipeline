@@ -14,10 +14,9 @@ DEFAULT_CONFIG = {
     # Concurrent NVENC sessions. RTX 40-series has 2 NVENC chips so 2 is the practical cap
     # with zero perf penalty. Set to 1 on older Turing/Ampere cards with one chip.
     "gpu_concurrency": 2,
-    # Concurrent SMB fetches. 2 is enough to stop a single 20 GB REMUX blocking a small file
-    # from reaching the other GPU. fetch_file uses an atomic state-lock claim so two workers
-    # can never pick the same path.
-    "fetch_concurrency": 2,
+    # Concurrent SMB fetches. One transfer already saturates the SMB link; more threads
+    # just add contention. Keep the loop, just drop the second thread.
+    "fetch_concurrency": 1,
     # Tier-3 telemetry opt-ins — both significantly slow encodes, leave off by default.
     # history_source_hash: sha256 the source before replace. Adds ~60-90s/2GB over SMB.
     # history_vmaf:        run libvmaf on a 10s sample vs output. Adds ~10-30s per encode.
@@ -104,36 +103,6 @@ DEFAULT_CONFIG = {
     "overwrite_existing": False,
     "replace_original": True,  # Replace original on NAS after verify
     "verify_duration_tolerance_secs": 2.0,
-    # Priority tiers (order matters — biggest savings first)
-    "priority_tiers": [
-        {"name": "H.264 1080p", "codec": "H.264", "resolution": "1080p", "min_bitrate_kbps": 0},
-        {"name": "Bloated HEVC 1080p", "codec": "HEVC (H.265)", "resolution": "1080p", "min_bitrate_kbps": 15000},
-        {"name": "Bloated HEVC 4K", "codec": "HEVC (H.265)", "resolution": "4K", "min_bitrate_kbps": 25000},
-        {"name": "H.264 720p/other", "codec": "H.264", "resolution": None, "min_bitrate_kbps": 0},
-        {
-            "name": "HEVC 1080p",
-            "codec": "HEVC (H.265)",
-            "resolution": "1080p",
-            "min_bitrate_kbps": 0,
-            "max_bitrate_kbps": 15000,
-        },
-        {
-            "name": "HEVC 4K >20Mbps",
-            "codec": "HEVC (H.265)",
-            "resolution": "4K",
-            "min_bitrate_kbps": 20000,
-            "max_bitrate_kbps": 25000,
-        },
-        {
-            "name": "HEVC 4K <=20Mbps",
-            "codec": "HEVC (H.265)",
-            "resolution": "4K",
-            "min_bitrate_kbps": 0,
-            "max_bitrate_kbps": 20000,
-        },
-        {"name": "HEVC 720p/SD + other", "codec": "HEVC (H.265)", "resolution": None, "min_bitrate_kbps": 0},
-        {"name": "Other codecs", "codec": None, "resolution": None, "min_bitrate_kbps": 0},
-    ],
 }
 
 # Containers that can cause NVENC failures — remux to .mkv before encoding
