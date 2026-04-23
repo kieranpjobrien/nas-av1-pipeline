@@ -27,6 +27,7 @@ from pipeline.ffmpeg import (
 )
 from pipeline.report import update_entry
 from pipeline.state import FileStatus, PipelineState
+from pipeline.streams import parse_sub_stream
 
 _MKVMERGE_SEARCH = [
     r"C:\Program Files\MKVToolNix\mkvmerge.exe",
@@ -164,19 +165,21 @@ def analyse_gaps(file_entry: dict, config: dict) -> GapAnalysis:
             gaps.audio_keep_indices = clean_audio_keep
 
     # Subtitle selection: keep exactly 1 regular English sub + forced/foreign parts
-    # Strip: HI subs, duplicate English subs, all non-English subs
-    eng_sub_langs = {"eng", "en", "english"}
+    # Strip: HI subs, duplicate English subs, all non-English subs.
+    #
+    # Uses pipeline.streams.parse_sub_stream — HI detection is stricter than the
+    # inline version that lived here (also checks disposition flags and catches
+    # ``cc``/``closed.caption``), but the English-selection behaviour is identical.
+    from pipeline.config import ENG_LANGS as _ENG_SUB_LANGS
+
     sub_keep = []
     found_regular_eng = False
-    for i, s in enumerate(sub_streams):
-        lang = (s.get("language") or s.get("detected_language") or "und").lower().strip()
-        title = (s.get("title") or "").lower()
-        is_forced = "forced" in title or "foreign" in title
-        is_hi = "hearing" in title or "sdh" in title or ".hi" in title
-
-        if is_forced:
+    for i, raw in enumerate(sub_streams):
+        sub = parse_sub_stream(raw, index=i)
+        lang = sub.language or (sub.detected_language or "und").lower().strip()
+        if sub.is_forced:
             sub_keep.append(i)  # always keep forced/foreign parts subs
-        elif lang in eng_sub_langs and not is_hi and not found_regular_eng:
+        elif lang in _ENG_SUB_LANGS and not sub.is_hi and not found_regular_eng:
             sub_keep.append(i)  # keep first regular English sub
             found_regular_eng = True
         # Everything else (HI, non-English, duplicate English, und) gets stripped
@@ -552,10 +555,15 @@ def _strip_tracks_on_nas(filepath: str, gaps: GapAnalysis, machine: dict | None 
                 logging.error(f"  Post-mkvmerge verify: 0 video streams in output — aborting replace")
                 os.remove(tmp_unc)
                 return False
-            if expected_audio > 0 and audio_n < 1:
+            # Strict check: output audio count must equal what we asked mkvmerge
+            # to keep. `audio_n < 1` (the previous check) let partial audio loss
+            # through — e.g. 3 expected, 1 actual would pass. That's also data
+            # loss; refuse it.
+            if audio_n < expected_audio:
                 logging.error(
                     f"  Post-mkvmerge verify: expected {expected_audio} audio stream(s), "
-                    f"got {audio_n} — aborting replace (would destroy audio like the 256-file bug)"
+                    f"got {audio_n} — aborting replace (would lose {expected_audio - audio_n} "
+                    f"audio track(s))"
                 )
                 os.remove(tmp_unc)
                 return False

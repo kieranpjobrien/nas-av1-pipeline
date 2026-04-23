@@ -28,6 +28,7 @@ from pathlib import Path
 
 from paths import MEDIA_REPORT, STAGING_DIR
 from pipeline.config import DEFAULT_CONFIG, KEEP_LANGS
+from pipeline.streams import is_hi_external, is_hi_internal
 
 CONTROL_DIR = STAGING_DIR / "control"
 
@@ -86,18 +87,15 @@ ORIG_LANG_EQUIVS: dict[str, set[str]] = {
 }
 
 
+# HI detection delegated to pipeline.streams; thin wrappers preserve call sites.
 def _is_hi(stream: dict) -> bool:
-    """Detect HI/SDH/captions sub streams."""
-    disp = stream.get("disposition") or {}
-    if disp.get("hearing_impaired") or disp.get("captions"):
-        return True
-    title = (stream.get("title") or "").lower()
-    return bool(re.search(r"\b(hi|sdh|hearing|cc|closed.caption)\b", title))
+    """Detect HI/SDH/captions sub streams (delegates to pipeline.streams.is_hi_internal)."""
+    return is_hi_internal(stream)
 
 
 def _is_hi_external(s: dict) -> bool:
-    parts = (s.get("filename") or "").lower().split(".")
-    return any(p in ("hi", "sdh", "cc") for p in parts[1:-1])
+    """Detect HI/SDH/CC external sidecar (delegates to pipeline.streams.is_hi_external)."""
+    return is_hi_external(s.get("filename") or "")
 
 
 def check_file(entry: dict, config: dict) -> list[str]:

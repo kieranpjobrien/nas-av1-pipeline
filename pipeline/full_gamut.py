@@ -30,6 +30,7 @@ from pipeline.ffmpeg import (
 from pipeline.language import detect_all_languages
 from pipeline.report import update_entry
 from pipeline.state import FileStatus, PipelineState
+from pipeline.streams import is_hi_external
 
 
 def _probe_full(path: str) -> dict:
@@ -341,13 +342,17 @@ def full_gamut(
 
         # Build the ONE ffmpeg command (including external subs from Bazarr)
         encode_start = time.time()
-        # Filter external subs: only regular English (not HI) — 1 sub per file
+        # Filter external subs: only regular English (not HI) — 1 sub per file.
+        # NOTE: HI detection is delegated to pipeline.streams.is_hi_external
+        # which also catches ``cc`` tokens. The old inline check only matched
+        # ``.hi.`` and ``.sdh.``. Behaviour on existing sidecars is unchanged
+        # — we just now also strip Closed-Caption variants.
         eng_external = []
         for s in external_subs:
-            fn = os.path.basename(s).lower()
-            is_eng = ".en." in fn or ".eng." in fn
-            is_hi = ".hi." in fn or ".sdh." in fn
-            if is_eng and not is_hi:
+            fn = os.path.basename(s)
+            fn_lower = fn.lower()
+            is_eng = ".en." in fn_lower or ".eng." in fn_lower
+            if is_eng and not is_hi_external(fn):
                 eng_external.append(s)
                 break  # only 1 regular English sub
         if eng_external:
@@ -624,6 +629,11 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
         violations: list[str] = []
         if (out_video.get("codec") or "").lower() not in ("av1", "av1_nvenc"):
             violations.append(f"video codec {out_video.get('codec')!r} is not AV1")
+        # ZERO-AUDIO is a violation. The previous version iterated `for a in out_audio:`
+        # and recorded no violations when the list was empty — silently shipping
+        # audio-less files. 1,787 files lost this way. Never again.
+        if not out_audio:
+            violations.append("output has zero audio streams")
         for i, a in enumerate(out_audio):
             codec = (a.get("codec") or "").lower()
             lang = (a.get("language") or "").lower().strip()
@@ -1120,10 +1130,13 @@ def _build_audio_copy_cmd(cmd: list[str]) -> list[str]:
 
     Strips per-stream -c:a:N / -b:a:N pairs (added by build_ffmpeg_cmd) and inserts a single
     global -c:a copy just before the output path. Faster and sidesteps DTS timestamp bugs.
+
+    Asserts that the rewritten command still maps audio — if the input command had
+    no audio map at all we'd produce a zero-audio output on the retry. Refuse.
     """
     out = []
     skip_next = False
-    for i, tok in enumerate(cmd):
+    for tok in cmd:
         if skip_next:
             skip_next = False
             continue
@@ -1136,6 +1149,22 @@ def _build_audio_copy_cmd(cmd: list[str]) -> list[str]:
     if out:
         output = out[-1]
         out = out[:-1] + ["-c:a", "copy", output]
+
+    # INVARIANT: rewritten command must still contain at least one -map 0:a* flag.
+    # If it doesn't, running it would produce zero-audio output with rc=0 — a
+    # silent-damage path. Fail here rather than ship the audio-less encode.
+    has_audio_map = any(
+        out[i] == "-map" and out[i + 1].startswith("0:a")
+        for i in range(len(out) - 1)
+        if out[i] == "-map"
+    )
+    if not has_audio_map:
+        raise ValueError(
+            "_build_audio_copy_cmd refused: rewritten command has no `-map 0:a*` — "
+            "retrying this would produce a zero-audio output. Original cmd was "
+            f"missing an audio map entirely: {cmd!r}"
+        )
+
     return out
 
 

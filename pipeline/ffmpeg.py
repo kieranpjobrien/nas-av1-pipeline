@@ -8,7 +8,11 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
-from pipeline.config import ENG_LANGS, KEEP_LANGS, resolve_encode_params
+from pipeline.config import KEEP_LANGS, resolve_encode_params
+from pipeline.streams import (
+    normalise_codec,
+    parse_sub_stream,
+)
 
 
 def format_bytes(b: int) -> str:
@@ -57,13 +61,12 @@ def _should_transcode_audio(audio: dict, config: dict) -> bool:
 
     Transcodes everything except EAC-3 (already target codec).
     """
-    codec_name = (audio.get("codec", "") or "").lower().strip()
-    codec_raw = (audio.get("codec_raw", "") or audio.get("codec", "") or "").lower().strip()
-
-    # EAC-3 is the target codec — no point re-encoding
-    if codec_raw in ("eac3", "eac-3", "e-ac-3") or codec_name in ("eac3", "eac-3", "e-ac-3"):
+    # EAC-3 is the target codec — no point re-encoding. Check both codec and
+    # codec_raw fields (media-report uses codec_raw; raw ffprobe uses codec).
+    if normalise_codec(audio.get("codec_raw") or audio.get("codec")) == "eac3":
         return False
-
+    if normalise_codec(audio.get("codec")) == "eac3":
+        return False
     return True
 
 
@@ -80,6 +83,10 @@ def _select_audio_streams(item: dict, config: dict) -> list[int] | None:
 
     Returns list of input stream indices to map, or None to keep all.
     Rule: keep stream 0 (original language) + all English/und tracks.
+
+    NOTE: This wraps pipeline.streams.select_audio_keep_indices but preserves
+    ffmpeg.py's historical policy of "don't bother stripping 1-2 tracks" via
+    the ``len <= 2`` short-circuit.
     """
     if not config.get("strip_non_english_audio", True):
         return None
@@ -88,9 +95,7 @@ def _select_audio_streams(item: dict, config: dict) -> list[int] | None:
     if len(audio_streams) <= 2:
         return None  # not worth stripping 1-2 tracks
 
-    keep = set()
-    keep.add(0)  # always keep first stream (original language)
-
+    keep = {0}  # always keep first stream (original language)
     for i, audio in enumerate(audio_streams):
         lang = (audio.get("language") or "").lower().strip()
         if lang in KEEP_LANGS:
@@ -111,29 +116,31 @@ def _map_subtitle_streams(cmd: list[str], item: dict, config: dict) -> None:
     """Add per-stream subtitle mappings, keeping only English/undefined tracks.
 
     If strip_non_english_subs is disabled, maps all subs with -map 0:s?.
+
+    Uses pipeline.streams.parse_sub_stream + is_hi_internal for HI detection.
+    The HI rule is stricter than the old inline check (it also catches ``cc``
+    and disposition flags) — see pipeline/streams.py for details.
     """
     if not config.get("strip_non_english_subs", True):
         cmd.extend(["-map", "0:s?"])
         return
 
-    subs = item.get("subtitle_streams", [])
-    if not subs:
+    raw_subs = item.get("subtitle_streams", [])
+    if not raw_subs:
         cmd.extend(["-map", "0:s?"])  # no metadata — let ffmpeg figure it out
         return
 
     # Keep exactly 1 regular English sub + forced. Strip HI, duplicates, foreign.
+    from pipeline.config import ENG_LANGS
+
     mapped = 0
     found_regular_eng = False
-    for i, sub in enumerate(subs):
-        lang = (sub.get("language") or "").lower().strip()
-        title = (sub.get("title") or "").lower()
-        is_forced = "forced" in title or "foreign" in title
-        is_hi = "hearing" in title or "sdh" in title or ".hi" in title
-
-        if is_forced:
+    for i, raw in enumerate(raw_subs):
+        sub = parse_sub_stream(raw, index=i)
+        if sub.is_forced:
             cmd.extend(["-map", f"0:s:{i}"])
             mapped += 1
-        elif lang in ENG_LANGS and not is_hi and not found_regular_eng:
+        elif sub.language in ENG_LANGS and not sub.is_hi and not found_regular_eng:
             cmd.extend(["-map", f"0:s:{i}"])
             mapped += 1
             found_regular_eng = True
@@ -141,8 +148,8 @@ def _map_subtitle_streams(cmd: list[str], item: dict, config: dict) -> None:
     if mapped == 0:
         # No English subs found — map all to be safe (might have unlabelled ones)
         cmd.extend(["-map", "0:s?"])
-    elif mapped < len(subs):
-        stripped = len(subs) - mapped
+    elif mapped < len(raw_subs):
+        stripped = len(raw_subs) - mapped
         logging.info(f"  Stripped {stripped} non-English subtitle stream(s)")
 
 
@@ -241,9 +248,27 @@ def build_ffmpeg_cmd(
     include_subs: bool = True,
     external_subs: list[str] | None = None,
 ) -> list[str]:
-    """Build the ffmpeg command for NVENC AV1 encoding."""
+    """Build the ffmpeg command for NVENC AV1 encoding.
+
+    Refuses to build a command for sources with zero audio streams — this is how
+    the 1,787-file audio-loss incident got so large: the pipeline would happily
+    re-encode an already-damaged file and produce another damaged output. There
+    is no legitimate reason to run this builder on a zero-audio source; callers
+    should filter those out upstream and surface them as errors.
+    """
     is_hdr = item.get("hdr", False)
     params = resolve_encode_params(config, item)
+
+    # REFUSE-TO-BUILD: zero-audio sources are either scanner false positives (fix
+    # the scanner) or pre-existing damage (delete + re-source). Either way, never
+    # emit an encode command for them.
+    audio_streams = item.get("audio_streams") or []
+    if not audio_streams:
+        raise ValueError(
+            f"build_ffmpeg_cmd refused: source has zero audio streams ({input_path}). "
+            "Zero-audio sources must be filtered out upstream — encoding them would "
+            "just propagate the damage into an AV1 copy."
+        )
 
     # Hard cap on output duration — `+genpts` plus EAC-3 audio transcoding can produce
     # output files whose container duration is inflated 20-30% over the source (seen in
@@ -262,8 +287,11 @@ def build_ffmpeg_cmd(
     cmd = [
         "ffmpeg",
         "-y",
-        "-err_detect",
-        "ignore_err",  # continue past corrupt data in input
+        # Scope `ignore_err` to VIDEO only. Global `-err_detect ignore_err` was the root
+        # cause of silent audio loss: combined with `-map 0:a?`, a corrupt audio header
+        # caused ffmpeg to skip the audio stream and exit 0 with a zero-audio output.
+        "-err_detect:v",
+        "ignore_err",
         # Regenerate timestamps from frame order — fixes "Non-monotonic DTS" errors on output
         # EAC-3 streams when the source is DTS-HD MA (seen on Vinny, Dances With Wolves).
         "-fflags",
@@ -286,12 +314,16 @@ def build_ffmpeg_cmd(
     # Map only the first video stream from input 0
     cmd.extend(["-map", "0:v:0"])
 
-    # Audio stream mapping
+    # Audio stream mapping. Use `-map 0:a` (NOT `0:a?`) — the `?` (optional) form
+    # silently produced zero-audio output when combined with a corrupt audio header
+    # or a stale audio_streams list. We already refused empty audio_streams at the
+    # top of this function, so a non-optional map is safe and will fail loudly if
+    # the source genuinely has no audio.
     if audio_keep is not None:
         for idx in audio_keep:
             cmd.extend(["-map", f"0:a:{idx}"])
     else:
-        cmd.extend(["-map", "0:a?"])
+        cmd.extend(["-map", "0:a"])
 
     if include_subs:
         _map_subtitle_streams(cmd, item, config)
@@ -373,37 +405,34 @@ def build_ffmpeg_cmd(
         )
 
     # Audio handling — codec settings use OUTPUT stream indices (which differ from
-    # input indices when non-English audio streams have been stripped)
+    # input indices when non-English audio streams have been stripped).
+    # audio_streams is guaranteed non-empty (refused at top of function).
     if config["audio_mode"] == "copy":
         cmd.extend(["-c:a", "copy"])
     elif config["audio_mode"] == "smart":
-        audio_streams = item.get("audio_streams", [])
-        if not audio_streams:
-            cmd.extend(["-c:a", "copy"])
-        else:
-            loudnorm = config.get("audio_loudnorm", False)
-            # Iterate over the streams we're actually keeping
-            kept_streams = (
-                [(idx, audio_streams[idx]) for idx in audio_keep] if audio_keep else list(enumerate(audio_streams))
-            )
-            for out_idx, (_, audio) in enumerate(kept_streams):
-                if _should_transcode_audio(audio, config):
-                    channels = audio.get("channels", 2)
-                    bitrate = (
-                        config["audio_eac3_surround_bitrate"] if channels > 2 else config["audio_eac3_stereo_bitrate"]
-                    )
-                    if loudnorm:
-                        cmd.extend([f"-filter:a:{out_idx}", "loudnorm=I=-24:LRA=7:TP=-2"])
-                    cmd.extend(
-                        [
-                            f"-c:a:{out_idx}",
-                            "eac3",
-                            f"-b:a:{out_idx}",
-                            bitrate,
-                        ]
-                    )
-                else:
-                    cmd.extend([f"-c:a:{out_idx}", "copy"])
+        loudnorm = config.get("audio_loudnorm", False)
+        # Iterate over the streams we're actually keeping
+        kept_streams = (
+            [(idx, audio_streams[idx]) for idx in audio_keep] if audio_keep else list(enumerate(audio_streams))
+        )
+        for out_idx, (_, audio) in enumerate(kept_streams):
+            if _should_transcode_audio(audio, config):
+                channels = audio.get("channels", 2)
+                bitrate = (
+                    config["audio_eac3_surround_bitrate"] if channels > 2 else config["audio_eac3_stereo_bitrate"]
+                )
+                if loudnorm:
+                    cmd.extend([f"-filter:a:{out_idx}", "loudnorm=I=-24:LRA=7:TP=-2"])
+                cmd.extend(
+                    [
+                        f"-c:a:{out_idx}",
+                        "eac3",
+                        f"-b:a:{out_idx}",
+                        bitrate,
+                    ]
+                )
+            else:
+                cmd.extend([f"-c:a:{out_idx}", "copy"])
 
     # Subtitles: copy all (when mapped)
     if include_subs:
@@ -438,7 +467,17 @@ def build_ffmpeg_cmd(
 def build_audio_remux_cmd(
     input_path: str, output_path: str, item: dict, config: dict, include_subs: bool = True
 ) -> list[str]:
-    """Build ffmpeg command that copies video but transcodes bulky audio to EAC-3."""
+    """Build ffmpeg command that copies video but transcodes bulky audio to EAC-3.
+
+    Refuses to build for zero-audio sources — see `build_ffmpeg_cmd` docstring.
+    """
+    audio_streams = item.get("audio_streams") or []
+    if not audio_streams:
+        raise ValueError(
+            f"build_audio_remux_cmd refused: source has zero audio streams ({input_path}). "
+            "Zero-audio sources must be filtered out upstream."
+        )
+
     audio_keep = _select_audio_streams(item, config)
     source_duration = item.get("duration_seconds") or get_duration(input_path) or 0
 
@@ -450,11 +489,12 @@ def build_audio_remux_cmd(
         "-map",
         "0:v:0",
     ]
+    # Hard (non-optional) audio map — see comment in build_ffmpeg_cmd.
     if audio_keep is not None:
         for idx in audio_keep:
             cmd.extend(["-map", f"0:a:{idx}"])
     else:
-        cmd.extend(["-map", "0:a?"])
+        cmd.extend(["-map", "0:a"])
 
     if include_subs:
         _map_subtitle_streams(cmd, item, config)
@@ -462,31 +502,28 @@ def build_audio_remux_cmd(
     # Video: copy (already AV1)
     cmd.extend(["-c:v", "copy"])
 
-    # Audio: smart transcode (output indices, not input)
-    audio_streams = item.get("audio_streams", [])
-    if not audio_streams:
-        cmd.extend(["-c:a", "copy"])
-    else:
-        loudnorm = config.get("audio_loudnorm", False)
-        kept_streams = (
-            [(idx, audio_streams[idx]) for idx in audio_keep] if audio_keep else list(enumerate(audio_streams))
-        )
-        for out_idx, (_, audio) in enumerate(kept_streams):
-            if _should_transcode_audio(audio, config):
-                channels = audio.get("channels", 2)
-                bitrate = config["audio_eac3_surround_bitrate"] if channels > 2 else config["audio_eac3_stereo_bitrate"]
-                if loudnorm:
-                    cmd.extend([f"-filter:a:{out_idx}", "loudnorm=I=-24:LRA=7:TP=-2"])
-                cmd.extend(
-                    [
-                        f"-c:a:{out_idx}",
-                        "eac3",
-                        f"-b:a:{out_idx}",
-                        bitrate,
-                    ]
-                )
-            else:
-                cmd.extend([f"-c:a:{out_idx}", "copy"])
+    # Audio: smart transcode (output indices, not input).
+    # audio_streams is guaranteed non-empty (refused at top of function).
+    loudnorm = config.get("audio_loudnorm", False)
+    kept_streams = (
+        [(idx, audio_streams[idx]) for idx in audio_keep] if audio_keep else list(enumerate(audio_streams))
+    )
+    for out_idx, (_, audio) in enumerate(kept_streams):
+        if _should_transcode_audio(audio, config):
+            channels = audio.get("channels", 2)
+            bitrate = config["audio_eac3_surround_bitrate"] if channels > 2 else config["audio_eac3_stereo_bitrate"]
+            if loudnorm:
+                cmd.extend([f"-filter:a:{out_idx}", "loudnorm=I=-24:LRA=7:TP=-2"])
+            cmd.extend(
+                [
+                    f"-c:a:{out_idx}",
+                    "eac3",
+                    f"-b:a:{out_idx}",
+                    bitrate,
+                ]
+            )
+        else:
+            cmd.extend([f"-c:a:{out_idx}", "copy"])
 
     # Subtitles: copy
     if include_subs:

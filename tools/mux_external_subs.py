@@ -42,21 +42,18 @@ except (AttributeError, OSError):
 
 from paths import MEDIA_REPORT
 from pipeline.nas_worker import NAS, SERVER, remote_identify, remote_strip_and_mux, unc_to_container_path
+from pipeline.streams import is_hi_external, is_hi_internal
 
 ENG_LANGS = {"en", "eng", "english"}
 
 
+# Thin wrappers preserve existing call-site names; logic lives in pipeline.streams.
 def _is_hi_ext(s: dict) -> bool:
-    parts = (s.get("filename") or "").lower().split(".")
-    return any(p in ("hi", "sdh", "cc") for p in parts[1:-1])
+    return is_hi_external(s.get("filename") or "")
 
 
 def _is_hi_int(s: dict) -> bool:
-    import re
-    d = s.get("disposition") or {}
-    if d.get("hearing_impaired") or d.get("captions"):
-        return True
-    return bool(re.search(r"\b(hi|sdh|hearing|cc|closed.caption)\b", (s.get("title") or "").lower()))
+    return is_hi_internal(s)
 
 
 def find_candidates() -> list[dict]:
@@ -172,6 +169,18 @@ def mux_one(target: dict, machine: dict) -> tuple[str, str]:
         try: os.remove(tmp_path)
         except OSError: pass
         return "fail", f"verify: 0 video streams in output"
+    # Absolute floor: zero audio is NEVER a valid mux-sub output. The equality check
+    # below against `expected_audio` is tautologically satisfied when the SOURCE
+    # was already damaged (expected_audio=0, acount=0) — which would rubber-stamp
+    # pre-existing damage as "muxed OK". Enforce a hard floor first.
+    if acount < 1:
+        try: os.remove(tmp_path)
+        except OSError: pass
+        return "fail", (
+            f"verify: output has 0 audio streams (source likely already damaged; "
+            f"expected_audio from scanner was {expected_audio} — refusing to "
+            f"launder a zero-audio file as successful mux)"
+        )
     if acount != expected_audio:
         try: os.remove(tmp_path)
         except OSError: pass
