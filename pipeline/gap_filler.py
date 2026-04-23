@@ -381,19 +381,22 @@ def gap_fill(
         except Exception as e:
             logging.warning(f"  Report update failed: {e}")
 
-        # If track strip was deferred (SSH unavailable), mark the file accordingly so it can
-        # be identified for a retry when SSH is configured. Still counts as "done for now"
-        # because the local ops succeeded and there's no point re-running them.
+        # If track strip was deferred (SSH unavailable / rc=137 / exception), the file is
+        # NOT done — its audio/sub tracks still need stripping. Marking DONE here lost 65
+        # files overnight 2026-04-23 because the queue builder skips DONE rows. The correct
+        # status is ERROR so the next queue build retries, while also surfacing the problem
+        # to the user via the Errors page.
         if track_strip_deferred:
             state.set_file(
                 filepath,
-                FileStatus.DONE,
+                FileStatus.ERROR,
                 mode="gap_filler",
-                reason="local ops done; track_strip deferred (ssh unavailable)",
+                stage="track_strip",
+                error="track strip failed (ssh unavailable or remote failure)",
             )
-            logging.info(
-                f"  DONE (partial — strip deferred): {filename} "
-                f"— local ops applied, track strip will need SSH on a retry."
+            logging.warning(
+                f"  ERROR (track strip failed): {filename} "
+                f"— local ops applied, but track strip still owed. Will retry on next queue build."
             )
         else:
             state.set_file(filepath, FileStatus.DONE, mode="gap_filler")
