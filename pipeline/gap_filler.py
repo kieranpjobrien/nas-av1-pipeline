@@ -141,8 +141,12 @@ def analyse_gaps(file_entry: dict, config: dict) -> GapAnalysis:
                 gaps.audio_transcode_indices.append(i)
             gaps.audio_keep_indices.append(i)
 
-    # Foreign audio check (keep track 0 + English/und)
-    if len(audio_streams) > 1:
+    # Foreign audio check (keep track 0 + English/und).
+    # GATED by config["strip_non_english_audio"]. When stripping is on HOLD
+    # (e.g. awaiting whisper language verification), we do NOT plan any audio
+    # track removal here — the file is still fine for every other gap-fill
+    # action (metadata, filename clean, sub mux).
+    if config.get("strip_non_english_audio", True) and len(audio_streams) > 1:
         clean_audio_keep = [0]  # always keep original
         for i, a in enumerate(audio_streams):
             if i == 0:
@@ -154,29 +158,35 @@ def analyse_gaps(file_entry: dict, config: dict) -> GapAnalysis:
             gaps.needs_track_removal = True
             gaps.audio_keep_indices = clean_audio_keep
 
-    # Subtitle selection: keep exactly 1 regular English sub + forced/foreign parts
+    # Subtitle selection: keep exactly 1 regular English sub + forced/foreign parts.
     # Strip: HI subs, duplicate English subs, all non-English subs.
+    #
+    # GATED by config["strip_non_english_subs"]. When stripping is on HOLD
+    # we keep every existing sub. `sub_keep_indices` stays empty; the
+    # `_strip_tracks_on_nas` None path (``sub_keep_ids=None``) then signals
+    # "keep all" to mkvmerge.
     #
     # Uses pipeline.streams.parse_sub_stream — HI detection is stricter than the
     # inline version that lived here (also checks disposition flags and catches
     # ``cc``/``closed.caption``), but the English-selection behaviour is identical.
-    from pipeline.config import ENG_LANGS as _ENG_SUB_LANGS
+    if config.get("strip_non_english_subs", True):
+        from pipeline.config import ENG_LANGS as _ENG_SUB_LANGS
 
-    sub_keep = []
-    found_regular_eng = False
-    for i, raw in enumerate(sub_streams):
-        sub = parse_sub_stream(raw, index=i)
-        lang = sub.language or (sub.detected_language or "und").lower().strip()
-        if sub.is_forced:
-            sub_keep.append(i)  # always keep forced/foreign parts subs
-        elif lang in _ENG_SUB_LANGS and not sub.is_hi and not found_regular_eng:
-            sub_keep.append(i)  # keep first regular English sub
-            found_regular_eng = True
-        # Everything else (HI, non-English, duplicate English, und) gets stripped
+        sub_keep = []
+        found_regular_eng = False
+        for i, raw in enumerate(sub_streams):
+            sub = parse_sub_stream(raw, index=i)
+            lang = sub.language or (sub.detected_language or "und").lower().strip()
+            if sub.is_forced:
+                sub_keep.append(i)  # always keep forced/foreign parts subs
+            elif lang in _ENG_SUB_LANGS and not sub.is_hi and not found_regular_eng:
+                sub_keep.append(i)  # keep first regular English sub
+                found_regular_eng = True
+            # Everything else (HI, non-English, duplicate English, und) gets stripped
 
-    if len(sub_keep) < len(sub_streams):
-        gaps.needs_track_removal = True
-    gaps.sub_keep_indices = sub_keep
+        if len(sub_keep) < len(sub_streams):
+            gaps.needs_track_removal = True
+        gaps.sub_keep_indices = sub_keep
 
     # TMDb metadata check
     if not file_entry.get("tmdb"):
