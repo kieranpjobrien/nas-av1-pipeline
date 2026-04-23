@@ -290,6 +290,48 @@ def gap_fill(
         _scan_external_subs(filepath, gaps)
 
     if not gaps.needs_anything:
+        # Re-probe before marking DONE. The cached gap analysis was built from
+        # media_report which can lag reality — an external sub may have been dropped in
+        # since, or the audio count may have changed on a re-encode/merge by another
+        # worker. If a fresh probe disagrees with the cached analysis we re-run the
+        # gap_fill with the new entry instead of committing a stale DONE.
+        try:
+            from pipeline.report import build_file_entry, probe_file
+
+            probe_data = probe_file(filepath)
+            if probe_data:
+                fresh_entry = build_file_entry(filepath, probe_data, library_type)
+                # Preserve tmdb/detection data from the cached entry so we don't
+                # falsely mark needs_metadata / needs_language_detect after re-probe.
+                for k in ("tmdb",):
+                    if file_entry.get(k) and not fresh_entry.get(k):
+                        fresh_entry[k] = file_entry[k]
+                for stream_key in ("audio_streams", "subtitle_streams"):
+                    old_streams = file_entry.get(stream_key) or []
+                    new_streams = fresh_entry.get(stream_key) or []
+                    for j, s in enumerate(new_streams):
+                        if j < len(old_streams):
+                            for field in (
+                                "detected_language",
+                                "detection_confidence",
+                                "detection_method",
+                                "whisper_attempted",
+                            ):
+                                if old_streams[j].get(field) and not s.get(field):
+                                    s[field] = old_streams[j][field]
+                fresh_gaps = analyse_gaps(fresh_entry, config)
+                _scan_external_subs(filepath, fresh_gaps)
+                if fresh_gaps.needs_anything:
+                    logging.info(
+                        f"  Re-probe disagrees with cached analysis for {filename}: "
+                        f"{fresh_gaps.describe()} — re-running gap_fill with fresh entry."
+                    )
+                    return gap_fill(filepath, fresh_entry, fresh_gaps, config, state)
+        except Exception as e:
+            # Re-probe is a best-effort sanity check; a failure here shouldn't block
+            # the DONE marking that the caller already decided was warranted.
+            logging.debug(f"  Re-probe before DONE short-circuit failed (non-fatal): {e}")
+
         state.set_file(filepath, FileStatus.DONE, mode="gap_filler", reason="nothing to do")
         return True
 
