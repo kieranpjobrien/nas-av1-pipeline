@@ -12,7 +12,7 @@ import os
 from fastapi import APIRouter, HTTPException
 
 from paths import MEDIA_REPORT
-from server.helpers import _get_pipeline_state, read_json_safe
+from server.helpers import _get_pipeline_state, invalidate_report_cache, read_report_cached
 from server.models import DeleteFileRequest
 
 router = APIRouter()
@@ -43,6 +43,11 @@ def rename_file(req: dict) -> dict:
             from pipeline.report import update_entry
 
             update_entry(new_path, "movie" if "Movies" in new_path else "series")
+            # The update_entry call rewrites media_report.json in-process, so
+            # the mtime-stat check will catch it next read — but clearing now
+            # means this same request's follow-up reads hit a fresh parse
+            # instead of a stale cached dict.
+            invalidate_report_cache()
         except Exception:
             pass
         return {"ok": True, "old": path, "new": new_path}
@@ -135,7 +140,7 @@ def get_file_detail(path: str) -> dict:
     """Cross-reference media report + pipeline state for a single file."""
     result: dict = {"path": path, "media": None, "pipeline": None}
 
-    report_data = read_json_safe(MEDIA_REPORT)
+    report_data = read_report_cached(MEDIA_REPORT)
     if report_data:
         norm = os.path.normpath(path).lower()
         for entry in report_data.get("files", []):
@@ -157,7 +162,7 @@ def get_duplicates() -> dict:
 
     from tools.duplicates import find_title_duration_dupes, pick_best, score_file
 
-    data = read_json_safe(MEDIA_REPORT)
+    data = read_report_cached(MEDIA_REPORT)
     if data is None:
         raise HTTPException(404, "media_report.json not found")
     files = data.get("files", [])

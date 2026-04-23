@@ -13,7 +13,7 @@ from fastapi import APIRouter, HTTPException
 from paths import MEDIA_REPORT
 from pipeline.config import ENG_LANGS, KEEP_LANGS
 from pipeline.streams import is_hi_external, is_hi_internal, tmdb_keeper_langs
-from server.helpers import read_json_safe
+from server.helpers import read_report_cached
 
 router = APIRouter()
 
@@ -155,7 +155,7 @@ def _compliance_for_entry(entry: dict, keep_langs: set[str] | None = None) -> di
 @router.get("/api/media-report")
 def get_media_report() -> dict:
     """Return the full media report."""
-    data = read_json_safe(MEDIA_REPORT)
+    data = read_report_cached(MEDIA_REPORT)
     if data is None:
         raise HTTPException(404, "media_report.json not found")
     return data
@@ -170,7 +170,7 @@ def get_library_completion() -> dict:
     if _completion_cache is not None and (now - _completion_cache_time) < _COMPLETION_CACHE_TTL:
         return _completion_cache
 
-    data = read_json_safe(MEDIA_REPORT)
+    data = read_report_cached(MEDIA_REPORT)
     if data is None:
         raise HTTPException(404, "media_report.json not found")
 
@@ -373,7 +373,7 @@ def get_completion_missing(category: str) -> dict:
 
     Categories: video, audio, subs, tmdb, langs, filename
     """
-    data = read_json_safe(MEDIA_REPORT)
+    data = read_report_cached(MEDIA_REPORT)
     if data is None:
         raise HTTPException(404, "media_report.json not found")
     files = data.get("files", [])

@@ -38,6 +38,7 @@ from server.helpers import (
     file_exists,
     get_pause_state,
     read_json_safe,
+    read_report_cached,
 )
 from server.models import (
     ForceRequest,
@@ -264,7 +265,7 @@ def compact_state() -> dict:
 @router.post("/api/quick-wins")
 def quick_wins() -> dict:
     """Bulk-force AV1 files needing audio or cleanup work to the front of the pipeline queue."""
-    data = read_json_safe(MEDIA_REPORT)
+    data = read_report_cached(MEDIA_REPORT)
     if data is None:
         raise HTTPException(404, "media_report.json not found")
 
