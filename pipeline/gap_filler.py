@@ -526,7 +526,13 @@ def _strip_tracks_on_nas(filepath: str, gaps: GapAnalysis, machine: dict | None 
     tmp_unc = filepath + ".gapfill_tmp.mkv"
     try:
         dst_size = os.path.getsize(tmp_unc)
-        if dst_size < src_size * 0.3:
+        # Size sanity check. The floor used to be 30% but legitimate sub-only
+        # strips can legitimately drop below that when a file carried many
+        # PGS/bitmap sub streams (e.g. Blu-ray remuxes with 10-30+ language
+        # subs at 1-5 MB each). Lowered to 10% — anything smaller is a genuine
+        # truncation. The ffprobe block below is the authoritative integrity
+        # check: it validates stream counts regardless of size.
+        if dst_size < src_size * 0.1:
             logging.error(f"  Output too small ({format_bytes(dst_size)} vs {format_bytes(src_size)})")
             os.remove(tmp_unc)
             return False
