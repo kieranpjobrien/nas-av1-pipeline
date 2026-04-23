@@ -166,6 +166,20 @@ def main():
     os.makedirs(args.staging, exist_ok=True)
     setup_logging(args.staging)
 
+    # ProcessRegistry reconcile at session start. Before we launch any worker
+    # threads, drop entries whose PIDs are dead or recycled — ghost entries from
+    # previous sessions that crashed without cleaning up would otherwise block
+    # our own registration for the same role.
+    from pathlib import Path
+
+    from pipeline.process_registry import ProcessRegistry
+
+    registry_path = Path(args.staging) / "control" / "agents.registry.json"
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+    registry = ProcessRegistry(registry_path)
+    dead = registry.reconcile()
+    logging.info(f"Reaped {len(dead)} dead registry entries: {dead}")
+
     # State
     db_path = args.state_file or os.path.join(args.staging, "pipeline_state.db")
     state = PipelineState(db_path)
@@ -208,15 +222,18 @@ def main():
         logging.info("Nothing to process!")
         return
 
-    # Run orchestrator
+    # Run orchestrator under the process registry so a crashed session's
+    # entry is still reaped next time (reconcile above) and live entries
+    # are visible to tools like `tools/invariants.py`.
     from pipeline.orchestrator import Orchestrator
 
     orchestrator = Orchestrator(config, state, args.staging, control)
 
-    if args.gap_filler_only:
-        orchestrator.run([], gap_filler_queue, enable_gap_filler=True)
-    else:
-        orchestrator.run(full_gamut_queue, gap_filler_queue, enable_gap_filler=not args.no_gap_filler)
+    with registry.register("pipeline", sys.argv):
+        if args.gap_filler_only:
+            orchestrator.run([], gap_filler_queue, enable_gap_filler=True)
+        else:
+            orchestrator.run(full_gamut_queue, gap_filler_queue, enable_gap_filler=not args.no_gap_filler)
 
 
 if __name__ == "__main__":

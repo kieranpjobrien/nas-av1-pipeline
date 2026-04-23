@@ -223,7 +223,8 @@ def extract_info(filepath: str, probe_data: dict, library_type: str) -> dict:
     # Delegates to pipeline.subs.scan_sidecars which uses the SCAN_EXTS set
     # (includes .vtt/.idx). We convert the SidecarSub dataclasses into the
     # dict shape media_report has always stored.
-    from pipeline.subs import SCAN_EXTS, scan_sidecars as _scan_sidecars
+    from pipeline.subs import SCAN_EXTS
+    from pipeline.subs import scan_sidecars as _scan_sidecars
 
     external_subs = []
     for sub in _scan_sidecars(filepath, exts=SCAN_EXTS):
@@ -512,6 +513,26 @@ def main():
     )
     args = parser.parse_args()
 
+    # ProcessRegistry reconcile + register. A scanner run that crashed without
+    # cleanup would otherwise leave a stale entry; reconcile() clears it so we
+    # can register under the same role name.
+    from pathlib import Path as _Path
+
+    from paths import STAGING_DIR as _STAGING_DIR
+    from pipeline.process_registry import ProcessRegistry as _ProcessRegistry
+
+    _registry_path = _Path(_STAGING_DIR) / "control" / "agents.registry.json"
+    _registry_path.parent.mkdir(parents=True, exist_ok=True)
+    _registry = _ProcessRegistry(_registry_path)
+    _dead = _registry.reconcile()
+    print(f"Reaped {len(_dead)} dead registry entries: {_dead}")
+
+    with _registry.register("scanner", sys.argv):
+        _scan_body(args)
+
+
+def _scan_body(args) -> None:
+    """The actual scanner logic, invoked inside the process registry context."""
     all_files = []
 
     for path, lib_type in [(args.movies, "movie"), (args.series, "series")]:
@@ -729,15 +750,18 @@ def main():
     print(f"  Report:      {output_path}")
     print(f"{'=' * 60}")
 
-    # Non-English CSV (uses the already-scanned report, no extra ffprobe calls)
-    if args.non_english_csv:
-        count = write_non_english_csv(report, args.non_english_csv)
-        print(f"\nNon-English audio: {count} files written to {args.non_english_csv}")
+    # Non-English CSV (uses the already-scanned report, no extra ffprobe calls).
+    # Read back under the lock so we see the merged result, not the pre-patch state.
+    if args.non_english_csv or args.missing_subs_csv:
+        from tools.report_lock import read_report
 
-    # Missing subs CSV
-    if args.missing_subs_csv:
-        count = write_missing_subs_csv(report, args.missing_subs_csv)
-        print(f"\nMissing subtitles: {count} files written to {args.missing_subs_csv}")
+        report = read_report()
+        if args.non_english_csv:
+            count = write_non_english_csv(report, args.non_english_csv)
+            print(f"\nNon-English audio: {count} files written to {args.non_english_csv}")
+        if args.missing_subs_csv:
+            count = write_missing_subs_csv(report, args.missing_subs_csv)
+            print(f"\nMissing subtitles: {count} files written to {args.missing_subs_csv}")
 
 
 if __name__ == "__main__":

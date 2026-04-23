@@ -219,6 +219,23 @@ def main() -> None:
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
+    # Register this process so concurrent mux_external_subs runs are detected
+    # and dead-PID entries from crashed runs are reaped on start.
+    from paths import STAGING_DIR as _STAGING_DIR
+    from pipeline.process_registry import ProcessRegistry as _ProcessRegistry
+
+    _registry_path = Path(_STAGING_DIR) / "control" / "agents.registry.json"
+    _registry_path.parent.mkdir(parents=True, exist_ok=True)
+    _registry = _ProcessRegistry(_registry_path)
+    _dead = _registry.reconcile()
+    print(f"Reaped {len(_dead)} dead registry entries: {_dead}")
+
+    with _registry.register("mux_external_subs", sys.argv):
+        _mux_body(args)
+
+
+def _mux_body(args) -> None:
+    """Mux loop body, invoked inside the ProcessRegistry context."""
     machine = NAS if args.machine == "nas" else SERVER
     if not machine.get("host"):
         print(f"ERROR: {args.machine}_SSH_HOST env var not set")
