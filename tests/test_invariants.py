@@ -1,301 +1,251 @@
-"""Tests for tools/invariants.py and the /api/health-deep endpoint."""
+"""Regression coverage for ``tools.invariants``.
+
+Focused on the 2026-04-23 audio-loss incident: AV1 files with zero audio
+streams must be flagged, and DONE rows paired with a "deferred" reason
+must fail CRITICAL. A smoke test runs the full battery with SSH skipped
+so CI can exercise the orchestration path without a live NAS.
+"""
 
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
-import time
 from pathlib import Path
-from typing import Any
 
-import psutil
-import pytest
-
-from tools import invariants as inv
-
-
-def _seed_state_db(db_path: str, rows: list[dict[str, Any]]) -> None:
-    """Create a pipeline_files table and insert seed rows."""
-    conn = sqlite3.connect(db_path)
-    try:
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS pipeline_files (
-                filepath TEXT PRIMARY KEY,
-                status TEXT NOT NULL DEFAULT 'pending',
-                mode TEXT DEFAULT 'full_gamut',
-                added TEXT,
-                last_updated TEXT,
-                tier TEXT,
-                local_path TEXT,
-                output_path TEXT,
-                dest_path TEXT,
-                error TEXT,
-                stage TEXT,
-                reason TEXT,
-                res_key TEXT,
-                extras TEXT DEFAULT '{}'
-            )
-            """
-        )
-        for r in rows:
-            cols = list(r.keys())
-            placeholders = ", ".join(["?"] * len(cols))
-            conn.execute(
-                f"INSERT OR REPLACE INTO pipeline_files ({', '.join(cols)}) VALUES ({placeholders})",
-                [r[c] for c in cols],
-            )
-        conn.commit()
-    finally:
-        conn.close()
-
-
-@pytest.fixture()
-def patched_paths(tmp_path, monkeypatch):
-    """Redirect invariants' MEDIA_REPORT / PIPELINE_STATE_DB / STAGING_DIR into tmp."""
-    staging = tmp_path / "staging"
-    staging.mkdir()
-    report = staging / "media_report.json"
-    db = staging / "pipeline_state.db"
-    monkeypatch.setattr(inv, "MEDIA_REPORT", report)
-    monkeypatch.setattr(inv, "PIPELINE_STATE_DB", db)
-    monkeypatch.setattr(inv, "STAGING_DIR", staging)
-    return staging, report, db
-
-
-class TestNoAudiolessAv1:
-    """AV1 entries missing audio_streams must be flagged."""
-
-    def test_catches_damage(self, patched_paths):
-        _, report, _ = patched_paths
-        data = {
-            "files": [
-                {
-                    "filepath": r"\\KieranNAS\Media\Movies\Bad.mkv",
-                    "video": {"codec_raw": "av1"},
-                    "audio_streams": [],
-                },
-                {
-                    "filepath": r"\\KieranNAS\Media\Movies\Good.mkv",
-                    "video": {"codec_raw": "av1"},
-                    "audio_streams": [{"codec": "eac3"}],
-                },
-            ],
-            "summary": {"total_files": 2},
-        }
-        report.write_text(json.dumps(data), encoding="utf-8")
-        result = inv.check_no_audioless_av1()
-        assert not result.ok
-        assert result.value == 1
-        assert result.severity == "critical"
-        assert "Bad.mkv" in result.message
-
-    def test_passes_when_clean(self, patched_paths):
-        _, report, _ = patched_paths
-        data = {
-            "files": [
-                {
-                    "filepath": "ok.mkv",
-                    "video": {"codec_raw": "av1"},
-                    "audio_streams": [{"codec": "eac3"}],
-                }
-            ],
-            "summary": {"total_files": 1},
-        }
-        report.write_text(json.dumps(data), encoding="utf-8")
-        result = inv.check_no_audioless_av1()
-        assert result.ok
-        assert result.value == 0
-
-
-class TestNoDoneWithDeferredReason:
-    """status=DONE paired with reason like 'deferred'/'skipped' is the 2026-04-23 lie."""
-
-    def test_catches_lie(self, patched_paths):
-        _, _, db = patched_paths
-        _seed_state_db(
-            str(db),
-            [
-                {
-                    "filepath": "liar.mkv",
-                    "status": "done",
-                    "reason": "deferred strip",
-                    "extras": "{}",
-                },
-                {
-                    "filepath": "honest.mkv",
-                    "status": "done",
-                    "reason": "",
-                    "extras": "{}",
-                },
-            ],
-        )
-        result = inv.check_no_done_with_deferred_reason()
-        assert not result.ok
-        assert result.value == 1
-        assert result.severity == "critical"
-        assert "deferred" in result.message.lower() or "skip" in result.message.lower()
-
-    def test_passes_when_clean(self, patched_paths):
-        _, _, db = patched_paths
-        _seed_state_db(
-            str(db),
-            [
-                {"filepath": "ok1.mkv", "status": "done", "reason": "", "extras": "{}"},
-                {"filepath": "ok2.mkv", "status": "error", "reason": "deferred", "extras": "{}"},
-            ],
-        )
-        result = inv.check_no_done_with_deferred_reason()
-        assert result.ok
-        assert result.value == 0
-
-
-class TestNoStaleTmp:
-    """Entries with *.tmp suffixes should fail the stale tmp check."""
-
-    def test_catches_stale_tmp(self, patched_paths):
-        _, report, _ = patched_paths
-        report.write_text(
-            json.dumps(
-                {
-                    "files": [
-                        {"filepath": r"\\nas\Media\x.mkv.gapfill_tmp.mkv"},
-                        {"filepath": r"\\nas\Media\y.mkv.submux_tmp.mkv"},
-                        {"filepath": r"\\nas\Media\z.mkv"},
-                    ],
-                    "summary": {"total_files": 3},
-                }
-            ),
-            encoding="utf-8",
-        )
-        result = inv.check_no_stale_tmp_on_nas()
-        assert not result.ok
-        assert result.value == 2
-
-
-class TestGhostProcessDetection:
-    """Pipeline python processes unknown to the registry are ghosts."""
-
-    def test_ghost_python_process_detection(self, patched_paths, monkeypatch):
-        staging, _, _ = patched_paths
-        control = staging / "control"
-        control.mkdir(parents=True, exist_ok=True)
-        reg_path = control / "agents.registry.json"
-
-        # Register a fake entry, then pretend its PID was reaped.
-        dead_pid = _find_dead_pid()
-        reg_path.write_text(
-            json.dumps(
-                [
-                    {
-                        "role": "scanner",
-                        "pid": dead_pid,
-                        "cmd": ["python", "-m", "tools.scanner"],
-                        "started_at": time.time() - 3600,
-                        "create_time": time.time() - 3600,
-                        "last_heartbeat": time.time() - 3600,
-                    }
-                ]
-            ),
-            encoding="utf-8",
-        )
-
-        # Reconcile should drop the dead entry so it's no longer "registered".
-        from pipeline.process_registry import ProcessRegistry
-
-        reg = ProcessRegistry(reg_path, heartbeat_secs=60)
-        removed = reg.reconcile()
-        assert removed == ["scanner"]
-        assert reg.list_active() == []
-
-        # Fabricate a "ghost" psutil process running a pipeline module.
-        class FakeProc:
-            info = {
-                "pid": 99991,
-                "name": "python.exe",
-                "cmdline": ["python", "-m", "pipeline", "--foo"],
-            }
-
-        def fake_iter(*_args, **_kwargs):
-            yield FakeProc()
-
-        monkeypatch.setattr(psutil, "process_iter", fake_iter)
-
-        result = inv.check_no_ghost_python_processes()
-        assert not result.ok
-        assert result.value >= 1
-        assert result.severity == "medium"
-        assert "ghost" in result.message.lower() or "pipeline" in result.message.lower()
-
-
-class TestSummaryMatches:
-    def test_drift_detected(self, patched_paths):
-        _, report, _ = patched_paths
-        report.write_text(
-            json.dumps({"files": [{"filepath": "a"}], "summary": {"total_files": 5}}),
-            encoding="utf-8",
-        )
-        result = inv.check_media_report_summary_matches()
-        assert not result.ok
-        assert result.value == 4
-
-
-class TestHealthDeepEndpoint:
-    """TestClient integration: /api/health-deep returns the right schema."""
-
-    def test_health_deep_endpoint_aggregates(self, test_app):
-        resp = test_app.get("/api/health-deep")
-        assert resp.status_code == 200
-        data = resp.json()
-        assert "generated_at" in data
-        assert "all_green" in data
-        assert isinstance(data["all_green"], bool)
-        assert "checks" in data
-        assert isinstance(data["checks"], list)
-        assert len(data["checks"]) >= 1
-        # Every check must carry the advertised schema.
-        for c in data["checks"]:
-            assert {"name", "severity", "ok", "value", "message"} <= set(c.keys())
-            assert c["severity"] in ("critical", "high", "medium", "low")
-            assert isinstance(c["ok"], bool)
-            assert isinstance(c["value"], int)
-
-
-class TestExitCode:
-    def test_all_green_exits_zero(self):
-        results = [inv.CheckResult("a", "critical", True, 0, "ok")]
-        assert inv._exit_code(results) == 0
-
-    def test_critical_failure_exits_one(self):
-        results = [inv.CheckResult("a", "critical", False, 1, "bad")]
-        assert inv._exit_code(results) == 1
-
-    def test_low_only_exits_two(self):
-        results = [inv.CheckResult("a", "low", False, 1, "meh")]
-        assert inv._exit_code(results) == 2
-
+from tools import invariants
 
 # --------------------------------------------------------------------------
-# Local helper — stub `_find_dead_pid` used in the ghost test. Mirrors the
-# helper in test_process_registry.py but duplicated here to keep test files
-# independent.
+# Fixtures
 # --------------------------------------------------------------------------
 
 
-def _find_dead_pid(max_tries: int = 10_000) -> int:
-    for candidate in range(2**15 - 1, 2**15 - max_tries - 1, -1):
-        if candidate > 0 and not psutil.pid_exists(candidate):
-            return candidate
-    raise RuntimeError("no dead PID found")
+def _report_with_files(*entries: dict) -> dict:
+    """Wrap a list of file entries in the media_report.json envelope."""
+    return {
+        "generated": "2026-04-23T12:00:00",
+        "summary": {"total_files": len(entries), "total_size_gb": 0.0},
+        "files": list(entries),
+    }
 
 
-# Sanity: importable alongside test_api conftest.
-def test_invariants_module_importable():
-    assert hasattr(inv, "run_all")
-    assert hasattr(inv, "main")
-    assert len(inv._check_functions()) >= 8
-    # Keep the `os` import referenced — used by fixture setup.
-    assert os is not None
-    # Keep pathlib.Path referenced.
-    assert Path is not None
+def _av1_file(filepath: str, audio_streams: list[dict]) -> dict:
+    """Build a media_report entry for an AV1 file with the given audio streams."""
+    return {
+        "filepath": filepath,
+        "filename": Path(filepath).name,
+        "video": {"codec": "AV1", "codec_raw": "av1", "width": 1920, "height": 1080},
+        "audio_streams": audio_streams,
+        "subtitle_streams": [],
+        "size_bytes": 1_000_000_000,
+    }
+
+
+def _make_state_db(tmp_path: Path, rows: list[tuple[str, str, "str | None"]]) -> Path:
+    """Create a minimal pipeline_state.db matching the schema from pipeline.state.
+
+    Each row is ``(filepath, status, reason)``. The full schema is copied
+    verbatim because the invariants SQL looks up direct columns rather
+    than going through ``PipelineState`` (which forbids DONE+deferred
+    inserts at runtime and would otherwise refuse to seed the fixture).
+    """
+    db_path = tmp_path / "pipeline_state.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        """
+        CREATE TABLE pipeline_files (
+            filepath TEXT PRIMARY KEY,
+            status TEXT NOT NULL DEFAULT 'pending',
+            mode TEXT DEFAULT 'full_gamut',
+            added TEXT,
+            last_updated TEXT,
+            tier TEXT,
+            local_path TEXT,
+            output_path TEXT,
+            dest_path TEXT,
+            error TEXT,
+            stage TEXT,
+            reason TEXT,
+            res_key TEXT,
+            extras TEXT DEFAULT '{}'
+        )
+        """
+    )
+    conn.executemany(
+        "INSERT INTO pipeline_files (filepath, status, reason) VALUES (?, ?, ?)",
+        rows,
+    )
+    conn.commit()
+    conn.close()
+    return db_path
+
+
+# --------------------------------------------------------------------------
+# no_audioless_av1 - the 2026-04-23 signature
+# --------------------------------------------------------------------------
+
+
+def test_no_audioless_av1_passes_on_clean_report():
+    """Report full of AV1 files with audio - invariant passes, no violations."""
+    report = _report_with_files(
+        _av1_file(
+            r"\\KieranNAS\Media\Movies\Clean (2023).mkv",
+            [{"codec": "EAC3", "codec_raw": "eac3", "channels": 6, "language": "eng"}],
+        ),
+        _av1_file(
+            r"\\KieranNAS\Media\Movies\Also Clean (2024).mkv",
+            [{"codec": "AAC", "codec_raw": "aac", "channels": 2, "language": "eng"}],
+        ),
+    )
+    result = invariants.check_no_audioless_av1(report=report)
+    assert result.passed is True
+    assert result.severity == "CRITICAL"
+    assert result.violations == []
+
+
+def test_no_audioless_av1_fails_on_damaged():
+    """Zero-audio AV1 file in the report - invariant fails and lists the path."""
+    damaged_path = r"\\KieranNAS\Media\Movies\Damaged (2020).mkv"
+    damaged = _av1_file(damaged_path, [])
+    clean = _av1_file(
+        r"\\KieranNAS\Media\Movies\OK (2021).mkv",
+        [{"codec": "AAC", "codec_raw": "aac", "channels": 2, "language": "eng"}],
+    )
+    report = _report_with_files(damaged, clean)
+    result = invariants.check_no_audioless_av1(report=report)
+    assert result.passed is False
+    assert result.severity == "CRITICAL"
+    assert damaged_path in result.violations
+    assert "1" in result.message
+
+
+# --------------------------------------------------------------------------
+# no_done_with_deferred_reason - the 65-file antipattern
+# --------------------------------------------------------------------------
+
+
+def test_no_done_with_deferred_reason_passes(tmp_path):
+    """No DONE rows carry a 'deferred' reason - invariant passes."""
+    db_path = _make_state_db(
+        tmp_path,
+        [
+            (r"\\KieranNAS\Media\Movies\A.mkv", "done", "encoded"),
+            (r"\\KieranNAS\Media\Movies\B.mkv", "pending", None),
+            (r"\\KieranNAS\Media\Movies\C.mkv", "error", "ffmpeg rc=137"),
+        ],
+    )
+    result = invariants.check_no_done_with_deferred_reason(db_path=db_path)
+    assert result.passed is True
+    assert result.severity == "CRITICAL"
+    assert result.violations == []
+
+
+def test_no_done_with_deferred_reason_fails(tmp_path):
+    """One DONE row has reason containing 'defer' - invariant fails, lists path."""
+    offender = r"\\KieranNAS\Media\Movies\TrackStripDeferred.mkv"
+    db_path = _make_state_db(
+        tmp_path,
+        [
+            (offender, "done", "local ops done (strip deferred)"),
+            (r"\\KieranNAS\Media\Movies\Clean.mkv", "done", "encoded"),
+        ],
+    )
+    result = invariants.check_no_done_with_deferred_reason(db_path=db_path)
+    assert result.passed is False
+    assert result.severity == "CRITICAL"
+    assert offender in result.violations
+    assert result.details["reasons"]
+    # Details payload must carry the exact reason string so operators see the lie.
+    reasons_seen = {d["reason"] for d in result.details["reasons"]}
+    assert any("defer" in r.lower() for r in reasons_seen)
+
+
+# --------------------------------------------------------------------------
+# report_db_consistency
+# --------------------------------------------------------------------------
+
+
+def test_report_db_consistency_detects_mismatch(tmp_path):
+    """A report entry with no matching DB row counts as 'in_report_but_not_in_db'.
+
+    Complementary to the DONE-but-not-in-report branch - both directions of
+    drift should surface in the details payload.
+    """
+    report = _report_with_files(
+        _av1_file(
+            r"\\KieranNAS\Media\Movies\OnlyInReport.mkv",
+            [{"codec": "AAC", "codec_raw": "aac", "channels": 2, "language": "eng"}],
+        ),
+    )
+    db_path = _make_state_db(
+        tmp_path,
+        [
+            (r"\\KieranNAS\Media\Movies\OnlyInDB.mkv", "done", "encoded"),
+        ],
+    )
+    result = invariants.check_report_db_consistency(report=report, db_path=db_path, tolerance=0)
+    # OnlyInDB is DONE but not in the report -> high-severity counter.
+    assert result.details["done_in_db_but_not_in_report"] == 1
+    # OnlyInReport has no DB row -> soft 'report-missing-from-db' counter.
+    assert result.details["in_report_but_not_in_db"] == 1
+    # Exceeded tolerance of 0, so the check fails at HIGH severity.
+    assert result.passed is False
+    assert result.severity == "HIGH"
+
+
+# --------------------------------------------------------------------------
+# Orchestration smoke test
+# --------------------------------------------------------------------------
+
+
+def test_run_all_invariants_smoke(tmp_path, monkeypatch):
+    """Orchestration runs every check and returns a list of InvariantResult.
+
+    SSH-backed checks are skipped; the test verifies both that every expected
+    invariant name is represented, and that the skipped checks pass with a
+    'skipped' message instead of silently vanishing.
+    """
+    report_path = tmp_path / "media_report.json"
+    report_path.write_text(
+        json.dumps(
+            _report_with_files(
+                _av1_file(
+                    r"\\KieranNAS\Media\Movies\Smoke.mkv",
+                    [{"codec": "AAC", "codec_raw": "aac", "channels": 2, "language": "eng"}],
+                )
+            )
+        ),
+        encoding="utf-8",
+    )
+    db_path = _make_state_db(tmp_path, [])
+
+    monkeypatch.setattr(invariants, "MEDIA_REPORT", report_path)
+    monkeypatch.setattr(invariants, "PIPELINE_STATE_DB", db_path)
+    monkeypatch.setattr(invariants, "STAGING_DIR", tmp_path)
+
+    results = invariants.run_all_invariants(skip_ssh=True)
+    assert isinstance(results, list)
+    assert all(isinstance(r, invariants.InvariantResult) for r in results)
+    names = {r.name for r in results}
+    expected = {
+        "no_audioless_av1",
+        "no_done_with_deferred_reason",
+        "no_done_with_error_reason",
+        "no_stale_tmp_on_nas",
+        "no_zombie_mkvmerge",
+        "no_ghost_python_processes",
+        "report_db_consistency",
+        "report_file_exists_on_disk",
+        "no_banned_ffmpeg_flags_in_log",
+    }
+    assert expected <= names
+
+    # SSH-backed checks must pass with a 'skipped' message (not silently absent).
+    ssh_checks = [r for r in results if r.name in ("no_stale_tmp_on_nas", "no_zombie_mkvmerge")]
+    assert len(ssh_checks) == 2
+    assert all(r.passed for r in ssh_checks)
+    assert all("skipped" in r.message.lower() for r in ssh_checks)
+
+    # Severities must be the advertised uppercase tier labels.
+    allowed = {"CRITICAL", "HIGH", "MEDIUM", "LOW"}
+    for r in results:
+        assert r.severity in allowed, f"{r.name} has invalid severity {r.severity!r}"

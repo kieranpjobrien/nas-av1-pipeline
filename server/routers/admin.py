@@ -17,6 +17,7 @@ import json
 import subprocess
 import sys
 import time
+from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Request
@@ -224,6 +225,40 @@ def get_health(request: Request) -> dict:
     }
     _health_cache_time = now
     return _health_cache
+
+
+# --- Deep health / invariants ---
+
+_health_deep_cache: dict = {}
+_health_deep_cache_time: float = 0
+
+
+@router.get("/api/health-deep")
+def get_health_deep() -> dict:
+    """Run the invariant battery and return structured results.
+
+    Cached for 60s. Responses include ``generated_at`` so the UI can show
+    the age of the last scan ("as of 23s ago"). The invariants themselves
+    live in ``tools.invariants`` and cover the 2026-04-23 incident class:
+    AV1 files with zero audio, DONE rows paired with deferred reasons,
+    stale tmp files on the NAS, ghost python processes, etc.
+    """
+    global _health_deep_cache, _health_deep_cache_time
+    now = time.monotonic()
+    if _health_deep_cache and (now - _health_deep_cache_time) < 60:
+        return _health_deep_cache
+
+    from tools.invariants import run_all_invariants
+
+    results = run_all_invariants(skip_ssh=False)
+    _health_deep_cache = {
+        "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "all_green": all(r.passed for r in results),
+        "any_critical": any(not r.passed and r.severity == "CRITICAL" for r in results),
+        "checks": [asdict(r) for r in results],
+    }
+    _health_deep_cache_time = now
+    return _health_deep_cache
 
 
 # --- Config management ---

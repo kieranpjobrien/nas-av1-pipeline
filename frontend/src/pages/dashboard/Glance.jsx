@@ -289,9 +289,17 @@ export function Glance({ data, pipelineData, throughputPerDay, workersActive, wo
       </div>
 
       {healthDeep && (() => {
-        const failing = (healthDeep.checks || []).filter((c) => !c.ok);
+        const checks = healthDeep.checks || [];
+        const failing = checks.filter((c) => !c.passed);
         const firstName = failing.length > 0 ? failing[0].name : null;
+        const anyCritical =
+          healthDeep.any_critical === true ||
+          failing.some((c) => String(c.severity).toUpperCase() === "CRITICAL");
         const allGreen = healthDeep.all_green === true && failing.length === 0;
+        // "as of Xs ago" so the operator knows the deep scan isn't stale.
+        const ageSecs = healthDeep.generated_at
+          ? Math.max(0, Math.round((Date.now() - Date.parse(healthDeep.generated_at)) / 1000))
+          : null;
         return (
           <div
             onClick={() => setIncidentsOpen((v) => !v)}
@@ -299,10 +307,16 @@ export function Glance({ data, pipelineData, throughputPerDay, workersActive, wo
               marginTop: 12,
               marginBottom: 4,
               padding: "10px 14px",
-              background: allGreen ? "rgba(94,197,112,0.05)" : "rgba(224,101,75,0.06)",
+              background: allGreen
+                ? "rgba(94,197,112,0.05)"
+                : anyCritical
+                  ? "rgba(224,75,75,0.1)"
+                  : "rgba(224,101,75,0.06)",
               border: allGreen
                 ? "1px solid rgba(94,197,112,0.25)"
-                : "1px solid rgba(224,101,75,0.35)",
+                : anyCritical
+                  ? "1px solid rgba(224,75,75,0.6)"
+                  : "1px solid rgba(224,101,75,0.35)",
               borderRadius: 8,
               cursor: "pointer",
             }}
@@ -317,11 +331,20 @@ export function Glance({ data, pipelineData, throughputPerDay, workersActive, wo
                 }}
               />
               <b style={{ color: allGreen ? "var(--accent)" : "var(--bad)" }}>
-                {allGreen ? "All invariants OK" : `${failing.length} invariant${failing.length === 1 ? "" : "s"} failing`}
+                {allGreen
+                  ? "All invariants OK"
+                  : anyCritical
+                    ? `CRITICAL · ${failing.length} invariant${failing.length === 1 ? "" : "s"} failing`
+                    : `${failing.length} invariant${failing.length === 1 ? "" : "s"} failing`}
               </b>
               {!allGreen && firstName && (
                 <span className="mono" style={{ color: "var(--ink-3)" }}>
                   first: {firstName}
+                </span>
+              )}
+              {ageSecs != null && (
+                <span className="mono" style={{ color: "var(--ink-4)", fontSize: 10 }}>
+                  · as of {ageSecs}s ago
                 </span>
               )}
               <span style={{ marginLeft: "auto", fontSize: 10, color: "var(--ink-4)" }}>
@@ -351,35 +374,66 @@ export function Glance({ data, pipelineData, throughputPerDay, workersActive, wo
                 <div style={{ color: "var(--ink-4)", textTransform: "uppercase", letterSpacing: "0.1em" }}>
                   status
                 </div>
-                {(healthDeep.checks || []).map((c) => (
-                  <div key={c.name} style={{ display: "contents" }}>
-                    <div className="mono" title={c.message} style={{ color: c.ok ? "var(--ink-2)" : "var(--bad)" }}>
-                      {c.name}
-                    </div>
-                    <div className="mono" style={{ color: "var(--ink-3)" }}>
-                      {c.severity}
-                    </div>
-                    <div
-                      className="mono"
-                      style={{ color: c.ok ? "var(--accent)" : "var(--bad)", fontWeight: 500 }}
-                    >
-                      {c.ok ? "OK" : `FAIL (${c.value})`}
-                    </div>
-                    {!c.ok && (
+                {checks.map((c) => {
+                  const violations = Array.isArray(c.violations) ? c.violations : [];
+                  const firstFew = violations.slice(0, 3);
+                  return (
+                    <div key={c.name} style={{ display: "contents" }}>
                       <div
+                        className="mono"
+                        title={c.message}
+                        style={{ color: c.passed ? "var(--ink-2)" : "var(--bad)" }}
+                      >
+                        {c.name}
+                      </div>
+                      <div className="mono" style={{ color: "var(--ink-3)" }}>
+                        {c.severity}
+                      </div>
+                      <div
+                        className="mono"
                         style={{
-                          gridColumn: "1 / -1",
-                          color: "var(--ink-3)",
-                          paddingBottom: 2,
-                          paddingLeft: 6,
-                          fontSize: 10.5,
+                          color: c.passed ? "var(--accent)" : "var(--bad)",
+                          fontWeight: 500,
                         }}
                       >
-                        {c.message}
+                        {c.passed ? "OK" : `FAIL (${violations.length})`}
                       </div>
-                    )}
-                  </div>
-                ))}
+                      {!c.passed && (
+                        <div
+                          style={{
+                            gridColumn: "1 / -1",
+                            color: "var(--ink-3)",
+                            paddingBottom: 2,
+                            paddingLeft: 6,
+                            fontSize: 10.5,
+                          }}
+                        >
+                          <div>{c.message}</div>
+                          {firstFew.length > 0 && (
+                            <ul
+                              style={{
+                                margin: "2px 0 0 12px",
+                                padding: 0,
+                                color: "var(--ink-4)",
+                                fontSize: 10,
+                              }}
+                            >
+                              {firstFew.map((v, i) => (
+                                <li
+                                  key={i}
+                                  className="mono"
+                                  style={{ listStyle: "disc", wordBreak: "break-all" }}
+                                >
+                                  {v}
+                                </li>
+                              ))}
+                            </ul>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             )}
           </div>
