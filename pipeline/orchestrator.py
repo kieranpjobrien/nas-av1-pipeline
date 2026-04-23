@@ -1019,24 +1019,6 @@ class Orchestrator:
                 count += 1
         return count
 
-    def _apply_overrides(self, item: dict) -> dict:
-        import copy
-
-        effective = copy.deepcopy(self.config)
-        filepath = item.get("filepath", "")
-        profile = self.control.get_quality_profile(filepath)
-        if profile:
-            effective["_profile"] = profile
-        override = self.control.get_gentle_override(filepath)
-        if override:
-            for k, v in override.items():
-                effective[k] = v
-        reencode = self.control.get_reencode_override(filepath)
-        if reencode:
-            for k, v in reencode.items():
-                effective[k] = v
-        return effective
-
     def _lookup_file(self, filepath: str) -> dict | None:
         """Look up a file in the media report."""
         try:

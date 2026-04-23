@@ -302,7 +302,7 @@ def full_gamut(
 
         logging.info("  Encoding: AV1 + EAC-3 audio + strip foreign tracks")
         get_res_key(item)
-        params = resolve_encode_params(config, item, config.get("_profile", "baseline"))
+        params = resolve_encode_params(config, item)
         logging.info(
             f"  {library_type.upper()} | {item.get('resolution', '?')} | "
             f"HDR: {item.get('hdr', False)} | CQ: {params.get('cq', '?')} | "
