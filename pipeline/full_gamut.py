@@ -554,21 +554,31 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
     # Guards against the "ffmpeg exited early, wrote a few seconds of frames, stamped
     # full duration in the container header" failure mode. Two gates:
     #   (a) output must have a video stream at all;
-    #   (b) output average bitrate must be >= 30% of source AND >= 200 kbps absolute.
+    #   (b) output average bitrate must clear a codec-aware floor.
+    #
+    # Codec-aware floor: AV1 is 2-3x more efficient than H.264/HEVC, so a 30%-of-
+    # source threshold (safe for H.264-in/H.264-out) wrongly rejects legitimate
+    # AV1 encodes of simple content (sitcoms, animation) that compress to 5-15%.
+    # We use an absolute 200 kbps floor unconditionally, plus a codec-aware ratio
+    # floor: 5% for AV1 (catches "truncated or silent video" only), 30% for
+    # everything else.
+    #
     # Also captures the full probe for encode_history below — one ffprobe call, reused.
     output_probe = _probe_full(dest_path)
     if output_probe.get("error"):
         logging.warning(f"  Output integrity probe failed ({output_probe['error']}) — proceeding with duration-check-only verify.")
     else:
         out_video = output_probe.get("video") or {}
-        out_codec = out_video.get("codec") or ""
+        out_codec = (out_video.get("codec") or "").lower()
         out_bitrate_kbps = (
             out_video.get("bit_rate_kbps")
             or (output_probe.get("format") or {}).get("bit_rate_kbps")
             or 0
         )
         input_bitrate_kbps = int((input_size / input_duration * 8 / 1000)) if input_duration > 0 else 0
-        min_ratio = 0.3
+        # AV1 is much more efficient than H.264/HEVC — use a lower ratio floor so
+        # well-compressed AV1 output of simple content doesn't trip the check.
+        min_ratio = 0.05 if out_codec in ("av1", "av1_nvenc") else 0.3
         min_abs_kbps = 200
         integrity_ok = (
             bool(out_codec)
