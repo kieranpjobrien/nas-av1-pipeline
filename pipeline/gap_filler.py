@@ -28,6 +28,7 @@ from pipeline.ffmpeg import (
 from pipeline.report import update_entry
 from pipeline.state import FileStatus, PipelineState
 from pipeline.streams import parse_sub_stream
+from pipeline.subs import pick_english_sidecars, scan_sidecars
 
 _MKVMERGE_SEARCH = [
     r"C:\Program Files\MKVToolNix\mkvmerge.exe",
@@ -105,28 +106,17 @@ class GapAnalysis:
 
 
 def _scan_external_subs(filepath: str, gaps: GapAnalysis) -> None:
-    """Scan for external subtitle files next to the MKV. Called lazily during gap_fill."""
-    source_dir = os.path.dirname(filepath)
-    stem = Path(filepath).stem
-    sub_exts = {".srt", ".ass", ".ssa", ".sub"}
-    eng_tokens = {".en.", ".eng.", ".en-", ".eng-"}
-    hi_tokens = {".hi.", ".sdh."}
-    found_regular_eng = False
-    try:
-        for f in os.listdir(source_dir):
-            ext = Path(f).suffix.lower()
-            if ext in sub_exts and f.startswith(stem[:20]):
-                fl = f.lower()
-                is_eng = any(t in fl for t in eng_tokens)
-                is_hi = any(t in fl for t in hi_tokens)
-                if is_eng and not is_hi and not found_regular_eng:
-                    gaps.external_subs.append(os.path.join(source_dir, f))
-                    found_regular_eng = True
-                else:
-                    # HI, foreign, or duplicate English — all go to cleanup
-                    gaps.foreign_external_subs.append(os.path.join(source_dir, f))
-    except OSError:
-        pass
+    """Scan for external subtitle files next to the MKV. Called lazily during gap_fill.
+
+    Delegates to :mod:`pipeline.subs` for sidecar enumeration and the
+    "pick one English, delete the rest" split. See that module for the
+    documented semantic tightenings vs. the old inline version (stricter stem
+    match, richer language parser, HI detection that also catches ``cc``).
+    """
+    sidecars = scan_sidecars(filepath)
+    to_mux, to_delete = pick_english_sidecars(sidecars)
+    gaps.external_subs.extend(s.path for s in to_mux)
+    gaps.foreign_external_subs.extend(s.path for s in to_delete)
     if gaps.external_subs:
         gaps.needs_sub_mux = True
         gaps.needs_track_removal = True

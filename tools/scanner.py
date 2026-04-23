@@ -219,42 +219,31 @@ def extract_info(filepath: str, probe_data: dict, library_type: str) -> dict:
     # internal streams. Record what's actually on disk so downstream consumers can check
     # both. Naming patterns we handle:
     #   foo.mkv, foo.en.srt, foo.en.hi.srt, foo.en.forced.ass, foo.eng.srt, foo.srt
+    #
+    # Delegates to pipeline.subs.scan_sidecars which uses the SCAN_EXTS set
+    # (includes .vtt/.idx). We convert the SidecarSub dataclasses into the
+    # dict shape media_report has always stored.
+    from pipeline.subs import SCAN_EXTS, scan_sidecars as _scan_sidecars
+
     external_subs = []
-    try:
-        parent = os.path.dirname(filepath)
-        stem = Path(filepath).stem.lower()
-        for sibling in os.listdir(parent):
-            low = sibling.lower()
-            if not low.endswith((".srt", ".ass", ".ssa", ".sub", ".vtt", ".idx")):
+    for sub in _scan_sidecars(filepath, exts=SCAN_EXTS):
+        # Reconstruct the flags list from is_forced / is_hi + any remaining
+        # non-language dotted parts. This keeps backward compatibility with
+        # the media-report consumers that read the `flags` list directly.
+        suffix = sub.stem[len(Path(filepath).stem):].lstrip(".")
+        flags: list[str] = []
+        for part in (p for p in suffix.split(".") if p):
+            if part.lower() == sub.language:
                 continue
-            sib_stem = Path(sibling).stem.lower()
-            # Must reference the same media stem: either exact match, or stem + ".lang" suffix.
-            if not (sib_stem == stem or sib_stem.startswith(stem + ".")):
-                continue
-            # Parse language from the portion after the stem (e.g. ".en" or ".en.hi" -> "en").
-            # First language-looking token wins — subsequent ones go into flags (so
-            # ".en.hi.srt" correctly parses as lang="en" flags=["hi"] not lang="hi").
-            # The old check `not flags` was always True because we only APPEND to flags,
-            # causing every English-Hearing-Impaired sidecar to be mis-labelled as Hindi.
-            suffix = sib_stem[len(stem) :].lstrip(".")
-            parts = suffix.split(".") if suffix else []
-            lang = "und"
-            flags = []
-            for part in parts:
-                if len(part) in (2, 3) and part.isalpha() and lang == "und":
-                    lang = part
-                else:
-                    flags.append(part)
-            external_subs.append(
-                {
-                    "filename": sibling,
-                    "language": lang,
-                    "flags": flags,  # e.g. ["hi"] for hearing-impaired, ["forced"] for forced
-                    "ext": Path(sibling).suffix.lower().lstrip("."),
-                }
-            )
-    except OSError:
-        pass
+            flags.append(part.lower())
+        external_subs.append(
+            {
+                "filename": sub.filename,
+                "language": sub.language,
+                "flags": flags,  # e.g. ["hi"] for hearing-impaired, ["forced"] for forced
+                "ext": Path(sub.filename).suffix.lower().lstrip("."),
+            }
+        )
 
     try:
         file_mtime = os.path.getmtime(filepath)

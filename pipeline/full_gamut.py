@@ -31,6 +31,7 @@ from pipeline.language import detect_all_languages
 from pipeline.report import update_entry
 from pipeline.state import FileStatus, PipelineState
 from pipeline.streams import is_hi_external
+from pipeline.subs import scan_sidecars
 
 
 def _probe_full(path: str) -> dict:
@@ -1169,24 +1170,14 @@ def _build_audio_copy_cmd(cmd: list[str]) -> list[str]:
 
 
 def _find_external_subs(filepath: str) -> list[str]:
-    """Find external subtitle files (.srt, .ass, .ssa, .sub) alongside the MKV."""
-    source_dir = os.path.dirname(filepath)
-    stem = Path(filepath).stem
-    sub_exts = {".srt", ".ass", ".ssa", ".sub"}
-    external = []
+    """Find external subtitle files (.srt, .ass, .ssa, .sub) alongside the MKV.
 
-    try:
-        for f in os.listdir(source_dir):
-            fpath = os.path.join(source_dir, f)
-            if not os.path.isfile(fpath):
-                continue
-            ext = Path(f).suffix.lower()
-            if ext in sub_exts and f.startswith(stem[:20]):  # loose match on filename prefix
-                external.append(fpath)
-    except OSError:
-        pass
-
-    return external
+    Delegates to :func:`pipeline.subs.scan_sidecars`. The stem-match rule is
+    stricter than the old inline ``startswith(stem[:20])`` (now requires the
+    full stem), which is the correct behaviour — the 20-char prefix would
+    false-match siblings of e.g. ``The Office`` onto ``The Office (UK)``.
+    """
+    return [s.path for s in scan_sidecars(filepath)]
 
 
 def _cleanup(*paths: str | None) -> None:
