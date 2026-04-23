@@ -159,17 +159,23 @@ class TestSubtitleSelection:
 class TestAudioTranscode:
     """Audio codec transcoding detection."""
 
-    def test_truehd_needs_transcode(self, default_config):
-        """TrueHD audio needs transcoding (not EAC-3)."""
+    def test_truehd_is_passthrough_preserves_atmos(self, default_config):
+        """TrueHD is the primary Dolby Atmos carrier — preserve bit-exact, don't transcode.
+
+        Sonos Arc decodes TrueHD-Atmos natively. Transcoding to EAC-3 7.1 would
+        drop the height-channel object layer. See CLAUDE.md rule 9a.
+        """
         entry = _make_entry(
             audio_streams=[{"codec_raw": "truehd", "language": "eng", "channels": 8}],
             subtitle_streams=[{"language": "eng", "title": ""}],
             tmdb={"id": 1},
         )
         gaps = analyse_gaps(entry, default_config)
-        assert gaps.needs_audio_transcode is True
-        assert gaps.needs_fetch is True
-        assert 0 in gaps.audio_transcode_indices
+        assert gaps.needs_audio_transcode is False, (
+            "TrueHD must passthrough — Atmos carrier (see _should_transcode_audio)"
+        )
+        assert 0 not in gaps.audio_transcode_indices
+        assert gaps.needs_fetch is False
 
     def test_aac_needs_transcode(self, default_config):
         """AAC audio needs transcoding (not EAC-3)."""
