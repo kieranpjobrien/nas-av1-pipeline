@@ -126,61 +126,6 @@ def _parse_release_info(filename: str) -> dict:
     }
 
 
-def _sha256_file(path: str) -> str | None:
-    """Streamed sha256. ~60-90s per 2 GB over SMB — use sparingly.
-
-    Returns None on I/O failure.
-    """
-    try:
-        h = hashlib.sha256()
-        with open(path, "rb") as f:
-            for chunk in iter(lambda: f.read(1024 * 1024), b""):
-                h.update(chunk)
-        return h.hexdigest()
-    except OSError:
-        return None
-
-
-def _vmaf_sample(source_path: str, output_path: str, sample_secs: int = 10) -> float | None:
-    """Compute VMAF on a `sample_secs` window centred on the middle of the output.
-
-    Returns the mean VMAF score (higher = better; ~90+ is excellent for most content)
-    or None if the probe fails. Runs at real-time or faster on NVENC hardware.
-    """
-    duration = get_duration(output_path) or 0
-    if duration < sample_secs:
-        return None
-    seek = max(0, (duration - sample_secs) / 2)
-    try:
-        result = subprocess.run(
-            [
-                "ffmpeg", "-nostdin",
-                "-ss", f"{seek:.1f}", "-t", f"{sample_secs}", "-i", output_path,
-                "-ss", f"{seek:.1f}", "-t", f"{sample_secs}", "-i", source_path,
-                "-lavfi",
-                "[0:v]setpts=PTS-STARTPTS[ref];"
-                "[1:v]setpts=PTS-STARTPTS[dist];"
-                "[dist][ref]libvmaf=log_fmt=json:log_path=-",
-                "-f", "null", "-",
-            ],
-            capture_output=True, text=True, timeout=180,
-            encoding="utf-8", errors="replace",
-        )
-        # libvmaf prints JSON to stdout when log_path=-
-        out = result.stdout or result.stderr
-        # Extract "VMAF score: X.XX" from stderr if JSON parsing fails
-        import re as _re
-        m = _re.search(r'"mean"\s*:\s*([0-9.]+)', out)
-        if m:
-            return round(float(m.group(1)), 2)
-        m = _re.search(r"VMAF score:\s*([0-9.]+)", result.stderr or "")
-        if m:
-            return round(float(m.group(1)), 2)
-    except Exception:
-        pass
-    return None
-
-
 def _append_history_jsonl(path, entry: dict) -> None:
     """Append a single JSONL entry with fsync. JSONL tolerates partial writes at the
     line level — the worst case from a crash is one truncated trailing line, which
@@ -232,13 +177,8 @@ def full_gamut(
 
         # Already done — bail cleanly rather than waiting forever for a fetch that won't come.
         # (The orchestrator's force-stack check should prevent this, but belt-and-braces.)
-        terminal_states = {
-            FileStatus.DONE.value,
-            getattr(FileStatus, "REPLACED", FileStatus.DONE).value,
-            getattr(FileStatus, "SKIPPED", FileStatus.DONE).value,
-        }
-        if status in terminal_states:
-            logging.info(f"Already {status}: {filename} — skipping full_gamut.")
+        if status == FileStatus.DONE.value:
+            logging.info(f"Already done: {filename} — skipping full_gamut.")
             return True
 
         # Wait for file to be ready (status=PROCESSING, set after copy completes).
@@ -255,8 +195,8 @@ def full_gamut(
                 if status == FileStatus.ERROR.value:
                     logging.error(f"Fetch failed: {filename}")
                     return False
-                if status in terminal_states:
-                    logging.info(f"Became {status} while waiting for fetch: {filename} — bailing.")
+                if status == FileStatus.DONE.value:
+                    logging.info(f"Became done while waiting for fetch: {filename} — bailing.")
                     return True
                 time.sleep(2)
                 waited += 2
@@ -837,25 +777,11 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
         encode_attempts = state_extras.get("encode_attempts") or 1
         encode_params_used = state_extras.get("encode_params_used") or {}
 
-        # Tier 2: session env (written once by orchestrator to pipeline_env.json)
-        session_env = read_json_safe(STAGING_DIR / "pipeline_env.json") or {}
-        session_id = session_env.get("session_id")
-
         # Release-info (always on, cheap)
         release_info = _parse_release_info(entry.get("filename") or final_name)
 
-        # Tier 3 opt-ins
-        extras_out: dict = {}
-        if config.get("history_source_hash"):
-            extras_out["source_sha256"] = _sha256_file(final_path + ".original.bak")  # source is in .bak after replace
-        if config.get("history_vmaf"):
-            vmaf_source = final_path + ".original.bak"
-            if os.path.exists(vmaf_source):
-                extras_out["vmaf_mean"] = _vmaf_sample(vmaf_source, final_path, sample_secs=10)
-
         history_entry = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "session_id": session_id,
             "filepath": final_path,
             "filename": final_name,
             "library_type": library_type,
@@ -932,9 +858,6 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
                 "subs": out_probe.get("subs") or [],
                 "format": out_probe.get("format") or {},
             },
-
-            # Tier 3 opt-ins (empty unless enabled via config)
-            **extras_out,
         }
         history_file = STAGING_DIR / "encode_history.jsonl"
         _append_history_jsonl(history_file, history_entry)
@@ -943,42 +866,6 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
 
     logging.info(f"  DONE: {final_name}")
     return True
-
-
-def _parse_ffmpeg_final_stats(stderr: str) -> dict:
-    """Parse ffmpeg's final frame=/speed=/dup=/drop= summary line from captured stderr.
-
-    Returns whatever fields were found — all missing is valid too. Example input line:
-        frame= 1904 fps=15.3 q=-1.0 Lsize=62231KiB time=00:01:23.45 bitrate=... speed=1.5x dup=3 drop=7
-    """
-    stats: dict = {}
-    # Walk lines backwards, pick the last one that has frame= at the start
-    for line in reversed(stderr.splitlines()):
-        s = line.strip()
-        if s.startswith("frame=") or s.startswith("video:") or "speed=" in s:
-            # Extract k=v pairs (ffmpeg uses "key=value" with whitespace-padded values)
-            # Split on whitespace then key=val
-            import re as _re
-            for m in _re.finditer(r"(\w+)=\s*([^\s]+)", s):
-                k, v = m.group(1), m.group(2)
-                if k in ("frame", "fps", "q", "bitrate", "speed", "dup", "drop", "time", "Lsize", "size"):
-                    stats[f"ffmpeg_{k}"] = v
-            if stats:
-                break
-    # Clean up: frame/dup/drop to int, speed to float (strip trailing 'x')
-    for k in ("ffmpeg_frame", "ffmpeg_dup", "ffmpeg_drop"):
-        if k in stats:
-            try:
-                stats[k] = int(stats[k])
-            except ValueError:
-                pass
-    if "ffmpeg_speed" in stats:
-        v = stats["ffmpeg_speed"].rstrip("x")
-        try:
-            stats["ffmpeg_speed"] = float(v)
-        except ValueError:
-            pass
-    return stats
 
 
 def _run_encode(
@@ -1039,7 +926,6 @@ def _run_encode(
                 if result_out is not None:
                     result_out["retry_mode"] = retry_mode
                     result_out["attempts"] = attempt + 1
-                    result_out.update(_parse_ffmpeg_final_stats(stderr))
                 return True
 
             if os.path.exists(output_path):
