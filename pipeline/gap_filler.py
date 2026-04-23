@@ -709,12 +709,68 @@ def _audio_transcode(
             f"{format_bytes(input_size)} -> {format_bytes(output_size)}"
         )
 
+        # Post-transcode verify — mirrors _strip_tracks_on_nas:538-568.
+        # Refuse to replace unless the staging output has at least 1 video stream and
+        # the expected audio stream count. Catches the "ffmpeg rc=0 but produced a
+        # zero-audio or video-less file" failure mode (silent-damage path).
+        expected_audio = len(gaps.audio_keep_indices) or len(file_entry.get("audio_streams", [])) or 1
+        try:
+            probe_cmd = ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_streams", output_path]
+            pr = subprocess.run(probe_cmd, capture_output=True, text=True, timeout=60)
+            if pr.returncode != 0:
+                logging.error(f"  Post-transcode ffprobe failed (rc={pr.returncode})")
+                try:
+                    os.remove(output_path)
+                except OSError:
+                    pass
+                state.set_file(
+                    filepath,
+                    FileStatus.ERROR,
+                    error="post-transcode verify failed (ffprobe rc != 0)",
+                    stage="audio_transcode",
+                )
+                return False
+            import json as _json
+            probed = _json.loads(pr.stdout or "{}")
+            streams = probed.get("streams", []) or []
+            audio_n = sum(1 for s in streams if s.get("codec_type") == "audio")
+            video_n = sum(1 for s in streams if s.get("codec_type") == "video")
+            if video_n < 1 or audio_n < expected_audio:
+                logging.error(
+                    f"  Post-transcode verify: expected >=1 video and >={expected_audio} audio, "
+                    f"got {video_n}v {audio_n}a — aborting replace"
+                )
+                try:
+                    os.remove(output_path)
+                except OSError:
+                    pass
+                state.set_file(
+                    filepath,
+                    FileStatus.ERROR,
+                    error=f"post-transcode verify failed (v={video_n} a={audio_n} expected_audio={expected_audio})",
+                    stage="audio_transcode",
+                )
+                return False
+        except (subprocess.TimeoutExpired, FileNotFoundError, Exception) as ve:
+            logging.error(f"  Post-transcode verify errored: {ve} — aborting replace to be safe")
+            try:
+                os.remove(output_path)
+            except OSError:
+                pass
+            state.set_file(
+                filepath,
+                FileStatus.ERROR,
+                error=f"post-transcode verify errored: {ve}",
+                stage="audio_transcode",
+            )
+            return False
+
         # Upload back to NAS (replace original)
         state.set_file(filepath, FileStatus.UPLOADING, stage="upload")
         tmp_path = filepath + ".audiotrans_tmp.mkv"
         shutil.copy2(output_path, tmp_path)
         os.replace(tmp_path, filepath)
-        logging.info("  Uploaded and replaced")
+        logging.info(f"  Uploaded and replaced  [verify: {video_n}v {audio_n}a]")
 
         return True
 
