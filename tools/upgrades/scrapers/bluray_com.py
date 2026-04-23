@@ -1,16 +1,17 @@
 """Polite bluray.com scraper for disc-release audio/video capabilities.
 
 bluray.com lists every commercial Blu-ray / UHD Blu-ray release of a title
-along with its audio tracks (codec + channels) and video spec. We mine two
-endpoints:
+along with its audio tracks (codec + channels) and video spec.
 
-* ``/search/?...`` — title search, returns candidate product URLs.
-* ``/movies/<slug>-<id>/`` — product page with the edition detail we need.
+Title → product URL resolution lives in :mod:`tools.upgrades.resolver`
+(a DuckDuckGo HTML search backend — bluray.com's in-site search is JS-
+rendered and unusable from raw HTTP). This module owns the product-page
+fetch and parse path only.
 
 Design constraints (aligned with ``pipeline/metadata.py``):
 
-* **Stdlib only.** ``urllib.request`` + ``html.parser``; no ``requests``,
-  no BeautifulSoup.
+* **Stdlib only.** ``urllib.request`` + regex; no ``requests``, no
+  BeautifulSoup.
 * **1 req/s** global rate limit via a module-level ``threading.Lock``.
 * **7-day cache** keyed by URL in the shared ``scraper_cache`` SQLite
   table (see ``tools.upgrades.db``). Callers are expected to pass a live
@@ -32,9 +33,7 @@ import sqlite3
 import threading
 import time
 import urllib.error
-import urllib.parse
 import urllib.request
-from html.parser import HTMLParser
 from typing import Any
 
 from tools.upgrades import db as updb
@@ -42,11 +41,7 @@ from tools.upgrades import db as updb
 logger = logging.getLogger(__name__)
 
 USER_AGENT = "NASCleanup/1.0 (personal-use)"
-BASE_URL = "https://www.bluray.com"
-# Live site uses /search.php — the trailing-slash /search/ path returns a
-# noindex stub. Keep the keyword param for backward compatibility with the
-# query builder.
-SEARCH_URL = f"{BASE_URL}/search.php"
+BASE_URL = "https://www.blu-ray.com"
 
 # 1 request per second — plenty of headroom over bluray.com's tolerance
 # for polite public scraping. Do NOT increase without pre-approval.
@@ -100,104 +95,40 @@ def _fetch_cached(
     return body
 
 
-# ---------- Search-result parsing ----------
-
-
-class _SearchParser(HTMLParser):
-    """Extract product-page links from a bluray.com search results page.
-
-    The search page renders each hit as an anchor inside a
-    ``<div class="searchResult...">`` row. We capture the anchor href and
-    its visible text, then post-filter for /movies/<slug>-<id>/ links so
-    we don't match celebrity / reviewer pages.
-    """
-
-    _PRODUCT_HREF_RE = re.compile(r"/movies?/[^/\s\"']+-\d+/?", re.IGNORECASE)
-
-    def __init__(self) -> None:
-        super().__init__(convert_charrefs=True)
-        self.results: list[dict[str, Any]] = []
-        self._capture_text: str | None = None
-        self._current: dict[str, Any] | None = None
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag != "a":
-            return
-        attr = dict(attrs)
-        href = attr.get("href") or ""
-        if not self._PRODUCT_HREF_RE.search(href):
-            return
-        # Normalise to absolute URL
-        if href.startswith("/"):
-            href = BASE_URL + href
-        elif href.startswith("http"):
-            pass
-        else:
-            return
-        self._current = {"url": href.split("?")[0].rstrip("/") + "/", "title": "", "year": None}
-        self._capture_text = ""
-
-    def handle_data(self, data: str) -> None:
-        if self._capture_text is not None:
-            self._capture_text += data
-
-    def handle_endtag(self, tag: str) -> None:
-        if tag == "a" and self._current is not None:
-            text = (self._capture_text or "").strip()
-            if text:
-                # bluray.com titles often include year: "Dune (2021)"
-                m = re.search(r"\((\d{4})\)", text)
-                if m:
-                    self._current["year"] = int(m.group(1))
-                    text = text[: m.start()].strip()
-                self._current["title"] = text
-                # De-dupe by URL
-                if not any(r["url"] == self._current["url"] for r in self.results):
-                    self.results.append(self._current)
-            self._current = None
-            self._capture_text = None
+# ---------- Search / URL resolution ----------
 
 
 def search_title(
     title: str, year: int, conn: sqlite3.Connection | None = None
 ) -> list[dict[str, Any]]:
-    """Search bluray.com for product pages matching ``title`` / ``year``.
+    """Resolve a bluray.com product page for ``title`` / ``year``.
+
+    bluray.com's public ``/search.php`` page is JavaScript-rendered — the
+    raw HTML response carries no product anchors — so we delegate to
+    :func:`tools.upgrades.resolver.resolve_url`, which queries DuckDuckGo's
+    HTML frontend for ``site:bluray.com/movies`` hits and applies the
+    Phase 1 matcher for title+year verification.
 
     Args:
         title: Free-form title (e.g. ``"Dune"``).
-        year:  Theatrical year. Used for the search query and later by
-               ``matcher`` for year-gating. Ignored for filtering here
-               — we pass all plausible hits through to the matcher.
+        year:  Theatrical year. Used for the search query and the matcher
+               year gate (±1).
         conn:  Optional SQLite connection for cache access. If None, a
                one-shot connection to the default DB is opened.
 
     Returns:
-        A list of ``{url, title, year}`` dicts. Empty on failure.
+        A list with a single ``{url, title, year}`` dict on success, or
+        an empty list when no product URL resolves. The shape matches the
+        Phase 1 contract so ``matcher.best_match`` still works downstream.
     """
-    own_conn = conn is None
-    if own_conn:
-        conn = updb.connect()
-    assert conn is not None  # for type-checkers
-    try:
-        # bluray.com's search uses `keyword` (with the year appended to
-        # disambiguate) and the `section=bluraymovies` filter restricts
-        # to movie product pages (vs. reviews, news, forum threads).
-        q = urllib.parse.urlencode(
-            {"section": "bluraymovies", "keyword": f"{title} {year}".strip()}
-        )
-        url = f"{SEARCH_URL}?{q}"
-        body = _fetch_cached(conn, url)
-        if not body:
-            return []
-        parser = _SearchParser()
-        try:
-            parser.feed(body)
-        except Exception as exc:  # noqa: BLE001 — HTMLParser can raise on malformed input
-            logger.warning("bluray.com search parse error: %s", exc)
-        return parser.results
-    finally:
-        if own_conn:
-            conn.close()
+    # Local import to avoid a circular import at module load time — the
+    # resolver depends on tools.upgrades.matcher, which is stdlib-only.
+    from tools.upgrades import resolver
+
+    url = resolver.resolve_url(title, year, cache=conn)
+    if not url:
+        return []
+    return [{"url": url, "title": title, "year": year}]
 
 
 # ---------- Product-page parsing ----------
