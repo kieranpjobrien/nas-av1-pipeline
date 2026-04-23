@@ -341,9 +341,9 @@ def full_gamut(
         # Cleanup local fetch file (free staging space)
         _cleanup(local_path, remuxed_path)
 
-        # === HAND OFF TO NETWORK WORKER ===
-        # GPU is done. Set UPLOADING with all the info the network worker needs.
-        # Network worker will: upload, verify, replace, TMDb, report, Plex.
+        # === Stage info for finalize_upload ===
+        # finalize_upload is called inline by the GPU worker after we return True —
+        # it reads these fields from state to drive the upload + verify + replace.
         final_name = clean_name if clean_name else Path(filename).stem + ".mkv"
         if not final_name.endswith(".mkv"):
             final_name = Path(final_name).stem + ".mkv"
@@ -363,7 +363,7 @@ def full_gamut(
             duration_seconds=item.get("duration_seconds", 0),
         )
 
-        logging.info(f"  Encoded, queued for upload: {final_name}")
+        logging.info(f"  Encoded, ready for upload: {final_name}")
         return True
 
     except Exception as e:
@@ -375,8 +375,9 @@ def full_gamut(
 def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
     """Upload encoded file to NAS, verify, replace original, tag, report, Plex.
 
-    Called by the network worker after the GPU worker sets status=UPLOADING.
-    This runs on the network thread — one at a time, full bandwidth.
+    Called inline by the GPU worker immediately after full_gamut returns True.
+    No separate upload thread — the GPU semaphore has already been released by
+    the time we get here, so the next encode can start while we ship bytes back.
     """
     entry = state.get_file(filepath)
     if not entry:

@@ -1,9 +1,8 @@
-"""Pipeline orchestrator: 3 threads with clean separation.
+"""Pipeline orchestrator: 3 worker types with clean separation.
 
-Thread 1 (GPU): encodes only — no network I/O, blocks until file is fetched
-Thread 2 (Network): bidirectional — uploads first (frees space), then fetches.
-         One operation at a time, full NAS bandwidth in one direction.
-Thread 3 (Gap Filler): CPU work on AV1 files, grabs GPU for whisper between encodes
+GPU worker:        encodes AND uploads inline after each encode (one pass per file).
+Fetch worker:      pre-fetches files to keep the GPU encoders fed.
+Gap filler worker: one SSH-heavy worker (remote mkvmerge) + one local-quick worker.
 """
 
 import logging
@@ -361,13 +360,9 @@ class Orchestrator:
                 daemon=True,
                 name=name,
             )
-        # Split the old single network thread into an upload worker and N fetch workers so
-        # an upload-after-encode doesn't sit behind an in-flight 20 GB fetch, and a single
-        # big REMUX fetch doesn't starve the other GPU. fetch_file claims its target under
-        # state._lock so two workers never pick the same path.
-        threads["upload"] = threading.Thread(
-            target=self._upload_worker, daemon=True, name="upload"
-        )
+        # Single fetch worker. SMB upload is already saturated by one transfer; a second
+        # thread only adds contention. fetch_file claims its target under state._lock, so
+        # even with N>1 two workers would never pick the same path — we just don't need N>1.
         fetch_concurrency = max(1, int(self.config.get("fetch_concurrency", 1)))
         for i in range(fetch_concurrency):
             name = f"fetch-{i}" if fetch_concurrency > 1 else "fetch"
@@ -449,32 +444,44 @@ class Orchestrator:
                 f"{item['filename']} ({format_bytes(item.get('file_size_bytes', 0))})"
             )
 
-            # Acquire a GPU semaphore slot (blocks if all N slots are busy).
-            with self._gpu_semaphore:
-                # Force items that are already AV1 → gap fill instead of full gamut
-                is_av1 = (
-                    item.get("video", {}).get("codec_raw") == "av1" if isinstance(item.get("video"), dict) else False
-                )
-                if is_force and is_av1:
-                    gaps = analyse_gaps(item, self.config)
-                    if gaps.needs_anything:
-                        gap_fill(filepath, item, gaps, self.config, self.state)
-                    else:
-                        # AV1 + nothing to gap-fill: mark done so the file isn't left in
-                        # an orphaned "processing" state from a prior pipeline run.
-                        logging.info(f"  AV1 with no gaps: {item['filename']} — marking done.")
-                        self.state.set_file(
-                            filepath,
-                            FileStatus.DONE,
-                            mode="gap_filler",
-                            reason="nothing to do (AV1)",
-                        )
+            # Force items that are already AV1 → gap fill instead of full gamut
+            is_av1 = (
+                item.get("video", {}).get("codec_raw") == "av1" if isinstance(item.get("video"), dict) else False
+            )
+            encode_ok = False
+            if is_force and is_av1:
+                # Gap fill doesn't hold the GPU semaphore (whisper is the only GPU user
+                # here and gap_fill handles its own coordination).
+                gaps = analyse_gaps(item, self.config)
+                if gaps.needs_anything:
+                    gap_fill(filepath, item, gaps, self.config, self.state)
                 else:
-                    effective_config = self._apply_overrides(item)
-                    success = full_gamut(filepath, item, effective_config, self.state, self.staging_dir)
-                    if not success:
+                    # AV1 + nothing to gap-fill: mark done so the file isn't left in
+                    # an orphaned "processing" state from a prior pipeline run.
+                    logging.info(f"  AV1 with no gaps: {item['filename']} — marking done.")
+                    self.state.set_file(
+                        filepath,
+                        FileStatus.DONE,
+                        mode="gap_filler",
+                        reason="nothing to do (AV1)",
+                    )
+            else:
+                # Encode under the GPU semaphore, then release it BEFORE uploading —
+                # upload is network-bound, so holding the GPU slot through it blocks
+                # the next encode for no reason.
+                with self._gpu_semaphore:
+                    encode_ok = full_gamut(filepath, item, self.config, self.state, self.staging_dir)
+
+                if encode_ok:
+                    try:
+                        finalize_upload(filepath, self.state, self.config)
+                    except Exception as e:
+                        logging.error(f"Upload failed for {os.path.basename(filepath)}: {e}")
                         self.state.stats["errors"] = self.state.stats.get("errors", 0) + 1
                         self.state.save()
+                else:
+                    self.state.stats["errors"] = self.state.stats.get("errors", 0) + 1
+                    self.state.save()
 
             self._set_gpu_wants(None, previous=filepath)
 
@@ -535,32 +542,6 @@ class Orchestrator:
                 "file_size_bytes": os.path.getsize(filepath) if os.path.exists(filepath) else 0,
                 "library_type": "movie" if "Movies" in filepath else "series",
             }
-
-    # =========================================================================
-    # Upload Worker — ships encoded files back to the NAS, independent of fetch
-    # =========================================================================
-
-    def _upload_worker(self):
-        """Handle post-encode uploads (copy to NAS + verify + replace + TMDb + Plex).
-
-        Split out from the old combined network worker so an upload of a finished encode
-        doesn't have to wait for an in-flight 20 GB fetch to complete. Both threads share
-        the same NAS link but in practice only one is active at a time (GPU encode is the
-        bottleneck, so the network is usually idle).
-        """
-        logging.info("Upload worker started")
-        while not self._shutdown.is_set():
-            upload_entry = self._find_pending_upload()
-            if not upload_entry:
-                self._shutdown.wait(timeout=2)
-                continue
-            fp = upload_entry["filepath"]
-            logging.info(f"[NET] Upload: {os.path.basename(fp)}")
-            try:
-                finalize_upload(fp, self.state, self.config)
-            except Exception as e:
-                logging.error(f"Upload failed for {os.path.basename(fp)}: {e}")
-        logging.info("Upload worker finished")
 
     # =========================================================================
     # Fetch Worker — pre-fetch files to keep the GPU encoders fed
@@ -714,15 +695,6 @@ class Orchestrator:
                 self.state.set_file(filepath, FileStatus.PROCESSING, **payload)
             except Exception as e:
                 logging.debug(f"  post-fetch state write failed: {e}")
-
-    def _find_pending_upload(self) -> dict | None:
-        """Find a file with status=UPLOADING and stage=pending_upload."""
-        uploading = self.state.get_files_by_status(FileStatus.UPLOADING)
-        for fp in uploading:
-            entry = self.state.get_file(fp)
-            if entry and entry.get("stage") == "pending_upload":
-                return {"filepath": fp}
-        return None
 
     # =========================================================================
     # Gap Filler Worker — CPU work always, GPU (whisper) between encodes
