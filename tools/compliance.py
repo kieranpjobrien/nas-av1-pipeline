@@ -31,12 +31,19 @@ from pipeline.config import DEFAULT_CONFIG, KEEP_LANGS
 
 CONTROL_DIR = STAGING_DIR / "control"
 
-# Scene-tag detector — matches any of the common scene markers; a filename containing
-# even one is considered dirty.
+# Scene-tag detector — matches common scene markers; a filename containing
+# even one is considered dirty. Streaming-service codes (NF, AMZN, MAX, etc.)
+# require context anchors (dot-or-dash on at least one side) to avoid matching
+# "MAX" inside "Mad Max" or "NF" inside a title word.
 SCENE_TAG_RE = re.compile(
+    # Primary technical scene tags — these are unambiguous, word-boundary only.
     r"\b(?:1080p|720p|480p|2160p|UHD|BluRay|BDRip|BRRip|WEB-?DL|WEBRip|HDTV|HDRip|"
     r"DVDRip|REMUX|x264|x265|HEVC|AAC|DDP?\d|AC3|EAC3|DTS|TrueHD|Atmos|"
-    r"NF|AMZN|DSNP|HULU|MAX|ATVP|REPACK|MULTi|PROPER)\b",
+    r"REPACK|MULTi|PROPER)\b"
+    # Streaming services — only flag when dot/dash surrounded (scene format)
+    r"|(?<=[.-])(?:NF|AMZN|DSNP|HULU|MAX|ATVP|PCOK|PMTP|STAN)(?=[.-])"
+    # Scene release-group suffix — trailing "-GROUP" all-caps after a dot cluster
+    r"|\.[A-Z]{2,4}\d?-[A-Z0-9][A-Za-z0-9]{2,}$",
     re.IGNORECASE,
 )
 
