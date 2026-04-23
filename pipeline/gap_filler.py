@@ -15,7 +15,6 @@ import shutil
 import subprocess
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Optional
 
 from paths import STAGING_DIR
@@ -615,7 +614,7 @@ def _strip_tracks_on_nas(filepath: str, gaps: GapAnalysis, machine: dict | None 
             audio_n = sum(1 for s in streams if s.get("codec_type") == "audio")
             video_n = sum(1 for s in streams if s.get("codec_type") == "video")
             if video_n < 1:
-                logging.error(f"  Post-mkvmerge verify: 0 video streams in output — aborting replace")
+                logging.error("  Post-mkvmerge verify: 0 video streams in output — aborting replace")
                 os.remove(tmp_unc)
                 return False
             # Strict check: output audio count must equal what we asked mkvmerge

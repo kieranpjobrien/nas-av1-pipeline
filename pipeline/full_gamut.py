@@ -246,7 +246,6 @@ def full_gamut(
         if not (status == FileStatus.PROCESSING.value and local_path and os.path.exists(local_path)):
             logging.info(f"Waiting for fetch: {filename}")
             waited = 0
-            last_warn_status = None  # only warn when the status hasn't changed in a while
             while True:
                 existing = state.get_file(filepath)
                 status = existing.get("status") if existing else None
@@ -268,7 +267,6 @@ def full_gamut(
                         f"Still waiting for fetch after {waited}s "
                         f"(status={status}, not actively fetching): {filename}"
                     )
-                    last_warn_status = status
             logging.info(f"Fetched: {filename}")
 
         # === STEP 2: Clean filename ===
