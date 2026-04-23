@@ -400,12 +400,12 @@ def _filename_matches_folder(filepath: str, library_type: str) -> bool:
         # strip SxxExx and everything after: "Show S01E01 Title" → "Show"
         m = _SXXEXX_RE.search(filename)
         fn_title = filename[: m.start()].rstrip(" .-") if m else filename
-        # Strip disambiguators from folder: year "(2018)", region "(US)/(UK)/(AU)" etc.
-        # Episode files correctly omit these — they're on the show folder for Plex.
+        # Strip disambiguators from BOTH filename title AND folder. Some files
+        # carry the "(US)" in the name, some don't — both forms are fine.
         folder = grandparent  # show folder
-        folder = _YEAR_PAREN_RE.sub("", folder)
-        folder = re.sub(r"\s*\((?:US|UK|AU|NZ|CA|IE|IN|ZA|BR|MX|JP|KR)\)", "", folder, flags=re.IGNORECASE)
-        folder = folder.strip()
+        _region_re = re.compile(r"\s*\((?:US|UK|AU|NZ|CA|IE|IN|ZA|BR|MX|JP|KR)\)", re.IGNORECASE)
+        folder = _region_re.sub("", _YEAR_PAREN_RE.sub("", folder)).strip()
+        fn_title = _region_re.sub("", _YEAR_PAREN_RE.sub("", fn_title)).strip()
     else:
         return True
 
