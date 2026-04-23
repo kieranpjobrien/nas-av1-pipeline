@@ -39,8 +39,6 @@ _DIRECT_COLS = {
     "added",
     "last_updated",
     "tier",
-    "audio_only",
-    "cleanup_strip",
     "local_path",
     "output_path",
     "dest_path",
@@ -48,7 +46,6 @@ _DIRECT_COLS = {
     "stage",
     "reason",
     "res_key",
-    "sub_strip",
 }
 
 
@@ -76,9 +73,6 @@ def _init_tables(conn: sqlite3.Connection) -> None:
             added TEXT,
             last_updated TEXT,
             tier TEXT,
-            audio_only INTEGER,
-            cleanup_strip INTEGER,
-            sub_strip INTEGER,
             local_path TEXT,
             output_path TEXT,
             dest_path TEXT,
@@ -214,8 +208,6 @@ class PipelineState:
             # Apply new values
             for k, v in all_data.items():
                 if k in _DIRECT_COLS:
-                    if k in ("audio_only", "cleanup_strip", "sub_strip") and v is not None:
-                        v = 1 if v else 0
                     direct[k] = v
                 else:
                     extras[k] = v
@@ -339,10 +331,6 @@ class PipelineState:
         extras_raw = d.pop("extras", "{}")
         extras = json.loads(extras_raw) if extras_raw else {}
         d.update(extras)
-        # Convert SQLite integers back to booleans
-        for bool_col in ("audio_only", "cleanup_strip", "sub_strip"):
-            if bool_col in d and d[bool_col] is not None:
-                d[bool_col] = bool(d[bool_col])
         # Remove None values for clean output
         return {k: v for k, v in d.items() if v is not None}
 

@@ -54,18 +54,6 @@ class TestPipelineStateBasics:
         assert entry["number"] == 42
         state.close()
 
-    def test_boolean_columns_round_trip(self, tmp_state_db):
-        """Boolean direct columns (audio_only, cleanup_strip, sub_strip) survive the SQLite integer round-trip."""
-        state = PipelineState(tmp_state_db)
-        fp = r"\\KieranNAS\Media\Movies\Bool.mkv"
-        state.set_file(fp, FileStatus.PENDING, audio_only=True, cleanup_strip=False, sub_strip=True)
-        entry = state.get_file(fp)
-        assert entry["audio_only"] is True
-        assert entry["cleanup_strip"] is False
-        assert entry["sub_strip"] is True
-        state.close()
-
-
 class TestStatusTransitions:
     """Verify the pipeline state machine transitions work correctly."""
 
