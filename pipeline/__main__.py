@@ -111,8 +111,11 @@ def build_queues(report_path: str, config: dict, state: PipelineState, control: 
                 }
             )
 
-    # Sort: full_gamut by priority tier then size desc
-    full_gamut_queue.sort(key=lambda x: (x["priority_tier"], -x["file_size_bytes"]))
+    # Sort: smallest-first ("easiest quick wins"). Tier info is still on each
+    # item so operators can reason about it, but the scheduler always picks the
+    # fastest next encode. Force/priority overrides applied AFTER this sort via
+    # control.apply_queue_overrides still win — pushes go to the front.
+    full_gamut_queue.sort(key=lambda x: x["file_size_bytes"])
 
     # Gap filler: NAS-only work first (no fetch), then by size
     # needs_fetch is True only for audio transcode — everything else runs on NAS
