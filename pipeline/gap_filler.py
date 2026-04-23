@@ -24,6 +24,7 @@ from pipeline.ffmpeg import (
     format_bytes,
     format_duration,
 )
+from pipeline.gap_fill_lock import GapFillLockTimeout, gap_fill_lock
 from pipeline.report import update_entry
 from pipeline.state import FileStatus, PipelineState
 from pipeline.streams import parse_sub_stream
@@ -540,17 +541,33 @@ def _strip_tracks_on_nas(filepath: str, gaps: GapAnalysis, machine: dict | None 
         src_size = 1024 * 1024 * 1024  # assume 1GB
     timeout = max(300, int(src_size / (1024 * 1024)))
 
-    # Run remote mkvmerge
-    result = remote_strip_and_mux(
-        machine,
-        container_path,
-        tmp_path,
-        audio_keep_ids=audio_keep_ids,
-        sub_keep_ids=sub_keep_ids,
-        no_subs=no_subs,
-        external_sub_paths=external_sub_args,
-        timeout=timeout,
-    )
+    # Run remote mkvmerge under the cross-process gap-fill lock so only ONE
+    # tool is driving SSH+Docker+mkvmerge against the NAS at a time. Two
+    # concurrent holders saturate Synology disk I/O, which causes mkvmerge
+    # to rc=137 (SIGKILL from kernel OOM-pressure guard). Pattern observed
+    # 10+ times on 2026-04-23.
+    #
+    # The orchestrator attaches its shutdown event to ``gaps._shutdown_event``
+    # so Ctrl-C aborts the waiter cleanly; if it's absent we fall back to
+    # a plain timeout-only wait.
+    shutdown_event = getattr(gaps, "_shutdown_event", None)
+    try:
+        with gap_fill_lock(
+            role="gap_filler", timeout=600.0, shutdown=shutdown_event
+        ):
+            result = remote_strip_and_mux(
+                machine,
+                container_path,
+                tmp_path,
+                audio_keep_ids=audio_keep_ids,
+                sub_keep_ids=sub_keep_ids,
+                no_subs=no_subs,
+                external_sub_paths=external_sub_args,
+                timeout=timeout,
+            )
+    except GapFillLockTimeout as e:
+        logging.error(f"  gap_fill_lock timed out / aborted: {e}")
+        return False
 
     if result.returncode >= 2:
         # Filter cosmetic OpenSSH post-quantum warning block ("** ..." lines) and

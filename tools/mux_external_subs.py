@@ -43,6 +43,7 @@ except (AttributeError, OSError):
 
 from paths import MEDIA_REPORT
 from pipeline.circuit_breaker import CircuitBreaker, CircuitBreakerOpen
+from pipeline.gap_fill_lock import GapFillLockTimeout, gap_fill_lock
 from pipeline.nas_worker import NAS, SERVER, remote_identify, remote_strip_and_mux, unc_to_container_path
 from pipeline.streams import is_hi_external, is_hi_internal
 
@@ -97,10 +98,14 @@ def find_candidates() -> list[dict]:
     return targets
 
 
-def mux_one(target: dict, machine: dict) -> tuple[str, str]:
+def mux_one(target: dict, machine: dict, shutdown: threading.Event | None = None) -> tuple[str, str]:
     """Mux one file. Returns (status, message).
 
     status is one of: ok, skip, fail
+
+    The ``shutdown`` event (if provided) is forwarded to the cross-process
+    gap-fill lock so the waiter aborts on Ctrl-C rather than blocking for
+    the full 600s timeout.
     """
     fp = target["filepath"]
     sidecar = target["sidecar"]
@@ -122,17 +127,24 @@ def mux_one(target: dict, machine: dict) -> tuple[str, str]:
     # Call remote mkvmerge with KEEP-ALL (no strip) + external sub appended
     # audio_keep_ids=None AND sub_keep_ids=None means mkvmerge gets no
     # --audio-tracks or --subtitle-tracks flag — every existing track is kept.
+    #
+    # Serialised against gap_filler via the cross-process gap_fill_lock —
+    # two concurrent SSH+Docker+mkvmerge holders saturate Synology disk I/O
+    # and provoke rc=137 (kernel OOM-pressure SIGKILL).
     try:
-        result = remote_strip_and_mux(
-            machine,
-            container_fp,
-            container_tmp,
-            audio_keep_ids=None,  # KEEP ALL — no strip
-            sub_keep_ids=None,    # KEEP ALL — no strip
-            no_subs=False,
-            external_sub_paths=[(container_sub, "eng")],
-            timeout=600,
-        )
+        with gap_fill_lock(role="mux_external_subs", timeout=600.0, shutdown=shutdown):
+            result = remote_strip_and_mux(
+                machine,
+                container_fp,
+                container_tmp,
+                audio_keep_ids=None,  # KEEP ALL — no strip
+                sub_keep_ids=None,    # KEEP ALL — no strip
+                no_subs=False,
+                external_sub_paths=[(container_sub, "eng")],
+                timeout=600,
+            )
+    except GapFillLockTimeout as e:
+        return "fail", f"gap_fill_lock timeout/abort: {e}"
     except Exception as e:
         return "fail", f"mkvmerge invocation error: {e}"
 
@@ -284,7 +296,7 @@ def _mux_body(args) -> None:
         except CircuitBreakerOpen:
             return "fail", "breaker open and shutdown requested"
         try:
-            status, msg = mux_one(t, machine)
+            status, msg = mux_one(t, machine, shutdown=shutdown)
         except Exception as e:
             breaker.record(False)
             return "fail", f"mux_one raised: {e}"
