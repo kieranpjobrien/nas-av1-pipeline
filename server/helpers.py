@@ -2,7 +2,9 @@
 
 import json
 import os
+import threading
 from pathlib import Path
+from typing import Any
 
 from paths import PIPELINE_STATE_DB, STAGING_DIR
 
@@ -110,3 +112,82 @@ def write_json_safe(path: Path, data: dict | list) -> None:
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
     tmp.replace(path)
+
+
+# --- mtime-invalidating cache for media_report.json reads ---
+#
+# Glance polls /api/library-completion every 60s and every call re-parses
+# 50 MB of JSON. This cache keeps the parsed dict in memory keyed on
+# (filepath, mtime); a mtime change (pipeline finished an encode and called
+# update_entry, or the scanner ran) automatically invalidates.
+#
+# Thread-safe. A cache HIT skips both locks entirely — just a stat + dict
+# lookup. A cache MISS takes a per-path loader lock so N concurrent readers
+# produce exactly one underlying parse; the losers wait, then hit the cache.
+_REPORT_CACHE_LOCK = threading.Lock()
+_REPORT_CACHE: dict[str, tuple[float, Any]] = {}
+_REPORT_LOADERS: dict[str, threading.Lock] = {}
+
+
+def _loader_lock(path_str: str) -> threading.Lock:
+    """Return a per-path lock used to serialise cold-miss parses."""
+    with _REPORT_CACHE_LOCK:
+        lock = _REPORT_LOADERS.get(path_str)
+        if lock is None:
+            lock = threading.Lock()
+            _REPORT_LOADERS[path_str] = lock
+        return lock
+
+
+def read_report_cached(path: str | Path) -> dict | None:
+    """Return parsed media_report.json, cached by (path, mtime).
+
+    Cache HIT: returns the cached parsed dict (shared instance) in ~0.1 ms —
+    just a dict lookup and an ``os.stat`` call. Cache MISS takes the
+    per-path loader lock before reading, so racing readers share a single
+    50 MB parse. The read itself goes through ``tools.report_lock.read_report``
+    which serialises against writers.
+
+    Returns ``None`` if the file does not exist, matching ``read_json_safe``.
+    """
+    path_str = str(path)
+    try:
+        mtime = os.path.getmtime(path_str)
+    except OSError:
+        return None
+
+    with _REPORT_CACHE_LOCK:
+        hit = _REPORT_CACHE.get(path_str)
+        if hit and hit[0] == mtime:
+            return hit[1]
+
+    # Cold miss. Take the per-path loader lock; only one thread parses,
+    # the rest wait and then re-check the cache.
+    loader = _loader_lock(path_str)
+    with loader:
+        with _REPORT_CACHE_LOCK:
+            hit = _REPORT_CACHE.get(path_str)
+            if hit and hit[0] == mtime:
+                return hit[1]
+
+        from tools.report_lock import read_report
+
+        data = read_report()
+
+        # Re-stat post-read: if the file was rewritten while we were parsing,
+        # key the cache entry against the actual on-disk mtime so the next
+        # reader's stat matches.
+        try:
+            mtime = os.path.getmtime(path_str)
+        except OSError:
+            return data
+
+        with _REPORT_CACHE_LOCK:
+            _REPORT_CACHE[path_str] = (mtime, data)
+        return data
+
+
+def invalidate_report_cache() -> None:
+    """Clear the media_report cache. Call after an in-process write."""
+    with _REPORT_CACHE_LOCK:
+        _REPORT_CACHE.clear()
