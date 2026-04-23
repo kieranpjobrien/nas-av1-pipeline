@@ -13,6 +13,7 @@ import signal
 import threading
 from typing import Optional
 
+from pipeline.circuit_breaker import CircuitBreaker, CircuitBreakerOpen
 from pipeline.ffmpeg import format_bytes
 from pipeline.full_gamut import finalize_upload, full_gamut
 from pipeline.gap_filler import analyse_gaps, gap_fill
@@ -697,8 +698,32 @@ class Orchestrator:
         quick_total = quick_queue.qsize()
         logging.info(f"Gap filler: {heavy_total} heavy (mkvmerge) + {quick_total} quick (rename/meta/delete)")
 
+        # One breaker per remote machine. Both SRV and NAS can fail independently
+        # (SRV over SSH to ubuntu box, NAS over SSH to synology), so we don't want
+        # a cascading SRV failure to gate NAS workers and vice versa.
+        # threshold=5, cooldown=300s matches the overnight-2026-04-23 forensic — 5
+        # consecutive remote SSH+docker failures is the point where "transient" is
+        # no longer a credible explanation and we need to back off for 5 min.
+        breakers: dict[str, CircuitBreaker] = {
+            "SRV": CircuitBreaker(threshold=5, cooldown_secs=300, name="heavy_worker.SRV"),
+            "NAS": CircuitBreaker(threshold=5, cooldown_secs=300, name="heavy_worker.NAS"),
+        }
+
         def heavy_worker(name: str, machine: dict):
+            machine_label = machine.get("label", "?")
+            breaker = breakers.get(machine_label)
             while not self._shutdown.is_set():
+                # Back off if the per-machine breaker is OPEN. wait_if_open raises
+                # CircuitBreakerOpen if shutdown fires while we're waiting — catch that
+                # and exit the worker cleanly. Otherwise we block (polling) until the
+                # breaker ages into HALF_OPEN and a trial is allowed through.
+                if breaker is not None:
+                    try:
+                        breaker.wait_if_open(shutdown=self._shutdown)
+                    except CircuitBreakerOpen:
+                        logging.info(f"[{name}] worker exiting — breaker open at shutdown")
+                        break
+
                 try:
                     item, gaps = heavy_queue.get(timeout=2)
                 except queue_mod.Empty:
@@ -719,11 +744,30 @@ class Orchestrator:
                 logging.info(f"[{name} {p}/{heavy_total}] {gaps.describe()} | {item['filename']}")
                 # Pass machine config to gap_fill for remote execution
                 gaps._remote_machine = machine
-                gap_fill(filepath, item, gaps, self.config, self.state)
+                was_open_before = breaker.is_open() if breaker is not None else False
+                success = False
+                try:
+                    success = bool(gap_fill(filepath, item, gaps, self.config, self.state))
+                except Exception as e:
+                    logging.error(f"[{name}] gap_fill raised on {item['filename']}: {e}")
+                    success = False
 
-                if self.state.get_file(filepath) and self.state.get_file(filepath).get("status") == "error":
+                # Cross-check state: if the file landed in ERROR, treat as failure
+                # regardless of the return value. Belt-and-braces — the discipline
+                # contract forbids trusting return codes without state verification.
+                entry = self.state.get_file(filepath)
+                if entry and (entry.get("status") or "").lower() == "error":
+                    success = False
                     self.state.stats["errors"] = self.state.stats.get("errors", 0) + 1
                     self.state.save()
+
+                if breaker is not None:
+                    breaker.record(success)
+                    if not was_open_before and breaker.is_open():
+                        logging.warning(
+                            f"[{name}] circuit breaker OPENED for machine={machine_label} "
+                            f"(5 consecutive failures) — worker will pause for 300s"
+                        )
 
                 heavy_queue.task_done()
 
