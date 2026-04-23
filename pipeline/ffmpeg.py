@@ -59,14 +59,27 @@ def get_duration(filepath: str) -> Optional[float]:
 def _should_transcode_audio(audio: dict, config: dict) -> bool:
     """Decide whether an audio stream should be transcoded to EAC-3.
 
-    Transcodes everything except EAC-3 (already target codec).
+    Passthrough (no transcode) for:
+      - EAC-3 (already target codec, includes EAC-3-JOC which carries Atmos)
+      - TrueHD — the primary Atmos carrier. Sonos Arc / Beam Gen 2 decode
+        TrueHD-Atmos natively over HDMI eARC. Transcoding to EAC-3 7.1
+        would drop the object layer and flatten overhead effects to
+        front-wall. The size cost (TrueHD is ~3-5 GB on a 4K remux) is
+        worth it for titles where the user actually has Atmos gear.
+      - Opus (efficient lossy, already good)
+
+    Everything else (DTS, DTS-HD MA, FLAC, PCM, AC-3, AAC, MP3) transcodes
+    to EAC-3. DTS-HD MA is lossless but not Atmos; 640k EAC-3 is transparent
+    on Sonos-class gear. DTS:X Atmos-equivalent is rare enough to ignore
+    for now — if it shows up, add 'dts' with a profile check.
     """
-    # EAC-3 is the target codec — no point re-encoding. Check both codec and
-    # codec_raw fields (media-report uses codec_raw; raw ffprobe uses codec).
-    if normalise_codec(audio.get("codec_raw") or audio.get("codec")) == "eac3":
+    codec = normalise_codec(audio.get("codec_raw") or audio.get("codec"))
+    if codec == "eac3":
         return False
-    if normalise_codec(audio.get("codec")) == "eac3":
-        return False
+    if codec == "truehd":
+        return False  # preserve Atmos object layer
+    if codec == "opus":
+        return False  # already efficient lossy
     return True
 
 

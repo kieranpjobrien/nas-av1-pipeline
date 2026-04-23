@@ -10,13 +10,15 @@ Rules (from the 2026-04-23 audio-loss incident postmortem):
   - Refuse to build commands when the source has zero audio streams. Either
     the scanner misreported (fix the scanner) or the source is damaged
     (delete + re-source) — either way, never emit an encode command.
+  - TrueHD + Opus + EAC-3 passthrough — never transcode these. TrueHD
+    is the Atmos carrier and the user has a Sonos Arc that decodes it.
 """
 from __future__ import annotations
 
 import pytest
 
 from pipeline.config import build_config
-from pipeline.ffmpeg import build_audio_remux_cmd, build_ffmpeg_cmd
+from pipeline.ffmpeg import _should_transcode_audio, build_audio_remux_cmd, build_ffmpeg_cmd
 
 
 def _base_config() -> dict:
@@ -169,3 +171,32 @@ class TestBuildAudioRemuxCmdInvariants:
                 item=item,
                 config=_base_config(),
             )
+
+
+class TestAudioPassthroughPolicy:
+    """Codecs that must NEVER be transcoded (rule 9a + audio policy)."""
+
+    def test_eac3_passthrough(self) -> None:
+        # Already target codec — bit-exact passthrough (preserves EAC-3-JOC / Atmos)
+        assert _should_transcode_audio({"codec_raw": "eac3"}, _base_config()) is False
+        assert _should_transcode_audio({"codec": "e-ac-3"}, _base_config()) is False
+
+    def test_truehd_passthrough_preserves_atmos(self) -> None:
+        # TrueHD is the primary Dolby Atmos carrier. User has Sonos Arc.
+        # Transcoding to EAC-3 would drop the object layer.
+        assert _should_transcode_audio({"codec_raw": "truehd", "channels": 8}, _base_config()) is False
+
+    def test_opus_passthrough(self) -> None:
+        # Opus is already an efficient lossy codec — no benefit to re-encoding.
+        assert _should_transcode_audio({"codec_raw": "opus"}, _base_config()) is False
+
+    def test_dts_hd_ma_still_transcoded(self) -> None:
+        # DTS-HD MA is lossless but doesn't carry Atmos — transcode to EAC-3 640k.
+        assert _should_transcode_audio({"codec_raw": "dts", "profile": "DTS-HD MA"}, _base_config()) is True
+
+    def test_flac_still_transcoded(self) -> None:
+        assert _should_transcode_audio({"codec_raw": "flac"}, _base_config()) is True
+
+    def test_ac3_still_transcoded(self) -> None:
+        # Plain AC-3 → upgrade to EAC-3 (better codec at same 640k).
+        assert _should_transcode_audio({"codec_raw": "ac3"}, _base_config()) is True
