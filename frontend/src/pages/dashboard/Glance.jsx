@@ -69,6 +69,8 @@ function ActiveRow({ f }) {
 export function Glance({ data, pipelineData, throughputPerDay, workersActive, workersTotal, onNavigate }) {
   const [historySummary, setHistorySummary] = useState(null);
   const [completion, setCompletion] = useState(null);
+  const [healthDeep, setHealthDeep] = useState(null);
+  const [incidentsOpen, setIncidentsOpen] = useState(false);
   useEffect(() => {
     let cancelled = false;
     api
@@ -79,6 +81,27 @@ export function Glance({ data, pipelineData, throughputPerDay, workersActive, wo
       .catch(() => {});
     return () => {
       cancelled = true;
+    };
+  }, []);
+
+  // Invariants / deep health — polled on the same 60s cadence as library
+  // completion. Drives the Incidents card below the page head.
+  useEffect(() => {
+    let cancelled = false;
+    const refresh = () => {
+      if (document.hidden) return;
+      api.getHealthDeep().then((h) => !cancelled && setHealthDeep(h)).catch(() => {});
+    };
+    refresh();
+    const id = setInterval(refresh, 60_000);
+    const onVis = () => { if (!document.hidden) refresh(); };
+    window.addEventListener("visibilitychange", onVis);
+    window.addEventListener("focus", refresh);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+      window.removeEventListener("visibilitychange", onVis);
+      window.removeEventListener("focus", refresh);
     };
   }, []);
 
@@ -264,6 +287,104 @@ export function Glance({ data, pipelineData, throughputPerDay, workersActive, wo
           </div>
         </div>
       </div>
+
+      {healthDeep && (() => {
+        const failing = (healthDeep.checks || []).filter((c) => !c.ok);
+        const firstName = failing.length > 0 ? failing[0].name : null;
+        const allGreen = healthDeep.all_green === true && failing.length === 0;
+        return (
+          <div
+            onClick={() => setIncidentsOpen((v) => !v)}
+            style={{
+              marginTop: 12,
+              marginBottom: 4,
+              padding: "10px 14px",
+              background: allGreen ? "rgba(94,197,112,0.05)" : "rgba(224,101,75,0.06)",
+              border: allGreen
+                ? "1px solid rgba(94,197,112,0.25)"
+                : "1px solid rgba(224,101,75,0.35)",
+              borderRadius: 8,
+              cursor: "pointer",
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 12 }}>
+              <span
+                style={{
+                  width: 8,
+                  height: 8,
+                  borderRadius: "50%",
+                  background: allGreen ? "var(--accent)" : "var(--bad)",
+                }}
+              />
+              <b style={{ color: allGreen ? "var(--accent)" : "var(--bad)" }}>
+                {allGreen ? "All invariants OK" : `${failing.length} invariant${failing.length === 1 ? "" : "s"} failing`}
+              </b>
+              {!allGreen && firstName && (
+                <span className="mono" style={{ color: "var(--ink-3)" }}>
+                  first: {firstName}
+                </span>
+              )}
+              <span style={{ marginLeft: "auto", fontSize: 10, color: "var(--ink-4)" }}>
+                {incidentsOpen ? "hide details" : "click for details"}
+              </span>
+            </div>
+            {incidentsOpen && (
+              <div
+                onClick={(e) => e.stopPropagation()}
+                style={{
+                  marginTop: 10,
+                  padding: "8px 0 2px",
+                  borderTop: "1px solid var(--line)",
+                  display: "grid",
+                  gridTemplateColumns: "1fr auto auto",
+                  columnGap: 12,
+                  rowGap: 6,
+                  fontSize: 11,
+                }}
+              >
+                <div style={{ color: "var(--ink-4)", textTransform: "uppercase", letterSpacing: "0.1em" }}>
+                  name
+                </div>
+                <div style={{ color: "var(--ink-4)", textTransform: "uppercase", letterSpacing: "0.1em" }}>
+                  severity
+                </div>
+                <div style={{ color: "var(--ink-4)", textTransform: "uppercase", letterSpacing: "0.1em" }}>
+                  status
+                </div>
+                {(healthDeep.checks || []).map((c) => (
+                  <div key={c.name} style={{ display: "contents" }}>
+                    <div className="mono" title={c.message} style={{ color: c.ok ? "var(--ink-2)" : "var(--bad)" }}>
+                      {c.name}
+                    </div>
+                    <div className="mono" style={{ color: "var(--ink-3)" }}>
+                      {c.severity}
+                    </div>
+                    <div
+                      className="mono"
+                      style={{ color: c.ok ? "var(--accent)" : "var(--bad)", fontWeight: 500 }}
+                    >
+                      {c.ok ? "OK" : `FAIL (${c.value})`}
+                    </div>
+                    {!c.ok && (
+                      <div
+                        style={{
+                          gridColumn: "1 / -1",
+                          color: "var(--ink-3)",
+                          paddingBottom: 2,
+                          paddingLeft: 6,
+                          fontSize: 10.5,
+                        }}
+                      >
+                        {c.message}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })()}
 
       <div className="kpis">
         <div className="kpi">

@@ -91,6 +91,7 @@ export const api = {
   getHistory: (days = 0, limit = 500) => fetchJSON(`/history?days=${days}&limit=${limit}`),
   getHistorySummary: () => fetchJSON("/history/summary"),
   getHealth: () => fetchJSON("/health"),
+  getHealthDeep: () => fetchJSON("/health-deep"),
   getPlexAudit: () => fetchJSON("/plex-audit"),
   compactState: () => postJSON("/pipeline/compact", {}),
   vmafCheck: (path) => postJSON("/vmaf/check", { path }),
