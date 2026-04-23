@@ -25,7 +25,7 @@ PROCESS_CONFIGS: dict[str, dict] = {
         "cwd": _PROJECT_ROOT,
     },
     "strip_tags": {
-        "cmd": [sys.executable, "-m", "tools.strip_tags", "--execute", "--movies"],
+        "cmd": [sys.executable, "-m", "tools.maintain", "clean-names", "--execute", "--movies"],
         "cwd": _PROJECT_ROOT,
     },
     "duplicates": {
@@ -194,9 +194,12 @@ class ProcessManager:
         if not cfg:
             raise ValueError(f"Unknown process: {name}")
 
-        # The module name to search for (e.g. "-m pipeline" or "-m tools.scanner")
-        module_flag = cfg["cmd"][-1] if "-m" in cfg["cmd"] else None
-        if not module_flag:
+        # The module name to search for (argument immediately after "-m",
+        # e.g. "pipeline", "tools.scanner", "tools.maintain").
+        try:
+            mi = cfg["cmd"].index("-m")
+            module_flag = cfg["cmd"][mi + 1]
+        except (ValueError, IndexError):
             return {"ok": False, "error": "Cannot identify process command"}
 
         killed: list[int] = []

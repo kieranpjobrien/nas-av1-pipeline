@@ -29,12 +29,36 @@ def test_clean_names_dry_run_shows_plan_without_renaming(tmp_path, capsys):
     rc = args.func(args)
     assert rc == 0
 
-    # File still exists with original name (no rename happened)
+    # File still exists with original name (no rename happened).
     assert dirty.exists()
-    # Stdout should mention DRY RUN and the planned rename
     out = capsys.readouterr().out
     assert "DRY RUN" in out
     assert "Breaking.Bad.S01E01" in out
+
+
+# ---------------------------------------------------------------------------
+# normalise
+# ---------------------------------------------------------------------------
+
+
+def test_normalise_adopts_parent_title_diacritics(tmp_path, capsys):
+    """When parent folder has diacritics that the filename is missing, adopt parent's form."""
+    show = tmp_path / "Shōgun (2024)" / "Season 1"
+    show.mkdir(parents=True)
+    # Filename missing the macron
+    weird = show / "Shogun S01E01.mkv"
+    weird.write_text("x")
+
+    args = maintain._build_parser().parse_args(
+        ["normalise", "--root", str(tmp_path)]
+    )
+    rc = args.func(args)
+    assert rc == 0
+
+    # Dry-run: original file still exists, plan shows restore fix.
+    assert weird.exists()
+    out = capsys.readouterr().out
+    assert "restore_from_parent" in out
 
 
 # ---------------------------------------------------------------------------
@@ -76,10 +100,8 @@ def test_relocate_refuses_on_collision(tmp_path, capsys):
     season_dir = show_dir / "Season 2"
     season_dir.mkdir()
 
-    # Original (misfiled in show root)
     misfiled = show_dir / "Chuck S02E12.mkv"
     misfiled.write_text("new")
-    # Collision: same name already in Season 2
     existing = season_dir / "Chuck S02E12.mkv"
     existing.write_text("old")
 
@@ -87,11 +109,9 @@ def test_relocate_refuses_on_collision(tmp_path, capsys):
     assert len(plan) == 1
     assert plan[0]["new_path"] == existing
 
-    # Now actually run the execute path
     import argparse
 
     args = argparse.Namespace(execute=True)
-    # Monkey-patch the NAS_SERIES root the cmd uses
     old_series = maintain.NAS_SERIES
     maintain.NAS_SERIES = tmp_path
     try:
@@ -100,7 +120,7 @@ def test_relocate_refuses_on_collision(tmp_path, capsys):
         maintain.NAS_SERIES = old_series
     assert rc == 0
 
-    # Collision means misfiled untouched
+    # Collision means misfiled untouched.
     assert misfiled.exists()
     assert existing.read_text() == "old"
     out = capsys.readouterr().out
@@ -118,14 +138,12 @@ def test_repair_sidecars_matches_video_stem(tmp_path):
     folder.mkdir(parents=True)
     video = folder / "Show S01E01 Pilot.mkv"
     video.write_text("v")
-    # Orphan sidecar stem doesn't match video stem — just has SxxExx
     orphan = folder / "S01E01.en.srt"
     orphan.write_text("s")
 
     plans = maintain._pair_orphan_sidecars(folder)
     assert len(plans) == 1
     assert plans[0]["sidecar"] == orphan
-    # Should rename to "Show S01E01 Pilot.en.srt"
     assert plans[0]["new_name"] == "Show S01E01 Pilot.en.srt"
 
 
@@ -143,12 +161,12 @@ def test_repair_sidecars_skips_already_paired(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# audit / queue-reencode
+# audit
 # ---------------------------------------------------------------------------
 
 
 def test_audit_queues_reencode_for_non_compliant_file(tmp_path):
-    """A file with a non-AV1 video codec lands in reencode.json after queue-reencode."""
+    """A non-AV1 file lands in reencode.json when ``audit --queue reencode`` runs."""
     report = {
         "files": [
             {
@@ -166,14 +184,18 @@ def test_audit_queues_reencode_for_non_compliant_file(tmp_path):
     report_path.write_text(json.dumps(report), encoding="utf-8")
 
     reencode_path = tmp_path / "reencode.json"
-    # Point maintain.CONTROL_DIR at tmp_path so the write lands inside the test
     old_ctrl = maintain.CONTROL_DIR
     maintain.CONTROL_DIR = tmp_path
     try:
         import argparse
 
-        args = argparse.Namespace(report=str(report_path), limit=0, execute=True)
-        rc = maintain.cmd_queue_reencode(args)
+        args = argparse.Namespace(
+            report=str(report_path),
+            csv=None,
+            queue="reencode",
+            limit=0,
+        )
+        rc = maintain.cmd_audit(args)
     finally:
         maintain.CONTROL_DIR = old_ctrl
     assert rc == 0
@@ -215,7 +237,7 @@ SHIM_NAMES = [
 
 @pytest.mark.parametrize("module", SHIM_NAMES)
 def test_shim_scripts_still_work(module):
-    """Each shim runs `python -m <module> --help` without ImportError."""
+    """Each shim runs ``python -m <module> --help`` without ImportError."""
     project_root = Path(__file__).parent.parent
     result = subprocess.run(
         [sys.executable, "-m", module, "--help"],
@@ -225,7 +247,7 @@ def test_shim_scripts_still_work(module):
         timeout=30,
     )
     # argparse --help exits 0. We only care that import + argv translation
-    # completed without crash, and that the text mentions something usage-like.
+    # completed without crash.
     assert result.returncode == 0, f"{module} failed: {result.stderr}"
     combined = (result.stdout + result.stderr).lower()
     assert "usage" in combined or "help" in combined
