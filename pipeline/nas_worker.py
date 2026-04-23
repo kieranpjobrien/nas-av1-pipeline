@@ -12,6 +12,7 @@ Machines:
 import json
 import os
 import subprocess
+import uuid
 from typing import Optional
 
 from paths import NAS_DOCKER_PREFIX, NAS_SSH_HOST, SERVER_DOCKER_PREFIX, SERVER_SSH_HOST
@@ -46,18 +47,48 @@ def unc_to_container_path(unc_path: str) -> str:
     return path
 
 
+def _docker_prefix_with_env(prefix: str, env_var: str, env_value: str) -> str:
+    """Inject a ``-e NAME=VALUE`` flag into a docker-exec prefix.
+
+    Handles both ``docker exec CONTAINER`` and ``sudo /path/to/docker exec CONTAINER``.
+    The flag must go BEFORE the container name, otherwise docker treats it as a
+    positional arg to the program being executed.
+    """
+    tokens = prefix.split()
+    try:
+        idx = tokens.index("exec")
+    except ValueError:
+        # No "exec" token — prefix is malformed; return as-is so the caller
+        # fails with a clear docker error rather than a silent env drop.
+        return prefix
+    # Insert the env flag right after "exec" and before the container name.
+    injected = tokens[: idx + 1] + ["-e", f"{env_var}={env_value}"] + tokens[idx + 1 :]
+    return " ".join(injected)
+
+
 def _ssh_docker(machine: dict, tool: str, args: list[str], timeout: int = 900) -> subprocess.CompletedProcess:
     """Run a tool inside the persistent mkvworker container via SSH + docker exec.
 
     Uses a pre-started container (docker exec, not docker run) to avoid
     the 5-7s startup overhead per operation. Container stays running.
+
+    Tags each invocation with a NASCLEANUP_JOB=<uuid> env var so that on
+    timeout-recovery we can kill only THIS job's process tree, instead of
+    blanket-killing every mkvmerge running in the container (which would
+    collaterally murder other workers' jobs).
     """
     prefix = machine["docker_prefix"]
+
+    # Per-call UUID: identifies this specific invocation's process tree
+    # inside the container. Injected as a docker-exec env var, then recovered
+    # on timeout by scanning /proc/<pid>/environ for the marker.
+    job_id = uuid.uuid4().hex
+    tagged_prefix = _docker_prefix_with_env(prefix, "NASCLEANUP_JOB", job_id)
 
     # Shell-quote the tool name and every argument individually so the
     # remote shell cannot interpret special characters in any position.
     safe_parts = [_shell_quote(tool)] + [_shell_quote(a) for a in args]
-    docker_cmd = f"{prefix} {' '.join(safe_parts)}"
+    docker_cmd = f"{tagged_prefix} {' '.join(safe_parts)}"
 
     # -tt forces a pseudo-TTY so SSH propagates SIGHUP to the remote shell when
     # the client disconnects. ServerAlive pings detect dead connections quickly.
@@ -85,11 +116,28 @@ def _ssh_docker(machine: dict, tool: str, args: list[str], timeout: int = 900) -
         )
     except subprocess.TimeoutExpired:
         # subprocess.run on timeout kills the ssh client but the remote shell may
-        # still be running. Fire a best-effort remote-kill for the tool we started.
+        # still be running. Scan /proc for processes whose environ contains our
+        # unique NASCLEANUP_JOB tag, then kill just those — NOT every mkvmerge
+        # in the container (the old pkill -9 <tool> would orphan other workers'
+        # running jobs, causing cascading failures).
+        #
+        # The recovery command runs inside the container via the SAME docker
+        # prefix (without our env tag — we're querying, not re-launching). For
+        # each /proc/<pid>/environ matching our NASCLEANUP_JOB=<uuid> marker,
+        # kill -9 that PID.
+        recovery_script = (
+            f"for pid in /proc/[0-9]*; do "
+            f"  if [ -r $pid/environ ] && "
+            f"     tr '\\0' '\\n' < $pid/environ 2>/dev/null | "
+            f"     grep -q '^NASCLEANUP_JOB={job_id}$'; then "
+            f"    kill -9 ${{pid##*/}} 2>/dev/null; "
+            f"  fi; "
+            f"done"
+        )
+        recovery_cmd = f"{prefix} sh -c {_shell_quote(recovery_script)}"
         try:
             subprocess.run(
-                ["ssh", "-o", "ConnectTimeout=5", "-o", "BatchMode=yes", machine["host"],
-                 f"{prefix} pkill -9 {_shell_quote(tool)}"],
+                ["ssh", "-o", "ConnectTimeout=5", "-o", "BatchMode=yes", machine["host"], recovery_cmd],
                 capture_output=True, timeout=15,
             )
         except Exception:
