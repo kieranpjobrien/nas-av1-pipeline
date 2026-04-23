@@ -3,13 +3,10 @@
 Monitors a control directory for JSON command files. Supports both canonical
 names and friendly aliases — drop whichever is easier:
 
-Pause:    pause.json, pause_all.json, pause_fetch.json, pause_encode.json, or just PAUSE
-Gentle:   gentle.json
-Skip:     skip.json
-Priority: priority.json
+Pause: pause.json, pause_all.json, pause_fetch.json, pause_encode.json, or just PAUSE
+Skip:  skip.json
 """
 
-import fnmatch
 import json
 import logging
 import os
@@ -29,28 +26,8 @@ class PipelineControl:
 
     # Files that should always exist in control/ (edited in-place, not deleted)
     _PERSISTENT_FILES = {
-        "gentle.json": {
-            "paths": {},
-            "patterns": {},
-            "default_offset": 0,
-        },
         "skip.json": {
             "paths": [],
-        },
-        "priority.json": {
-            "force": [],
-            "paths": [],
-            "patterns": [],
-        },
-        "reencode.json": {
-            "files": {},
-            "patterns": {},
-        },
-        "profiles.json": {
-            "_comment": "Assign content to quality profiles: protected, baseline, lossy",
-            "paths": {},
-            "patterns": {},
-            "default": "baseline",
         },
     }
 
@@ -121,11 +98,6 @@ class PipelineControl:
                 return implicit_data
             return None
 
-    def _any_pause_file_exists(self) -> bool:
-        """Check if any pause-related file exists (including simple PAUSE)."""
-        simple = os.path.exists(os.path.join(os.path.dirname(self.control_dir), "PAUSE"))
-        return simple or self._find_control_file("pause.json") is not None
-
     def _get_pause_type(self) -> Optional[str]:
         """Get the current pause type, or None if not paused."""
         if os.path.exists(os.path.join(os.path.dirname(self.control_dir), "PAUSE")):
@@ -174,238 +146,6 @@ class PipelineControl:
         norm = os.path.normpath(filepath).lower()
         return any(os.path.normpath(p).lower() == norm for p in skip_paths)
 
-    def get_gentle_override(self, filepath: str) -> Optional[dict]:
-        """Get CQ/preset overrides for a specific file.
-
-        gentle.json format:
-        {
-            "paths": {
-                "Z:\\Movies\\Interstellar\\...mkv": {"cq_offset": 4, "preset": "p4"},
-            },
-            "default_offset": 0
-        }
-        Also supports pattern-based matching:
-        {
-            "patterns": {
-                "*Interstellar*": {"cq_offset": 4, "preset": "p7"},
-                "*anime*": {"cq_offset": -2}
-            }
-        }
-        """
-        gentle = self._read_control_file("gentle.json")
-        if not gentle:
-            return None
-
-        norm = os.path.normpath(filepath).lower()
-
-        # Exact path match
-        paths = gentle.get("paths", {})
-        for p, overrides in paths.items():
-            if os.path.normpath(p).lower() == norm:
-                return overrides
-
-        # Pattern match (simple glob-style)
-        patterns = gentle.get("patterns", {})
-        for pattern, overrides in patterns.items():
-            if fnmatch.fnmatch(norm, pattern.lower()):
-                return overrides
-
-        # Default offset
-        default_offset = gentle.get("default_offset", 0)
-        if default_offset != 0:
-            return {"cq_offset": default_offset}
-
-        return None
-
-    def get_quality_profile(self, filepath: str) -> str:
-        """Get the quality profile for a file (protected/baseline/lossy).
-
-        profiles.json format:
-        {
-            "paths": {
-                "Z:\\Series\\Seinfeld\\": "lossy",
-                "Z:\\Movies\\Interstellar (2014)\\": "protected"
-            },
-            "patterns": {
-                "*Seinfeld*": "lossy",
-                "*IMAX*": "protected"
-            },
-            "default": "baseline"
-        }
-        Path matching uses startswith so directory prefixes match all files within.
-        """
-        data = self._read_control_file("profiles.json")
-        if not data:
-            return "baseline"
-
-        norm = os.path.normpath(filepath).lower()
-
-        # Exact or prefix path match
-        paths = data.get("paths", {})
-        for p, profile in paths.items():
-            norm_p = os.path.normpath(p).lower()
-            if norm == norm_p or norm.startswith(norm_p + os.sep) or norm.startswith(norm_p):
-                return profile
-
-        # Pattern match (glob-style)
-        patterns = data.get("patterns", {})
-        for pattern, profile in patterns.items():
-            if fnmatch.fnmatch(norm, pattern.lower()):
-                return profile
-
-        return data.get("default", "baseline")
-
-    def get_reencode_list(self) -> dict:
-        """Get the reencode list: {filepath: {cq: N}, ...}."""
-        data = self._read_control_file("reencode.json")
-        if not data:
-            return {}
-        return data.get("files", {})
-
-    def get_reencode_override(self, filepath: str) -> Optional[dict]:
-        """Get reencode overrides for a file (exact match first, then patterns).
-
-        Returns the override dict (e.g. {"cq": 32}) or None.
-        """
-        data = self._read_control_file("reencode.json")
-        if not data:
-            return None
-
-        norm = os.path.normpath(filepath).lower()
-
-        # Exact file match
-        files = data.get("files", {})
-        for p, overrides in files.items():
-            if os.path.normpath(p).lower() == norm:
-                return overrides
-
-        # Pattern match (glob-style)
-        patterns = data.get("patterns", {})
-        for pattern, overrides in patterns.items():
-            if fnmatch.fnmatch(norm, pattern.lower()):
-                return overrides
-
-        return None
-
-    def remove_reencode(self, filepath: str) -> None:
-        """Remove a completed file from reencode.json."""
-        path = os.path.join(self.control_dir, "reencode.json")
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except (OSError, json.JSONDecodeError):
-            return
-
-        files = data.get("files", {})
-        norm = os.path.normpath(filepath).lower()
-        to_remove = [k for k in files if os.path.normpath(k).lower() == norm]
-        if not to_remove:
-            return
-        for k in to_remove:
-            del files[k]
-
-        # Invalidate mtime cache so next read picks up the change
-        self._last_read.pop(path, None)
-
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=4, ensure_ascii=False)
-
-    def get_force_items(self) -> list[str]:
-        """Get list of filepaths in the force tier (LIFO stack — most recent first)."""
-        priority = self._read_control_file("priority.json")
-        if not priority:
-            return []
-        return priority.get("force", [])
-
-    def push_force_item(self, filepath: str) -> None:
-        """Push a file to the top of the force stack (LIFO)."""
-        path = os.path.join(self.control_dir, "priority.json")
-        data = self._read_control_file("priority.json") or {"force": [], "paths": [], "patterns": []}
-        force = data.get("force", [])
-        norm = os.path.normpath(filepath)
-        force = [p for p in force if os.path.normpath(p) != norm]  # dedup
-        force.insert(0, filepath)  # LIFO: newest at front
-        data["force"] = force
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=4, ensure_ascii=False)
-        self._last_read.pop(path, None)
-
-    def remove_force_item(self, filepath: str) -> None:
-        """Remove a file from the force stack after processing."""
-        path = os.path.join(self.control_dir, "priority.json")
-        data = self._read_control_file("priority.json") or {"force": [], "paths": [], "patterns": []}
-        norm = os.path.normpath(filepath)
-        data["force"] = [p for p in data.get("force", []) if os.path.normpath(p) != norm]
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=4, ensure_ascii=False)
-        self._last_read.pop(path, None)
-
-    def get_priority_bumps(self) -> list[str]:
-        """Get list of filepaths that should be bumped to front of queue.
-
-        Includes explicit paths plus any queue files matching patterns.
-        """
-        priority = self._read_control_file("priority.json")
-        if not priority:
-            return []
-        return priority.get("paths", [])
-
-    def get_priority_patterns(self) -> list[str]:
-        """Get fnmatch patterns that mark matching files as priority."""
-        priority = self._read_control_file("priority.json")
-        if not priority:
-            return []
-        return priority.get("patterns", [])
-
-    def is_priority(self, filepath: str) -> bool:
-        """Check if a file matches the priority tier (paths or patterns)."""
-        norm = os.path.normpath(filepath).lower()
-        bumps = self.get_priority_bumps()
-        bump_set = {os.path.normpath(p).lower() for p in bumps}
-        if norm in bump_set:
-            return True
-        for pattern in self.get_priority_patterns():
-            if fnmatch.fnmatch(norm, pattern.lower()):
-                return True
-        return False
-
-    def is_force(self, filepath: str) -> bool:
-        """Check if a file is in the force tier."""
-        norm = os.path.normpath(filepath).lower()
-        force = self.get_force_items()
-        return any(os.path.normpath(p).lower() == norm for p in force)
-
     def apply_queue_overrides(self, queue: list[dict]) -> list[dict]:
-        """Apply skip and priority overrides to the queue.
-
-        Three tiers: force > priority (paths + patterns) > rest.
-        """
-        # Remove skipped files
-        filtered = [item for item in queue if not self.should_skip(item["filepath"])]
-
-        # Build force set
-        force_list = self.get_force_items()
-        force_set = {os.path.normpath(p).lower() for p in force_list}
-
-        # Build priority set (paths + patterns)
-        bump_set = {os.path.normpath(p).lower() for p in self.get_priority_bumps()}
-        patterns = self.get_priority_patterns()
-
-        force_items = []
-        priority_items = []
-        rest = []
-        for item in filtered:
-            norm = os.path.normpath(item["filepath"]).lower()
-            if norm in force_set:
-                force_items.append(item)
-            elif norm in bump_set or any(fnmatch.fnmatch(norm, pat.lower()) for pat in patterns):
-                priority_items.append(item)
-            else:
-                rest.append(item)
-
-        if force_items:
-            logging.info(f"Force-priority: {len(force_items)} files at front of queue")
-        if priority_items:
-            logging.info(f"Priority bumped {len(priority_items)} files ahead of queue")
-
-        return force_items + priority_items + rest
+        """Apply skip overrides to the queue."""
+        return [item for item in queue if not self.should_skip(item["filepath"])]

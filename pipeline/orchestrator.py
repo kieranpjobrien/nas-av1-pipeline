@@ -7,7 +7,6 @@ Gap filler worker: one SSH-heavy worker (remote mkvmerge) + one local-quick work
 
 import logging
 import os
-import queue as queue_mod
 import signal
 import threading
 from typing import Optional
@@ -55,9 +54,7 @@ class Orchestrator:
         self._shutdown = threading.Event()
         # Semaphore replaces the old 1-slot lock so N workers can hold a GPU slot at once.
         self._gpu_semaphore = threading.Semaphore(self._gpu_concurrency)
-        self._gpu_preempt = threading.Event()  # set by Force Monitor to interrupt GPU holder
-        self._force_gpu_queue = queue_mod.Queue()  # force items needing GPU
-        # Set of filepaths each worker wants fetched next. Network worker reads this set to know
+        # Set of filepaths each worker wants fetched next. Fetch worker reads this set to know
         # which files to prioritise — any worker waiting is enough to bump priority.
         self._gpu_wants_set: set[str] = set()
         self._gpu_wants_lock = threading.Lock()
@@ -401,7 +398,7 @@ class Orchestrator:
     # =========================================================================
 
     def _gpu_worker(self, queue: list[dict], gap_queue: list[dict], worker_id: int = 0):
-        """Full gamut encodes + force items. Holds one GPU semaphore slot per file.
+        """Full gamut encodes. Holds one GPU semaphore slot per file.
 
         Multiple workers run in parallel — the semaphore caps concurrency to the configured
         `gpu_concurrency` (default 2 for RTX 40-series dual NVENC). Pickers use a shared
@@ -412,14 +409,8 @@ class Orchestrator:
         processed = 0
 
         while not self._shutdown.is_set():
-            # Under a single lock: try force stack first, then regular queue. Holding the lock
-            # across the force-pop + regular-pick + add-to-dispatched makes the whole claim
-            # atomic so two workers can't end up on the same file.
             with self._dispatched_lock:
-                item = self._pop_force_item_locked(gap_queue)
-                is_force = item is not None
-                if not item:
-                    item = self._pick_next_locked(queue)
+                item = self._pick_next_locked(queue)
                 if item is not None:
                     self._dispatched.add(item["filepath"])
 
@@ -438,110 +429,37 @@ class Orchestrator:
             # Tell the network worker what we need fetched (per-worker tracking via shared set).
             self._set_gpu_wants(filepath)
 
-            tag = f"FORCE:{tag_prefix}" if is_force else f"{tag_prefix} {processed}/{len(queue)}"
             logging.info(
-                f"\n[{tag}] {item.get('tier_name', '?')} | "
+                f"\n[{tag_prefix} {processed}/{len(queue)}] "
                 f"{item['filename']} ({format_bytes(item.get('file_size_bytes', 0))})"
             )
 
-            # Force items that are already AV1 → gap fill instead of full gamut
-            is_av1 = (
-                item.get("video", {}).get("codec_raw") == "av1" if isinstance(item.get("video"), dict) else False
-            )
-            encode_ok = False
-            if is_force and is_av1:
-                # Gap fill doesn't hold the GPU semaphore (whisper is the only GPU user
-                # here and gap_fill handles its own coordination).
-                gaps = analyse_gaps(item, self.config)
-                if gaps.needs_anything:
-                    gap_fill(filepath, item, gaps, self.config, self.state)
-                else:
-                    # AV1 + nothing to gap-fill: mark done so the file isn't left in
-                    # an orphaned "processing" state from a prior pipeline run.
-                    logging.info(f"  AV1 with no gaps: {item['filename']} — marking done.")
-                    self.state.set_file(
-                        filepath,
-                        FileStatus.DONE,
-                        mode="gap_filler",
-                        reason="nothing to do (AV1)",
-                    )
-            else:
-                # Encode under the GPU semaphore, then release it BEFORE uploading —
-                # upload is network-bound, so holding the GPU slot through it blocks
-                # the next encode for no reason.
-                with self._gpu_semaphore:
-                    encode_ok = full_gamut(filepath, item, self.config, self.state, self.staging_dir)
+            # Encode under the GPU semaphore, then release it BEFORE uploading —
+            # upload is network-bound, so holding the GPU slot through it blocks
+            # the next encode for no reason.
+            with self._gpu_semaphore:
+                encode_ok = full_gamut(filepath, item, self.config, self.state, self.staging_dir)
 
-                if encode_ok:
-                    try:
-                        finalize_upload(filepath, self.state, self.config)
-                    except Exception as e:
-                        logging.error(f"Upload failed for {os.path.basename(filepath)}: {e}")
-                        self.state.stats["errors"] = self.state.stats.get("errors", 0) + 1
-                        self.state.save()
-                else:
+            if encode_ok:
+                try:
+                    finalize_upload(filepath, self.state, self.config)
+                except Exception as e:
+                    logging.error(f"Upload failed for {os.path.basename(filepath)}: {e}")
                     self.state.stats["errors"] = self.state.stats.get("errors", 0) + 1
                     self.state.save()
+            else:
+                self.state.stats["errors"] = self.state.stats.get("errors", 0) + 1
+                self.state.save()
 
             self._set_gpu_wants(None, previous=filepath)
 
         self._set_gpu_wants(None)
         logging.info(f"GPU worker {worker_id} finished")
 
-    def _pop_force_item(self, gap_queue: list[dict]) -> dict | None:
-        """Non-locked variant kept for back-compat — use _pop_force_item_locked from GPU workers."""
-        with self._dispatched_lock:
-            return self._pop_force_item_locked(gap_queue)
-
-    def _pop_force_item_locked(self, gap_queue: list[dict]) -> dict | None:
-        """Pop the top force item and return it as a queue-compatible dict.
-
-        Caller MUST hold `_dispatched_lock`. Skips items already in `_dispatched` (currently
-        held by another worker) and items in terminal state (done/replaced/skipped).
-        """
-        terminal_states = {"done", "replaced", "skipped", "completed"}
-
-        while True:
-            force_items = self.control.get_force_items()
-            if not force_items:
-                return None
-
-            filepath = force_items[0]
-            self.control.remove_force_item(filepath)
-
-            if filepath in self._dispatched:
-                # Another GPU worker is already on this file — skip it.
-                continue
-
-            if not os.path.exists(filepath):
-                logging.warning(f"Force item not found: {os.path.basename(filepath)}")
-                continue
-
-            existing = self.state.get_file(filepath)
-            if existing and (existing.get("status") or "").lower() in terminal_states:
-                logging.info(
-                    f"Force item already {existing.get('status')}: "
-                    f"{os.path.basename(filepath)} — skipping."
-                )
-                continue
-
-            # Look up in media report for full metadata
-            entry = self._lookup_file(filepath)
-            if entry:
-                return entry
-
-            # Check gap_queue
-            for item in gap_queue:
-                if item.get("filepath") == filepath:
-                    return item
-
-            # Minimal fallback
-            return {
-                "filepath": filepath,
-                "filename": os.path.basename(filepath),
-                "file_size_bytes": os.path.getsize(filepath) if os.path.exists(filepath) else 0,
-                "library_type": "movie" if "Movies" in filepath else "series",
-            }
+    # NOTE: the force-stack mechanism was removed. Previously the GPU worker popped
+    # entries from `control/priority.json -> force` and ran them ahead of the regular
+    # queue. If a user needs to force a re-encode today they delete the state DB row
+    # and let the queue builder pick the file up again.
 
     # =========================================================================
     # Fetch Worker — pre-fetch files to keep the GPU encoders fed
@@ -552,14 +470,10 @@ class Orchestrator:
 
         Priority order:
         1. Fetch what a GPU worker is blocked on (never starve the encoders)
-        2. Fetch force items (user priority)
-        3. Pre-fetch next queue items (up to the adaptive cap)
+        2. Pre-fetch next queue items (up to the adaptive cap)
 
         After each successful fetch, runs cheap pre-processing (language detection +
         external sub scan) so the encode startup is basically instant.
-
-        Multiple workers can run concurrently — fetch_file uses state._lock to
-        atomically claim the target, so two workers never pick the same path.
         """
         tag = f"Fetch worker {worker_id}" if worker_id >= 0 else "Fetch worker"
         logging.info(f"{tag} started")
@@ -607,46 +521,22 @@ class Orchestrator:
                 self._shutdown.wait(timeout=10)
                 continue
 
-            # === Priority 2: Fetch force items ===
-            force_items = self.control.get_force_items()
-            for fp in force_items:
+            # === Priority 2: Pre-fetch next queue items ===
+            for item in queue:
                 if self._shutdown.is_set():
                     break
+                fp = item["filepath"]
                 existing = self.state.get_file(fp)
                 status = existing["status"] if existing else None
                 if status and status != FileStatus.PENDING.value:
                     continue
-                entry = self._lookup_file(fp)
-                if not entry:
-                    entry = {
-                        "filepath": fp,
-                        "filename": os.path.basename(fp),
-                        "file_size_bytes": 0,
-                        "library_type": "movie" if "Movies" in fp else "series",
-                    }
-                result = fetch_file(entry, self.staging_dir, self.config, self.state)
+                if self.control.should_skip(fp):
+                    continue
+                result = fetch_file(item, self.staging_dir, self.config, self.state)
                 if result is not None:
-                    self._post_fetch(entry)
+                    self._post_fetch(item)
                     did_work = True
                     break
-
-            # === Priority 3: Pre-fetch next queue items ===
-            if not did_work:
-                for item in queue:
-                    if self._shutdown.is_set():
-                        break
-                    fp = item["filepath"]
-                    existing = self.state.get_file(fp)
-                    status = existing["status"] if existing else None
-                    if status and status != FileStatus.PENDING.value:
-                        continue
-                    if self.control.should_skip(fp):
-                        continue
-                    result = fetch_file(item, self.staging_dir, self.config, self.state)
-                    if result is not None:
-                        self._post_fetch(item)
-                        did_work = True
-                        break
 
             if not did_work:
                 self._shutdown.wait(timeout=5)
@@ -933,8 +823,6 @@ class Orchestrator:
 
         logging.info("Gap filler finished")
 
-    # =========================================================================
-    # Force Monitor — immediate fetch + GPU preemption
     # =========================================================================
     # Helpers
     # =========================================================================
