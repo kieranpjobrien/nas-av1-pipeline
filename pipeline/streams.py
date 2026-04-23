@@ -141,6 +141,59 @@ def normalise_language(raw: str | None) -> str:
     return _LANG_ALIAS.get(key, key)
 
 
+# ISO 639-1 (TMDb) -> ISO 639-2/B (ffprobe) for the languages we actually see.
+# Used by :func:`tmdb_keeper_langs` to accept both forms when a file's TMDb
+# record says e.g. "ja" but the audio stream is tagged "jpn".
+_ISO1_TO_ISO2: dict[str, str] = {
+    "en": "eng",
+    "ja": "jpn",
+    "ko": "kor",
+    "zh": "chi",
+    "fr": "fre",
+    "de": "ger",
+    "es": "spa",
+    "it": "ita",
+    "pt": "por",
+    "ru": "rus",
+    "sv": "swe",
+    "no": "nor",
+    "da": "dan",
+    "fi": "fin",
+    "nl": "dut",
+    "pl": "pol",
+    "cs": "cze",
+    "hu": "hun",
+    "tr": "tur",
+    "ar": "ara",
+    "hi": "hin",
+    "th": "tha",
+    "he": "heb",
+    "el": "gre",
+}
+
+
+def tmdb_keeper_langs(tmdb_original_language: str | None) -> set[str] | None:
+    """Return the set of language codes acceptable as audio for a given TMDb original_language.
+
+    Always includes ``""`` and ``"und"`` (unknown is acceptable). If ``tmdb_original_language``
+    is a known ISO 639-1 code, the corresponding ISO 639-2 form is added so ffprobe-tagged
+    streams (which typically use ISO 639-2) match.
+
+    Returns ``None`` when ``tmdb_original_language`` is empty/unknown - callers should treat
+    ``None`` as "permissive: accept any language" since no ground truth is available.
+    """
+    if not tmdb_original_language:
+        return None
+    orig = tmdb_original_language.strip().lower()
+    if not orig:
+        return None
+    keepers: set[str] = {"und", "", orig}
+    iso2 = _ISO1_TO_ISO2.get(orig)
+    if iso2:
+        keepers.add(iso2)
+    return keepers
+
+
 # ---------------------------------------------------------------------------
 # Typed stream records
 # ---------------------------------------------------------------------------
@@ -181,9 +234,7 @@ class SubStream:
 
 
 # Codecs treated as lossless — matches scanner.py and compliance.py usage.
-_LOSSLESS_CODECS: frozenset[str] = frozenset(
-    {"truehd", "flac", "pcm_s16le", "pcm_s24le", "pcm_s32le", "dts"}
-)
+_LOSSLESS_CODECS: frozenset[str] = frozenset({"truehd", "flac", "pcm_s16le", "pcm_s24le", "pcm_s32le", "dts"})
 
 
 def parse_audio_stream(raw: dict[str, Any], index: int = 0) -> AudioStream:

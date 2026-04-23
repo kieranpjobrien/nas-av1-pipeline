@@ -12,6 +12,7 @@ from fastapi import APIRouter, HTTPException
 
 from paths import MEDIA_REPORT
 from pipeline.config import ENG_LANGS, KEEP_LANGS
+from pipeline.streams import is_hi_external, is_hi_internal, tmdb_keeper_langs
 from server.helpers import read_json_safe
 
 router = APIRouter()
@@ -20,6 +21,135 @@ router = APIRouter()
 _completion_cache: dict | None = None
 _completion_cache_time: float = 0.0
 _COMPLETION_CACHE_TTL: float = 5.0
+
+
+def _norm_lang(raw: str | None) -> str:
+    """Return a lowercase, stripped language code (empty string for None)."""
+    return (raw or "").lower().strip()
+
+
+def _stream_lang(stream: dict) -> str:
+    """Return the effective language of a stream (language -> detected_language -> 'und')."""
+    return _norm_lang(stream.get("language") or stream.get("detected_language") or "und")
+
+
+def _eng(lang: str | None) -> bool:
+    """Return True if the language code is any English variant in ENG_LANGS."""
+    return _norm_lang(lang) in ENG_LANGS
+
+
+def _compliance_for_entry(entry: dict, keep_langs: set[str] | None = None) -> dict:
+    """Return per-entry compliance flags for a media_report file entry.
+
+    Args:
+        entry: A single file dict from media_report.json.
+        keep_langs: Language set considered acceptable for SUBTITLES. Defaults to
+            :data:`pipeline.config.KEEP_LANGS` (eng/en/english/und/"").
+
+    Returns a dict with:
+        is_av1: bool - video codec is AV1
+        audio_ok: bool - audio codec AND language both compliant (False if zero streams)
+        audio_codec_ok: bool - every audio stream is EAC-3
+        audio_lang_ok: bool - every audio stream language is in keeper set
+        subs_ok: bool - exactly one regular English sub, no HI, no foreign
+        has_tmdb: bool - entry has a TMDb record
+        filename_matches: bool - filename title matches parent folder
+        no_foreign_subs: bool - no non-keeper subtitle streams (internal or external)
+        violations: list[str] - human-readable reasons for non-compliance
+
+    Key invariant: empty ``audio_streams`` -> ``audio_ok=False`` (zero-audio files are
+    damage, not compliance - the 1,787-file incident was caused by
+    ``if audio_streams else True``).
+    """
+    if keep_langs is None:
+        keep_langs = KEEP_LANGS
+
+    violations: list[str] = []
+
+    # Video
+    is_av1 = entry.get("video", {}).get("codec_raw") == "av1"
+    if not is_av1:
+        violations.append("video_not_av1")
+
+    # Audio
+    audio_streams = entry.get("audio_streams") or []
+    if not audio_streams:
+        # ZERO-AUDIO is NOT compliant (see header - the 1,787-file incident rule).
+        audio_codec_ok = False
+        audio_lang_ok = False
+        violations.append("audio_zero_streams")
+    else:
+        audio_codec_ok = all(
+            (a.get("codec_raw") or a.get("codec", "")).lower() in ("eac3", "e-ac-3") for a in audio_streams
+        )
+        if not audio_codec_ok:
+            violations.append("audio_codec_not_eac3")
+
+        # Language policy: ORIGINAL LANGUAGE only, not English-only. A Japanese
+        # film keeps Japanese audio, not dubbed English. TMDb's original_language
+        # is the authoritative source; und/unknown is always acceptable.
+        tmdb = entry.get("tmdb") or {}
+        orig_lang = _norm_lang(tmdb.get("original_language"))
+        audio_keepers = tmdb_keeper_langs(orig_lang)
+        if audio_keepers is None:
+            # No TMDb original_language -> can't judge; be permissive.
+            audio_lang_ok = True
+        else:
+            audio_lang_ok = all(_stream_lang(a) in audio_keepers for a in audio_streams)
+            if not audio_lang_ok:
+                violations.append("audio_foreign_language")
+
+    audio_ok = audio_codec_ok and audio_lang_ok
+
+    # Subtitles (internal + external)
+    sub_streams = entry.get("subtitle_streams") or []
+    ext_subs = entry.get("external_subtitles") or []
+
+    regular_eng_internal = sum(
+        1 for s in sub_streams if _eng(s.get("language") or s.get("detected_language")) and not is_hi_internal(s)
+    )
+    regular_eng_external = sum(
+        1 for s in ext_subs if _eng(s.get("language")) and not is_hi_external(s.get("filename") or "")
+    )
+    regular_eng_count = regular_eng_internal + regular_eng_external
+
+    hi_sub_count = sum(1 for s in sub_streams if is_hi_internal(s)) + sum(
+        1 for s in ext_subs if is_hi_external(s.get("filename") or "")
+    )
+
+    non_keep_internal = sum(1 for s in sub_streams if _stream_lang(s) not in keep_langs)
+    non_keep_external = sum(1 for s in ext_subs if _norm_lang(s.get("language") or "und") not in keep_langs)
+    no_foreign_subs = (non_keep_internal + non_keep_external) == 0
+
+    has_english_sub = regular_eng_count == 1
+    subs_ok = has_english_sub and no_foreign_subs and hi_sub_count == 0
+
+    if not has_english_sub:
+        violations.append("subs_english_count_wrong")
+    if not no_foreign_subs:
+        violations.append("subs_foreign_present")
+    if hi_sub_count > 0:
+        violations.append("subs_hi_present")
+
+    has_tmdb = bool(entry.get("tmdb"))
+    if not has_tmdb:
+        violations.append("no_tmdb")
+
+    filename_matches = bool(entry.get("filename_matches_folder", True))
+    if not filename_matches:
+        violations.append("filename_mismatch")
+
+    return {
+        "is_av1": is_av1,
+        "audio_ok": audio_ok,
+        "audio_codec_ok": audio_codec_ok,
+        "audio_lang_ok": audio_lang_ok,
+        "subs_ok": subs_ok,
+        "has_tmdb": has_tmdb,
+        "filename_matches": filename_matches,
+        "no_foreign_subs": no_foreign_subs,
+        "violations": violations,
+    }
 
 
 @router.get("/api/media-report")
@@ -63,108 +193,11 @@ def get_library_completion() -> dict:
 
     for f in files:
         fp = f.get("filepath", "")
-        is_av1 = f.get("video", {}).get("codec_raw") == "av1"
-
-        audio_streams = f.get("audio_streams", [])
-        # ZERO-AUDIO is NOT compliant. The old idiom `if audio_streams else True`
-        # treated a file with no audio as "fully compliant" — which is why 1,787
-        # audio-less files showed as green on the dashboard for weeks. A file
-        # must have at least one audio stream to be compliant, full stop.
-        if not audio_streams:
-            audio_codec_ok = False
-        else:
-            audio_codec_ok = all(
-                (a.get("codec_raw") or a.get("codec", "")).lower() in ("eac3", "e-ac-3") for a in audio_streams
-            )
-        # Language policy: ORIGINAL LANGUAGE only, not English-only.
-        # A Japanese film keeps Japanese audio, not dubbed English.
-        # `tmdb_original_language` is the authoritative source of what counts as original.
-        # und/unknown always acceptable (default), plus the TMDb-original language.
-        tmdb = f.get("tmdb") or {}
-        orig_lang = (tmdb.get("original_language") or "").lower().strip()
-        # Map ISO 639-1 (TMDb) → ISO 639-2 (ffprobe) for common languages
-        _iso1_to_iso2 = {
-            "en": "eng", "ja": "jpn", "ko": "kor", "zh": "chi", "fr": "fre",
-            "de": "ger", "es": "spa", "it": "ita", "pt": "por", "ru": "rus",
-            "sv": "swe", "no": "nor", "da": "dan", "fi": "fin", "nl": "dut",
-            "pl": "pol", "cs": "cze", "hu": "hun", "tr": "tur", "ar": "ara",
-            "hi": "hin", "th": "tha", "he": "heb", "el": "gre",
-        }
-        keeper_langs = {"und", ""}
-        if orig_lang:
-            keeper_langs.add(orig_lang)  # TMDb iso1 form
-            iso2 = _iso1_to_iso2.get(orig_lang)
-            if iso2:
-                keeper_langs.add(iso2)
-        else:
-            # No TMDb original_language known → fall back to permissive (anything acceptable)
-            keeper_langs = None
-
-        # audio_clean: language check. Empty list is NOT "clean" — it's damage.
-        if not audio_streams:
-            audio_clean = False
-        elif keeper_langs is not None:
-            audio_clean = all(
-                (a.get("language") or a.get("detected_language") or "und").lower().strip() in keeper_langs
-                for a in audio_streams
-            )
-        else:
-            audio_clean = True  # No TMDb original_language → can't judge; be permissive
-        audio_ok = audio_codec_ok and audio_clean
-
-        sub_streams = f.get("subtitle_streams", [])
-        ext_subs = f.get("external_subtitles") or []
-
-        def _is_hi_internal(s: dict) -> bool:
-            """Flag hearing-impaired / SDH / closed-caption internal sub streams."""
-            disp = s.get("disposition") or {}
-            if disp.get("hearing_impaired") or disp.get("captions"):
-                return True
-            title = (s.get("title") or "").lower()
-            if any(tok in title for tok in ("hi", "sdh", "hearing", "caption")):
-                # be strict — "hi" alone risks matching "history"; require word boundary
-                import re as _re
-                if _re.search(r"\b(hi|sdh|hearing|cc|closed.caption)\b", title):
-                    return True
-            return False
-
-        def _is_hi_external(s: dict) -> bool:
-            fn = (s.get("filename") or "").lower()
-            parts = fn.split(".")
-            return any(p in ("hi", "sdh", "cc") for p in parts[1:-1])
-
-        def _eng(lang: str) -> bool:
-            return (lang or "").lower().strip() in ENG_LANGS
-
-        # Regular (non-HI) English subs — internal or external
-        regular_eng_internal = sum(
-            1 for s in sub_streams
-            if _eng(s.get("language") or s.get("detected_language")) and not _is_hi_internal(s)
-        )
-        regular_eng_external = sum(
-            1 for s in ext_subs
-            if _eng(s.get("language")) and not _is_hi_external(s)
-        )
-        regular_eng_count = regular_eng_internal + regular_eng_external
-
-        # HI variants (want zero)
-        hi_sub_count = sum(1 for s in sub_streams if _is_hi_internal(s)) + \
-                       sum(1 for s in ext_subs if _is_hi_external(s))
-
-        # Foreign (non-keeper) langs
-        non_keep_internal = sum(
-            1 for s in sub_streams
-            if (s.get("language") or s.get("detected_language") or "und").lower().strip() not in KEEP_LANGS
-        )
-        non_keep_external = sum(
-            1 for s in ext_subs
-            if (s.get("language") or "und").lower().strip() not in KEEP_LANGS
-        )
-        no_foreign_subs = (non_keep_internal + non_keep_external) == 0
-
-        # Library policy: exactly ONE regular English sub, no HI, no foreign.
-        has_english_sub = regular_eng_count == 1
-        subs_ok = has_english_sub and no_foreign_subs and hi_sub_count == 0
+        c = _compliance_for_entry(f)
+        is_av1 = c["is_av1"]
+        audio_ok = c["audio_ok"]
+        subs_ok = c["subs_ok"]
+        no_foreign_subs = c["no_foreign_subs"]
 
         if is_av1:
             counts["av1"] += 1
@@ -225,7 +258,7 @@ def get_library_completion() -> dict:
             except Exception:
                 _cf_failed += 1
         else:
-            # Filename cleaner unavailable — do NOT silently count as clean.
+            # Filename cleaner unavailable - do NOT silently count as clean.
             # Leave unchanged so the metric reflects uncertainty.
             _cf_failed += 1
 
@@ -241,16 +274,17 @@ def get_library_completion() -> dict:
         # itself as still-unknown (previously it was counted as "known" because the
         # `not a.get("detected_language")` test was truthy-only).
         def _is_und(stream: dict) -> bool:
-            lang = (stream.get("language") or "und").lower().strip()
+            lang = _norm_lang(stream.get("language") or "und")
             if lang not in und_langs:
                 return False
-            det = (stream.get("detected_language") or "").lower().strip()
+            det = _norm_lang(stream.get("detected_language"))
             if det and det not in und_langs:
                 return False
             return True
 
-        file_has_und = any(_is_und(a) for a in f.get("audio_streams", []) or []) \
-                    or any(_is_und(s) for s in f.get("subtitle_streams", []) or [])
+        file_has_und = any(_is_und(a) for a in f.get("audio_streams", []) or []) or any(
+            _is_und(s) for s in f.get("subtitle_streams", []) or []
+        )
         if file_has_und:
             files_with_und += 1
 
@@ -293,23 +327,15 @@ def get_library_completion() -> dict:
         is_av1 = codec == "av1"
 
         a_streams = f.get("audio_streams", [])
-        # Zero audio = NOT ok (see header comment — 1,787 files got misclassified
+        # Zero audio = NOT ok (see header comment - 1,787 files got misclassified
         # as "Done" in this exact code path for weeks).
         if not a_streams:
             a_ok = False
             a_clean = False
         else:
-            a_ok = all(
-                (a.get("codec_raw") or a.get("codec", "")).lower() in ("eac3", "e-ac-3") for a in a_streams
-            )
-            a_clean = all(
-                i == 0 or (a.get("language") or a.get("detected_language") or "und").lower().strip() in KEEP_LANGS
-                for i, a in enumerate(a_streams)
-            )
-        s_ok = all(
-            (s.get("language") or s.get("detected_language") or "und").lower().strip() in KEEP_LANGS
-            for s in f.get("subtitle_streams", [])
-        )
+            a_ok = all((a.get("codec_raw") or a.get("codec", "")).lower() in ("eac3", "e-ac-3") for a in a_streams)
+            a_clean = all(i == 0 or _stream_lang(a) in KEEP_LANGS for i, a in enumerate(a_streams))
+        s_ok = all(_stream_lang(s) in KEEP_LANGS for s in f.get("subtitle_streams", []))
 
         if is_av1 and a_ok and a_clean and s_ok:
             tier = "Done"
@@ -362,36 +388,22 @@ def get_completion_missing(category: str) -> dict:
             hit = cr != "av1"
         elif category == "audio":
             if cr == "av1":
-                a_streams_f = f.get("audio_streams") or []
-                # Zero audio = definite hit (drill-down shows the damaged files).
-                if not a_streams_f:
-                    hit = True
-                else:
-                    a_ok = all(
-                        (a.get("codec_raw") or a.get("codec", "")).lower() in ("eac3", "e-ac-3")
-                        for a in a_streams_f
-                    )
-                    a_clean = all(
-                        i == 0
-                        or (a.get("language") or a.get("detected_language") or "und").lower().strip() in KEEP_LANGS
-                        for i, a in enumerate(a_streams_f)
-                    )
-                    hit = not (a_ok and a_clean)
+                # Reuse the canonical compliance helper so drill-down matches the
+                # completion totals exactly (no drift between code paths).
+                c = _compliance_for_entry(f)
+                hit = not c["audio_ok"]
         elif category == "subs":
-            hit = not all(
-                (s.get("language") or s.get("detected_language") or "und").lower().strip() in KEEP_LANGS
-                for s in f.get("subtitle_streams", [])
-            )
+            hit = not all(_stream_lang(s) in KEEP_LANGS for s in f.get("subtitle_streams", []))
         elif category == "tmdb":
             hit = not f.get("tmdb")
         elif category == "langs":
             hit = any(
-                (a.get("language") or "und").lower().strip() in und_langs and not a.get("detected_language")
+                _norm_lang(a.get("language") or "und") in und_langs and not a.get("detected_language")
                 for a in f.get("audio_streams", [])
             )
             if not hit:
                 hit = any(
-                    (s.get("language") or "und").lower().strip() in und_langs and not s.get("detected_language")
+                    _norm_lang(s.get("language") or "und") in und_langs and not s.get("detected_language")
                     for s in f.get("subtitle_streams", [])
                 )
         elif category == "filename":
@@ -431,8 +443,7 @@ def get_completion_missing(category: str) -> dict:
             entry["sub_tracks"] = sub_tracks
 
             has_english_audio = any(
-                (a.get("language") or a.get("detected_language") or "").lower().strip() in ENG_LANGS
-                for a in f.get("audio_streams", [])
+                _eng(a.get("language") or a.get("detected_language")) for a in f.get("audio_streams", [])
             )
             entry["has_english_audio"] = has_english_audio
             entry["video_codec"] = f.get("video", {}).get("codec", "?")

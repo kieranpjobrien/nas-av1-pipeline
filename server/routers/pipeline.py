@@ -29,7 +29,6 @@ from datetime import datetime
 from fastapi import APIRouter, HTTPException
 
 from paths import MEDIA_REPORT
-from pipeline.config import KEEP_LANGS
 from server.helpers import (
     CONTROL_DIR,
     _get_pipeline_state,
@@ -49,6 +48,7 @@ from server.models import (
     PriorityRequest,
     ReencodeRequest,
 )
+from server.routers.library import _compliance_for_entry
 
 router = APIRouter()
 
@@ -240,8 +240,6 @@ def reset_errors() -> dict:
         raise HTTPException(500, f"Failed to reset errors: {e}")
 
 
-
-
 @router.post("/api/pipeline/compact")
 def compact_state() -> dict:
     """Remove REPLACED and SKIPPED entries from pipeline state."""
@@ -275,24 +273,11 @@ def quick_wins() -> dict:
     for f in files:
         if f.get("video", {}).get("codec_raw") != "av1":
             continue
-        audio_streams = f.get("audio_streams", [])
-        # Zero audio = not compliant (see library.py for rationale — same bug)
-        if not audio_streams:
-            audio_codec_ok = False
-            audio_clean = False
-        else:
-            audio_codec_ok = all(
-                (a.get("codec_raw") or a.get("codec", "")).lower() in ("eac3", "e-ac-3") for a in audio_streams
-            )
-            audio_clean = all(
-                i == 0 or (a.get("language") or a.get("detected_language") or "und").lower().strip() in KEEP_LANGS
-                for i, a in enumerate(audio_streams)
-            )
-        subs_ok = all(
-            (s.get("language") or s.get("detected_language") or "und").lower().strip() in KEEP_LANGS
-            for s in f.get("subtitle_streams", [])
-        )
-        if not (audio_codec_ok and audio_clean and subs_ok):
+        # Delegate to the shared compliance helper so this endpoint and the
+        # completion dashboard can never drift apart (previously diverged on
+        # HI-sub detection and zero-audio handling).
+        c = _compliance_for_entry(f)
+        if not (c["audio_ok"] and c["subs_ok"]):
             paths.append(f["filepath"])
 
     if not paths:
