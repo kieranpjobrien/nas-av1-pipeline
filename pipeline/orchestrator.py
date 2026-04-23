@@ -20,6 +20,23 @@ from pipeline.gap_filler import analyse_gaps, gap_fill
 from pipeline.state import FileStatus, PipelineState
 from pipeline.transfer import fetch_file
 
+# Filename suffixes written by the pipeline's tmp-mux / staging steps.
+# Shared with tools.scanner so both sides agree on what to exclude from
+# the library view. Adding a new tmp-mux step? Add its suffix here.
+#   .gapfill_tmp.mkv   — gap_filler track strip + sub mux intermediate
+#   .submux_tmp.mkv    — tools.mux_external_subs staging output
+#   .audiotrans_tmp.mkv — gap_filler audio transcode staging (future)
+#   .av1.tmp           — full_gamut NVENC staging output
+#   .naslib.tmp / .mkv — legacy naslib staging (module removed but defensive)
+_PIPELINE_TMP_SUFFIXES = (
+    ".gapfill_tmp.mkv",
+    ".submux_tmp.mkv",
+    ".audiotrans_tmp.mkv",
+    ".av1.tmp",
+    ".naslib.tmp",
+    ".naslib.tmp.mkv",
+)
+
 
 class Orchestrator:
     """3-thread pipeline coordinator: GPU encode + network I/O + gap filler."""
@@ -207,30 +224,91 @@ class Orchestrator:
                 self.state.remove_ghosts(ghosts)
                 logging.info(f"  Removed {len(ghosts)} ghost entries (files renamed/deleted)")
 
-        # Delete stale .gapfill_tmp.mkv files from the NAS + drop their state entries.
-        # These are leftovers from a previous gap-filler run that got interrupted between
-        # the tmp-mux and the final rename. They block the next run's rename (WinError 183
-        # "Cannot create a file when that file already exists") and the scanner indexes
-        # them as if they were real media. Pull them out of state first, then delete from
-        # disk — scanner will exclude them from the next media_report pass.
-        tmp_paths = [
+        # Delete stale tmp files left by any pipeline stage (gap filler, mux,
+        # audio transcode, full-gamut NVENC, legacy naslib). These are leftovers
+        # from runs interrupted between the tmp-mux and the final rename — they
+        # block subsequent rename attempts (WinError 183), the scanner indexes
+        # them as if real media, and they waste disk. Pass 1: sweep whatever the
+        # state DB knows about. Pass 2: walk the NAS itself because a crash
+        # could have written a tmp file that was never recorded in state.
+        state_tmp_paths = [
             p for p in self.state.all_filepaths()
-            if p.endswith(".gapfill_tmp.mkv")
+            if p.endswith(_PIPELINE_TMP_SUFFIXES)
         ] if hasattr(self.state, "all_filepaths") else []
-        if tmp_paths:
+        if state_tmp_paths:
             deleted = 0
-            for p in tmp_paths:
+            for p in state_tmp_paths:
                 try:
                     if os.path.exists(p):
                         os.remove(p)
                     deleted += 1
                 except OSError as e:
-                    logging.debug(f"Could not remove stale gapfill tmp {p}: {e}")
-            self.state.remove_ghosts(tmp_paths)
+                    logging.debug(f"Could not remove stale pipeline tmp {p}: {e}")
+            self.state.remove_ghosts(state_tmp_paths)
             logging.info(
-                f"  Cleaned {deleted}/{len(tmp_paths)} stale .gapfill_tmp.mkv files "
-                f"from the library (state entries also removed)"
+                f"  Cleaned {deleted}/{len(state_tmp_paths)} stale pipeline tmp files "
+                f"from state (suffixes: {_PIPELINE_TMP_SUFFIXES})"
             )
+
+        # NAS walk: find tmp files that were never in state (crashed before
+        # state.set_file). Same 16-worker + 30s deadline pattern as the ghost
+        # check above — SMB per-file stat can block, so a hard deadline keeps
+        # orchestrator startup bounded. Anything we miss this pass will be
+        # caught on the next startup.
+        try:
+            from paths import NAS_MOVIES as _NAS_MOVIES
+            from paths import NAS_SERIES as _NAS_SERIES
+
+            nas_roots = [str(_NAS_MOVIES), str(_NAS_SERIES)]
+        except Exception:
+            nas_roots = []
+
+        nas_tmp_found: list[str] = []
+        if nas_roots:
+            import time as _time
+            from concurrent.futures import ThreadPoolExecutor
+
+            deadline = _time.monotonic() + 30.0
+
+            def _walk_for_tmps(root: str) -> list[str]:
+                found: list[str] = []
+                if not os.path.isdir(root):
+                    return found
+                for dirpath, _dirs, filenames in os.walk(root):
+                    if _time.monotonic() > deadline:
+                        break
+                    for fname in filenames:
+                        if fname.endswith(_PIPELINE_TMP_SUFFIXES):
+                            found.append(os.path.join(dirpath, fname))
+                return found
+
+            with ThreadPoolExecutor(max_workers=16) as pool:
+                futures = [pool.submit(_walk_for_tmps, root) for root in nas_roots]
+                for fut in futures:
+                    try:
+                        remaining = max(0.5, deadline - _time.monotonic())
+                        nas_tmp_found.extend(fut.result(timeout=remaining))
+                    except Exception:
+                        # Best-effort — a timeout or SMB hiccup just means we miss
+                        # this sweep. The next startup will catch anything we leave.
+                        pass
+
+            # Dedupe against state sweep so we don't double-delete.
+            already = set(state_tmp_paths)
+            nas_tmp_found = [p for p in nas_tmp_found if p not in already]
+
+            if nas_tmp_found:
+                nas_deleted = 0
+                for p in nas_tmp_found:
+                    try:
+                        os.remove(p)
+                        nas_deleted += 1
+                    except OSError as e:
+                        logging.debug(f"Could not remove NAS-walked tmp {p}: {e}")
+                logging.info(
+                    f"  NAS walk cleaned {nas_deleted}/{len(nas_tmp_found)} stale "
+                    f"pipeline tmp files not tracked in state"
+                )
 
         # Clean orphaned fetch/encoded files from previous runs. Retry once on transient
         # Windows file locks — the common case is the old pipeline's ffmpeg still holding

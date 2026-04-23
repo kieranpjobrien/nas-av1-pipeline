@@ -24,6 +24,7 @@ from datetime import datetime
 from pathlib import Path
 
 from paths import MEDIA_REPORT, NAS_MOVIES, NAS_SERIES
+from pipeline.orchestrator import _PIPELINE_TMP_SUFFIXES
 
 VIDEO_EXTENSIONS = {
     ".mkv",
@@ -278,10 +279,18 @@ def extract_info(filepath: str, probe_data: dict, library_type: str) -> dict:
 
 
 def scan_directory(directory: str, library_type: str) -> list[str]:
-    """Recursively find all video files."""
+    """Recursively find all video files.
+
+    Skips tmp files left by interrupted pipeline runs (see
+    ``pipeline.orchestrator._PIPELINE_TMP_SUFFIXES``) — they'd otherwise be
+    indexed as if they were real media, then re-encoded on top of files the
+    pipeline is already trying to process.
+    """
     files = []
     for root, _, filenames in os.walk(directory):
         for fname in filenames:
+            if fname.endswith(_PIPELINE_TMP_SUFFIXES):
+                continue
             if Path(fname).suffix.lower() in VIDEO_EXTENSIONS:
                 files.append(os.path.join(root, fname))
     return files
