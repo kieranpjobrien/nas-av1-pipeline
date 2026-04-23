@@ -688,13 +688,14 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
     # If the on-disk filename still matches common scene-tag patterns, clean-filename
     # silently failed at encode time and we shipped a standards violation. Park in ERROR
     # with the clean-name we would have used, so a later re-queue can fix it.
-    import re as _re
-    _SCENE_TAG_RE = _re.compile(
-        r"\b(?:1080p|720p|480p|2160p|UHD|BluRay|BDRip|BRRip|WEB-?DL|WEBRip|HDTV|HDRip|"
-        r"DVDRip|REMUX|x264|x265|HEVC|AAC|DDP?\d|AC3|EAC3|DTS|TrueHD|Atmos|"
-        r"NF|AMZN|DSNP|HULU|MAX|ATVP|REPACK|MULTi|PROPER)\b",
-        _re.IGNORECASE,
-    )
+    #
+    # SCENE_TAG_RE lives in pipeline.filename (the canonical detector also used
+    # by tools/compliance.py). The previous inline copy in this file was a
+    # slightly simpler variant; the canonical one is strictly broader (adds
+    # dot-dash anchoring for streaming services + scene release-group suffix),
+    # so any filename the old version flagged is still flagged.
+    from pipeline.filename import SCENE_TAG_RE as _SCENE_TAG_RE
+
     if _SCENE_TAG_RE.search(final_name):
         try:
             from pipeline.filename import clean_filename

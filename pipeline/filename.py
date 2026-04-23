@@ -1,6 +1,19 @@
 """Filename cleaning — strips scene tags, resolution/codec markers, and normalises formatting.
-Extracted from tools/strip_tags.py."""
 
+Canonical implementation. Consolidates what was previously split across
+pipeline/filename.py and tools/strip_tags.py. The two diverged over time:
+this module takes the UNION of both rule sets, preserving case-sensitive
+language handling (so "An Italian Dream" keeps the title) while also picking
+up the extra tokens that were only in strip_tags (BDMux, DVDR, UpScaled,
+ALL4, TOD, VC-1, 3-letter ISO language codes, trailing H1/H2 residue, ...).
+
+Exports:
+  - SCENE_TAG_RE: canonical scene-tag detector used by compliance checks.
+  - EPISODE_RE, MOVIE_YEAR_RE: anchor patterns.
+  - clean_series_name, clean_movie_name, clean_filename: main API.
+"""
+
+import json
 import re
 from pathlib import Path
 
@@ -18,17 +31,18 @@ EPISODE_RE = re.compile(
 )
 
 # Base tag parts — tokens that signal the end of an episode title.
+# UNION of the rule sets from the old pipeline/filename.py and tools/strip_tags.py.
 _BASE_TAG_PARTS = (
     r"(?:19[2-9]\d|20[0-2]\d)(?=[\s.)\-]|$)"  # bare year (Fargo.S02E04.2015.)
     # Resolution / quality
     r"|1080[pi]|720[pi]|480[pi]|2160[pi]|4K|UHD|DS4K"
-    # Source
-    r"|WEB[-.]?DL|WEBRip|BluRay|Blu[-.]?Ray|BDRip|BDRemux|HDTV|DVDRip|REMUX|WEB"
-    # Streaming services
-    r"|NF|AMZN|DSNP|HULU|MAX|HBO|ATVP|PCOK|PMTP|STAN|CRAV|Netflix"
+    # Source (UNION: BDMux, DVDR, UpScaled added from strip_tags)
+    r"|WEB[-.]?DL|WEBRip|BluRay|Blu[-.]?Ray|BDRip|BDRemux|BDMux|HDTV|DVDRip|DVDR|REMUX|WEB|UpScaled"
+    # Streaming services (UNION: ALL4, TOD added from strip_tags)
+    r"|NF|AMZN|DSNP|HULU|MAX|HBO|ATVP|PCOK|PMTP|STAN|CRAV|Netflix|ALL4|TOD"
     r"|BINGE|ROKU|(?-i:iT)|MA|CRITERION|MUBI|TUBI|SHUDDER|PMNP|SHO|STRP"
-    # Video codecs
-    r"|x264|x265|H\.?264|H\.?265|HEVC|AVC|AV1|XviD|DivX|VP9|VP8|MPEG[24]"
+    # Video codecs (UNION: H\s?264, H\s?265, VC-1 added from strip_tags)
+    r"|x264|x265|H\s?264|H\s?265|H\.?264|H\.?265|HEVC|AVC|AV1|XviD|DivX|VP9|VP8|VC[-.]?1|MPEG[24]"
     # Audio codecs / channels
     r"|TrueHD\d*\.?\d*|AAC\d*\.?\d*|DDP?\d*\.?\d*|DD\+?\d*\.?\d*"
     r"|Atmos|DTS(?:[-.]?HD(?:[\s.]?MA)?)?|FLAC|AC3|EAC3|LPCM|Opus"
@@ -36,15 +50,22 @@ _BASE_TAG_PARTS = (
     # HDR / color / bit depth
     r"|SDR|HDR\d*|HDR10\+?|DV|DoVi|Dolby[\s.]?Vision|HLG"
     r"|10bit|8bit|12bit"
-    # Language tags — case-sensitive via (?-i:) to avoid matching real words like "Italian Dream"
+    # Language tags — case-sensitive via (?-i:) to avoid matching real words like "Italian Dream".
+    # The old pipeline/filename.py enforced this; strip_tags did not (causing false positives).
     r"|(?-i:DUAL|MULTi|ENGLISH|GERMAN|POLISH|iTALiAN|FRENCH|SPANISH"
     r"|NORDiC|DUTCH|SWEDISH|FINNISH|DANISH|NORWEGIAN|CZECH"
     r"|HUNGARIAN|TURKISH|ARABIC|DL"
     r"|PORTUGUESE|RUSSIAN|JAPANESE|KOREAN|CHINESE|HINDI|THAI"
     r"|ROMANIAN|GREEK|BULGARIAN|CROATIAN|SERBIAN|UKRAINIAN)"
+    # ISO 639-2 three-letter language codes (from strip_tags) — also case-sensitive
+    # to avoid stripping "ITA" inside legitimate words.
+    r"|(?-i:ITA|ENG|GER|FRE|FRA|SPA|JPN|CHI|RUS|POR|DUT|KOR|ARA|HIN|THA"
+    r"|POL|RUM|ROM|SWE|NOR|DAN|FIN|CZE|HUN|TUR|GRE|BUL|CRO|SRP|UKR)"
     # Release tags
     r"|REPACK\d*|INTERNAL|PROPER|HYBRID|Hybrid"
     r"|EXTENDED|UNRATED|THEATRICAL|IMAX|OPEN[\s.]?MATTE"
+    # Scene/tracker markers + subtitle markers (from strip_tags)
+    r"|xpost|subs?|N[-.]?Z[-.]?B"
     # Lone resolution "p" (from stripped "1080p") — lowercase only, as standalone token
     # Uses inline (?-i:p) to match only lowercase despite global IGNORECASE flag
     r"|(?<=[\s.])(?-i:p)(?=[\s.]|$|[A-Z])"
@@ -62,6 +83,49 @@ _EDITION_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Canonical scene-tag detector used by compliance checks + full_gamut post-replace
+# verify. Any filename containing one of these tokens is considered dirty.
+# Streaming-service codes (NF, AMZN, MAX, etc.) require dot-or-dash context anchors
+# to avoid matching "MAX" inside "Mad Max" or "NF" inside a title word.
+SCENE_TAG_RE = re.compile(
+    # Primary technical scene tags — these are unambiguous, word-boundary only.
+    r"\b(?:1080p|720p|480p|2160p|UHD|BluRay|BDRip|BRRip|WEB-?DL|WEBRip|HDTV|HDRip|"
+    r"DVDRip|REMUX|x264|x265|HEVC|AAC|DDP?\d|AC3|EAC3|DTS|TrueHD|Atmos|"
+    r"REPACK|MULTi|PROPER)\b"
+    # Streaming services — only flag when dot/dash surrounded (scene format)
+    r"|(?<=[.-])(?:NF|AMZN|DSNP|HULU|MAX|ATVP|PCOK|PMTP|STAN)(?=[.-])"
+    # Scene release-group suffix — trailing "-GROUP" all-caps after a dot cluster
+    r"|\.[A-Z]{2,4}\d?-[A-Z0-9][A-Za-z0-9]{2,}$",
+    re.IGNORECASE,
+)
+
+
+# ---------------------------------------------------------------------------
+# Custom keyword loading (from strip_tags)
+# ---------------------------------------------------------------------------
+
+
+def _custom_tags_path() -> Path:
+    """Return the path to the custom tags control file.
+
+    Imported lazily to avoid circular / env-var timing issues at module load.
+    """
+    from paths import STAGING_DIR
+
+    return STAGING_DIR / "control" / "custom_tags.json"
+
+
+def _load_custom_keywords() -> list[str]:
+    """Read custom keywords from control/custom_tags.json if it exists."""
+    path = _custom_tags_path()
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return [k for k in data.get("keywords", []) if isinstance(k, str) and k.strip()]
+    except Exception:
+        return []
+
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -69,7 +133,12 @@ _EDITION_RE = re.compile(
 
 
 def _dots_to_spaces(s: str) -> str:
-    """Replace dots/underscores with spaces, preserving decimal numbers (e.g. 2.5)."""
+    """Replace dots/underscores with spaces, preserving decimal numbers (e.g. 2.5).
+
+    The decimal preservation is important so "Naked Gun 2.5" doesn't become
+    "Naked Gun 2 5". The old strip_tags.py version did NOT preserve decimals;
+    we adopt the pipeline/filename.py behaviour since it's strictly more correct.
+    """
     # Protect decimal numbers: "2.5" -> "2DECPT5" then restore after
     s = re.sub(r"(\d)\.(\d)", r"\1DECPT\2", s)
     s = re.sub(r"[._]+", " ", s)
@@ -111,7 +180,8 @@ def clean_series_name(stem: str, tag_re: re.Pattern = _TAG_BOUNDARY_RE) -> str |
     title = stem[: m.start()]
     # Strip trailing year — bare or parenthesized (e.g. "Show.2019.", "Show (2019) -")
     title = re.sub(r"[\s.]*\(?(19[2-9]\d|20[0-2]\d)\)?[\s.\-]*$", "", title)
-    # Normalize episode marker: group(1) is SxxExx, group(2) is season-only, groups 3+4 are Season/Episode long form
+    # Normalize episode marker: group(1) is SxxExx, group(2) is season-only,
+    # groups 3+4 are Season/Episode long form
     if m.group(1):
         episode_marker = re.sub(r"\s+", "", m.group(1)).upper()
     elif m.group(2):
@@ -259,9 +329,12 @@ def clean_series_name(stem: str, tag_re: re.Pattern = _TAG_BOUNDARY_RE) -> str |
 
     # Strip trailing tech tokens (after CamelCase split, these may now be separated)
     episode_title = re.sub(r"\s+(?:WEB|H\s*1|H\s*0|0)$", "", episode_title)
-    # Strip concatenated trailing codec remnants: "titleH264" -> "title"
-    # Only H264/H265 — single-digit H1/H2 is too ambiguous (e.g. "710N" is a real title)
-    episode_title = re.sub(r"(?<=[a-z])H26[45]$", "", episode_title)
+    # Strip concatenated trailing codec remnants: "710NH1" -> "710N", "titleH264" -> "title".
+    # UNION of both versions: broader regex from strip_tags (matches H0/H1/H2/H264/H265,
+    # predecessor can be alphanumeric) is more aggressive than the old pipeline/filename
+    # version (lowercase-only predecessor, H264/H265 only). strip_tags' version wins
+    # because it strips more junk without known false positives.
+    episode_title = re.sub(r"(?<=[A-Za-z0-9])H[012]\d*$", "", episode_title)
     episode_title = episode_title.rstrip(" -")
 
     # Quality gate: if the cleaned episode title still contains obvious tag junk,
@@ -357,8 +430,8 @@ def clean_filename(filepath: str, library_type: str) -> str | None:
     """Clean a filename by stripping scene tags, resolution tags, codec tags etc.
 
     Args:
-        filepath: Full path to the file
-        library_type: "movie" or "series"
+        filepath: Full path to the file.
+        library_type: "movie" or "series".
 
     Returns:
         Clean filename (just the name, no path) or None if no cleaning needed.
@@ -367,7 +440,10 @@ def clean_filename(filepath: str, library_type: str) -> str | None:
     stem = p.stem
     ext = p.suffix
 
-    tag_re = _build_tag_regex()
+    # Build the tag regex including any user-configured custom keywords from
+    # control/custom_tags.json. If the file doesn't exist / isn't readable we
+    # fall back to the base regex — the lookup is deliberately best-effort.
+    tag_re = _build_tag_regex(_load_custom_keywords() or None)
 
     if library_type == "series":
         clean_stem = clean_series_name(stem, tag_re)

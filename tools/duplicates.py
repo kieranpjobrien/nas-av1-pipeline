@@ -56,9 +56,10 @@ def normalize_title(filename: str) -> str:
     cleaned = _STRIP_RE.sub(" ", stem)
     result = " ".join(cleaned.lower().split())
 
-    # Also try strip_tags cleaner — if it produces a shorter, cleaner title, use that
+    # Also try pipeline.filename cleaner — if it produces a shorter, cleaner title, use that.
+    # (Previously imported from tools.strip_tags; now that module is a CLI wrapper.)
     try:
-        from tools.strip_tags import clean_movie_name, clean_series_name
+        from pipeline.filename import clean_movie_name, clean_series_name
 
         stripped = clean_series_name(stem) or clean_movie_name(stem)
         if stripped:

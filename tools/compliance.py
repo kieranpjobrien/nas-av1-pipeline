@@ -22,31 +22,15 @@ Usage:
 import argparse
 import csv
 import json
-import re
 import sys
 from pathlib import Path
 
 from paths import MEDIA_REPORT, STAGING_DIR
 from pipeline.config import DEFAULT_CONFIG, KEEP_LANGS
+from pipeline.filename import SCENE_TAG_RE  # canonical scene-tag detector
 from pipeline.streams import is_hi_external, is_hi_internal
 
 CONTROL_DIR = STAGING_DIR / "control"
-
-# Scene-tag detector — matches common scene markers; a filename containing
-# even one is considered dirty. Streaming-service codes (NF, AMZN, MAX, etc.)
-# require context anchors (dot-or-dash on at least one side) to avoid matching
-# "MAX" inside "Mad Max" or "NF" inside a title word.
-SCENE_TAG_RE = re.compile(
-    # Primary technical scene tags — these are unambiguous, word-boundary only.
-    r"\b(?:1080p|720p|480p|2160p|UHD|BluRay|BDRip|BRRip|WEB-?DL|WEBRip|HDTV|HDRip|"
-    r"DVDRip|REMUX|x264|x265|HEVC|AAC|DDP?\d|AC3|EAC3|DTS|TrueHD|Atmos|"
-    r"REPACK|MULTi|PROPER)\b"
-    # Streaming services — only flag when dot/dash surrounded (scene format)
-    r"|(?<=[.-])(?:NF|AMZN|DSNP|HULU|MAX|ATVP|PCOK|PMTP|STAN)(?=[.-])"
-    # Scene release-group suffix — trailing "-GROUP" all-caps after a dot cluster
-    r"|\.[A-Z]{2,4}\d?-[A-Z0-9][A-Za-z0-9]{2,}$",
-    re.IGNORECASE,
-)
 
 TARGET_VIDEO = {"av1"}  # post-encode codec_name — "av1_nvenc" is the encoder, not the codec
 TARGET_AUDIO = {"eac3", "opus"}  # after hyphen-strip normalisation
