@@ -31,6 +31,7 @@ import logging
 import os
 import subprocess
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -41,6 +42,7 @@ except (AttributeError, OSError):
     pass
 
 from paths import MEDIA_REPORT
+from pipeline.circuit_breaker import CircuitBreaker, CircuitBreakerOpen
 from pipeline.nas_worker import NAS, SERVER, remote_identify, remote_strip_and_mux, unc_to_container_path
 from pipeline.streams import is_hi_external, is_hi_internal
 
@@ -245,8 +247,41 @@ def main() -> None:
     fail_msgs: list[str] = []
     started = time.time()
 
+    # Per-machine circuit breaker. Same threshold+cooldown as the orchestrator
+    # gap_filler breakers: 5 consecutive remote failures = 5 min pause, because
+    # that's the point where continuing to fire SSH+docker exec at a failing
+    # NAS just makes things worse.
+    breaker = CircuitBreaker(
+        threshold=5,
+        cooldown_secs=300,
+        name=f"mux_external_subs.{machine['label']}",
+    )
+
+    # Shutdown event lets breaker.wait_if_open() honour Ctrl+C.
+    shutdown = threading.Event()
+
+    def _mux_with_breaker(t: dict) -> tuple[str, str]:
+        """Wrap mux_one with breaker wait + record. Runs inside ThreadPoolExecutor."""
+        try:
+            breaker.wait_if_open(shutdown=shutdown)
+        except CircuitBreakerOpen:
+            return "fail", "breaker open and shutdown requested"
+        try:
+            status, msg = mux_one(t, machine)
+        except Exception as e:
+            breaker.record(False)
+            return "fail", f"mux_one raised: {e}"
+        # "skip" doesn't reflect remote-op health — the file was simply gone
+        # before we started. Neither a failure nor a recovery for breaker
+        # purposes; don't move the needle.
+        if status == "ok":
+            breaker.record(True)
+        elif status == "fail":
+            breaker.record(False)
+        return status, msg
+
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
-        futures = {pool.submit(mux_one, t, machine): t for t in targets}
+        futures = {pool.submit(_mux_with_breaker, t): t for t in targets}
         for i, fut in enumerate(as_completed(futures), 1):
             t = futures[fut]
             status, msg = fut.result()
