@@ -621,11 +621,41 @@ def _run_audio_transcode_with_retry(cmd: list[str], input_path: str, output_path
     Returns (process, stderr) — caller checks process.returncode for success. If the first
     attempt hits the "Non-monotonic DTS" error (common on DTS-HD MA → EAC-3), retry with
     audio passthrough so the transcode sidesteps the buggy encode path.
+
+    Both communicate() calls are bounded by ``max(900, src_size_mb * 2)`` seconds so a hung
+    ffmpeg cannot block the worker forever. On timeout the process is killed, the raised
+    TimeoutExpired is caught, and the caller sees a non-zero returncode plus a stderr line
+    tagged with the timeout.
     """
-    process = subprocess.Popen(
-        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding="utf-8", errors="replace"
-    )
-    _, stderr = process.communicate()
+    try:
+        src_size_mb = os.path.getsize(input_path) / (1024 * 1024)
+    except OSError:
+        src_size_mb = 1024.0  # assume 1 GiB if we can't measure
+    timeout_secs = max(900.0, src_size_mb * 2.0)
+
+    def _run_with_timeout(popen_cmd: list[str]):
+        proc = subprocess.Popen(
+            popen_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding="utf-8", errors="replace"
+        )
+        try:
+            _, err = proc.communicate(timeout=timeout_secs)
+            return proc, err
+        except subprocess.TimeoutExpired:
+            logging.error(
+                f"  Audio transcode exceeded timeout ({int(timeout_secs)}s) — killing ffmpeg"
+            )
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            try:
+                _, err = proc.communicate(timeout=5.0)
+            except subprocess.TimeoutExpired:
+                err = ""
+            tagged = (err or "") + "\nAUDIO TRANSCODE TIMEOUT: killed after wall-clock deadline"
+            return proc, tagged.strip()
+
+    process, stderr = _run_with_timeout(cmd)
     if process.returncode == 0:
         return process, stderr
 
@@ -644,10 +674,7 @@ def _run_audio_transcode_with_retry(cmd: list[str], input_path: str, output_path
 
     retry_cmd = _build_audio_copy_cmd(cmd)
     logging.warning("  Audio transcode hit DTS timestamp bug — retrying with passthrough")
-    retry_proc = subprocess.Popen(
-        retry_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding="utf-8", errors="replace"
-    )
-    _, retry_stderr = retry_proc.communicate()
+    retry_proc, retry_stderr = _run_with_timeout(retry_cmd)
     return retry_proc, retry_stderr
 
 

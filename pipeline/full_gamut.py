@@ -1065,6 +1065,10 @@ def _stream_encode_progress(process, state: PipelineState, filepath: str, durati
     Each progress snapshot ends with `progress=continue` (or `progress=end` at finish). We
     push a state update on each snapshot boundary, throttled to one per ~1.5s to keep the
     SQLite write volume sane.
+
+    Enforces a wall-clock deadline of ``max(1800, duration_secs * 10)`` seconds. A hung
+    ffmpeg used to block a GPU worker forever; now we kill the process and return the
+    captured stderr so the caller can record ERROR.
     """
     import threading
 
@@ -1080,11 +1084,28 @@ def _stream_encode_progress(process, state: PipelineState, filepath: str, durati
     t = threading.Thread(target=_drain_stderr, daemon=True)
     t.start()
 
+    # Wall-clock deadline: 10x content duration, minimum 30 minutes. A healthy NVENC AV1
+    # encode runs at 1-3x realtime, so 10x gives a huge margin while still catching truly
+    # hung processes (e.g. stuck ffmpeg at 0% CPU, banner-print timeouts, driver hangs).
+    deadline = time.time() + max(1800.0, float(duration_secs) * 10.0)
+
     snapshot: dict[str, str] = {}
     last_update = 0.0
     assert process.stdout is not None
+    timed_out = False
     for raw in iter(process.stdout.readline, ""):
         if not raw:
+            break
+        if time.time() > deadline:
+            logging.error(
+                f"  Encode exceeded wall-clock deadline ({int(max(1800.0, duration_secs * 10.0))}s) "
+                f"for {os.path.basename(filepath)} — killing"
+            )
+            try:
+                process.kill()
+            except Exception:
+                pass
+            timed_out = True
             break
         line = raw.strip()
         if not line:
@@ -1132,9 +1153,27 @@ def _stream_encode_progress(process, state: PipelineState, filepath: str, durati
             pass
         snapshot.clear()
 
-    process.wait()
+    # Bound process.wait too — if the stdout loop exits cleanly but the process hasn't
+    # actually exited (rare but seen on driver hangs) we don't want to block forever.
+    remaining = max(1.0, deadline - time.time())
+    try:
+        process.wait(timeout=remaining if not timed_out else 5.0)
+    except subprocess.TimeoutExpired:
+        logging.error(f"  Encode still alive after deadline — killing {os.path.basename(filepath)}")
+        try:
+            process.kill()
+        except Exception:
+            pass
+        try:
+            process.wait(timeout=5.0)
+        except subprocess.TimeoutExpired:
+            pass
+        timed_out = True
     t.join(timeout=5)
-    return "\n".join(stderr_buf)
+    stderr = "\n".join(stderr_buf)
+    if timed_out:
+        stderr = (stderr + "\nENCODE TIMEOUT: killed after wall-clock deadline").strip()
+    return stderr
 
 
 def _build_audio_copy_cmd(cmd: list[str]) -> list[str]:
