@@ -108,11 +108,21 @@ class GapAnalysis:
 def _scan_external_subs(filepath: str, gaps: GapAnalysis) -> None:
     """Scan for external subtitle files next to the MKV. Called lazily during gap_fill.
 
+    Idempotent: sets ``gaps._external_scan_done = True`` after the first run and
+    short-circuits on subsequent calls. The orchestrator's heavy_worker AND
+    gap_fill() both call this function — without the guard, the second call
+    appended another sidecar to ``gaps.external_subs``, producing an output
+    MKV with 2 English subtitle tracks and failing "exactly 1 English"
+    compliance (root cause of subs % trending DOWN after strip was enabled).
+
     Delegates to :mod:`pipeline.subs` for sidecar enumeration and the
     "pick one English, delete the rest" split. See that module for the
     documented semantic tightenings vs. the old inline version (stricter stem
     match, richer language parser, HI detection that also catches ``cc``).
     """
+    if getattr(gaps, "_external_scan_done", False):
+        return
+
     sidecars = scan_sidecars(filepath)
     to_mux, to_delete = pick_english_sidecars(sidecars)
     gaps.external_subs.extend(s.path for s in to_mux)
@@ -122,6 +132,8 @@ def _scan_external_subs(filepath: str, gaps: GapAnalysis) -> None:
         gaps.needs_track_removal = True
     if gaps.foreign_external_subs:
         gaps.needs_foreign_sub_cleanup = True
+
+    gaps._external_scan_done = True
 
 
 def analyse_gaps(file_entry: dict, config: dict) -> GapAnalysis:
