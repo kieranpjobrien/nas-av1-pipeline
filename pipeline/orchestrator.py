@@ -168,14 +168,40 @@ class Orchestrator:
         if reset_count:
             logging.info(f"  Reset {reset_count} stale entries from previous run")
 
-        # Remove ghost 'done' entries where the source file no longer exists (renamed/deleted)
+        # Remove ghost 'done' entries where the source file no longer exists (renamed/deleted).
+        # Bounded by a 30s wall-clock deadline — on slow/flaky SMB (common when the
+        # NAS is busy) os.path.exists can block per-file for seconds, so 2,700+ paths
+        # would hang the orchestrator startup indefinitely. If we don't finish in 30s,
+        # skip ghost detection this run — stale done entries are harmless (they just
+        # take up space in pipeline_state.db) and the next clean-NAS startup will catch
+        # them. The scanner's hourly pass also prunes ghost entries.
         done_paths = self.state.get_files_by_status(FileStatus.DONE)
         if done_paths:
-            from concurrent.futures import ThreadPoolExecutor
+            import time as _time
+            from concurrent.futures import ThreadPoolExecutor, as_completed
 
+            deadline = _time.monotonic() + 30.0
+            existence: dict[str, bool] = {}
             with ThreadPoolExecutor(max_workers=16) as pool:
-                existence = list(pool.map(os.path.exists, done_paths))
-            ghosts = [p for p, exists in zip(done_paths, existence) if not exists]
+                futures = {pool.submit(os.path.exists, p): p for p in done_paths}
+                for fut in as_completed(futures):
+                    p = futures[fut]
+                    try:
+                        existence[p] = fut.result(timeout=max(0.5, deadline - _time.monotonic()))
+                    except Exception:
+                        existence[p] = True  # assume exists on timeout — safer than deleting
+                    if _time.monotonic() > deadline:
+                        # time's up — cancel outstanding
+                        for pending_fut in futures:
+                            pending_fut.cancel()
+                        break
+            checked = len(existence)
+            if checked < len(done_paths):
+                logging.info(
+                    f"  Ghost check deadline hit — probed {checked}/{len(done_paths)} "
+                    f"done entries. Continuing (stale entries will be cleaned next run)."
+                )
+            ghosts = [p for p, exists in existence.items() if not exists]
             if ghosts:
                 self.state.remove_ghosts(ghosts)
                 logging.info(f"  Removed {len(ghosts)} ghost entries (files renamed/deleted)")
