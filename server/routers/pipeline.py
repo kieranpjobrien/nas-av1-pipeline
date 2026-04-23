@@ -312,19 +312,18 @@ def quick_wins() -> dict:
         if f.get("video", {}).get("codec_raw") != "av1":
             continue
         audio_streams = f.get("audio_streams", [])
-        audio_codec_ok = (
-            all((a.get("codec_raw") or a.get("codec", "")).lower() in ("eac3", "e-ac-3") for a in audio_streams)
-            if audio_streams
-            else True
-        )
-        audio_clean = (
-            all(
+        # Zero audio = not compliant (see library.py for rationale — same bug)
+        if not audio_streams:
+            audio_codec_ok = False
+            audio_clean = False
+        else:
+            audio_codec_ok = all(
+                (a.get("codec_raw") or a.get("codec", "")).lower() in ("eac3", "e-ac-3") for a in audio_streams
+            )
+            audio_clean = all(
                 i == 0 or (a.get("language") or a.get("detected_language") or "und").lower().strip() in KEEP_LANGS
                 for i, a in enumerate(audio_streams)
             )
-            if audio_streams
-            else True
-        )
         subs_ok = all(
             (s.get("language") or s.get("detected_language") or "und").lower().strip() in KEEP_LANGS
             for s in f.get("subtitle_streams", [])

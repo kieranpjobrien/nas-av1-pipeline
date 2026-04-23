@@ -66,11 +66,16 @@ def get_library_completion() -> dict:
         is_av1 = f.get("video", {}).get("codec_raw") == "av1"
 
         audio_streams = f.get("audio_streams", [])
-        audio_codec_ok = (
-            all((a.get("codec_raw") or a.get("codec", "")).lower() in ("eac3", "e-ac-3") for a in audio_streams)
-            if audio_streams
-            else True
-        )
+        # ZERO-AUDIO is NOT compliant. The old idiom `if audio_streams else True`
+        # treated a file with no audio as "fully compliant" — which is why 1,787
+        # audio-less files showed as green on the dashboard for weeks. A file
+        # must have at least one audio stream to be compliant, full stop.
+        if not audio_streams:
+            audio_codec_ok = False
+        else:
+            audio_codec_ok = all(
+                (a.get("codec_raw") or a.get("codec", "")).lower() in ("eac3", "e-ac-3") for a in audio_streams
+            )
         # Language policy: ORIGINAL LANGUAGE only, not English-only.
         # A Japanese film keeps Japanese audio, not dubbed English.
         # `tmdb_original_language` is the authoritative source of what counts as original.
@@ -95,13 +100,16 @@ def get_library_completion() -> dict:
             # No TMDb original_language known → fall back to permissive (anything acceptable)
             keeper_langs = None
 
-        if keeper_langs is not None and audio_streams:
+        # audio_clean: language check. Empty list is NOT "clean" — it's damage.
+        if not audio_streams:
+            audio_clean = False
+        elif keeper_langs is not None:
             audio_clean = all(
                 (a.get("language") or a.get("detected_language") or "und").lower().strip() in keeper_langs
                 for a in audio_streams
             )
         else:
-            audio_clean = True
+            audio_clean = True  # No TMDb original_language → can't judge; be permissive
         audio_ok = audio_codec_ok and audio_clean
 
         sub_streams = f.get("subtitle_streams", [])
@@ -285,19 +293,19 @@ def get_library_completion() -> dict:
         is_av1 = codec == "av1"
 
         a_streams = f.get("audio_streams", [])
-        a_ok = (
-            all((a.get("codec_raw") or a.get("codec", "")).lower() in ("eac3", "e-ac-3") for a in a_streams)
-            if a_streams
-            else True
-        )
-        a_clean = (
-            all(
+        # Zero audio = NOT ok (see header comment — 1,787 files got misclassified
+        # as "Done" in this exact code path for weeks).
+        if not a_streams:
+            a_ok = False
+            a_clean = False
+        else:
+            a_ok = all(
+                (a.get("codec_raw") or a.get("codec", "")).lower() in ("eac3", "e-ac-3") for a in a_streams
+            )
+            a_clean = all(
                 i == 0 or (a.get("language") or a.get("detected_language") or "und").lower().strip() in KEEP_LANGS
                 for i, a in enumerate(a_streams)
             )
-            if a_streams
-            else True
-        )
         s_ok = all(
             (s.get("language") or s.get("detected_language") or "und").lower().strip() in KEEP_LANGS
             for s in f.get("subtitle_streams", [])
@@ -354,24 +362,21 @@ def get_completion_missing(category: str) -> dict:
             hit = cr != "av1"
         elif category == "audio":
             if cr == "av1":
-                a_ok = (
-                    all(
+                a_streams_f = f.get("audio_streams") or []
+                # Zero audio = definite hit (drill-down shows the damaged files).
+                if not a_streams_f:
+                    hit = True
+                else:
+                    a_ok = all(
                         (a.get("codec_raw") or a.get("codec", "")).lower() in ("eac3", "e-ac-3")
-                        for a in f.get("audio_streams", [])
+                        for a in a_streams_f
                     )
-                    if f.get("audio_streams")
-                    else True
-                )
-                a_clean = (
-                    all(
+                    a_clean = all(
                         i == 0
                         or (a.get("language") or a.get("detected_language") or "und").lower().strip() in KEEP_LANGS
-                        for i, a in enumerate(f.get("audio_streams", []))
+                        for i, a in enumerate(a_streams_f)
                     )
-                    if f.get("audio_streams")
-                    else True
-                )
-                hit = not (a_ok and a_clean)
+                    hit = not (a_ok and a_clean)
         elif category == "subs":
             hit = not all(
                 (s.get("language") or s.get("detected_language") or "und").lower().strip() in KEEP_LANGS
