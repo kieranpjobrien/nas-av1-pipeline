@@ -1869,12 +1869,14 @@ def apply_detections_for_file(
     falling back to ffmpeg -c copy (slower, no extra install required).
     Returns (applied_count, failed_count).
     """
-    # Filter to actionable detections
+    # Filter to actionable detections. `confidence` may be present but None
+    # (from some older scan code paths); `.get("x", 0)` only falls back when
+    # the key is MISSING, not when value is None — coerce explicitly.
     actionable = [
         d
         for d in detections
         if d.get("detected_language")
-        and d.get("confidence", 0) >= min_confidence
+        and (d.get("confidence") or 0) >= min_confidence
         and d.get("method") not in ("bitmap_skipped", "text_extraction_failed")
     ]
     if not actionable:
