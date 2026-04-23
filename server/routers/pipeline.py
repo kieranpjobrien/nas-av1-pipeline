@@ -19,7 +19,6 @@ Routes:
     PUT  /api/control/custom-tags   - set custom tag keywords
     POST /api/pipeline/reset-errors - reset error entries to pending
     POST /api/pipeline/compact      - remove replaced/skipped entries
-    POST /api/pipeline/force-accept - override duration mismatch
     POST /api/quick-wins            - bulk-force AV1 audio quick wins
 """
 
@@ -241,41 +240,6 @@ def reset_errors() -> dict:
         raise HTTPException(500, f"Failed to reset errors: {e}")
 
 
-@router.post("/api/pipeline/force-accept")
-def force_accept(req: dict) -> dict:
-    """Override duration mismatch for a specific file and requeue for replace.
-
-    Body: {"path": "\\\\KieranNAS\\..."}
-    Sets skip_duration_check=True and resets status to uploaded so the pipeline
-    re-verifies (and this time ignores the duration delta).
-    """
-    path = req.get("path")
-    if not path:
-        raise HTTPException(400, "path required")
-    try:
-        conn = _get_state_db()
-        row = conn.execute("SELECT status, extras FROM pipeline_files WHERE filepath = ?", (path,)).fetchone()
-        if not row:
-            conn.close()
-            raise HTTPException(404, f"No state entry for {path}")
-        if row["status"] != "error":
-            conn.close()
-            raise HTTPException(400, f"File is not in error state (status={row['status']})")
-        now = datetime.now().isoformat()
-        extras = json.loads(row["extras"]) if row["extras"] else {}
-        extras["skip_duration_check"] = True
-        conn.execute(
-            "UPDATE pipeline_files SET status = 'uploaded', error = NULL, stage = NULL, "
-            "last_updated = ?, extras = ? WHERE filepath = ?",
-            (now, json.dumps(extras), path),
-        )
-        conn.commit()
-        conn.close()
-        return {"ok": True, "path": path}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(500, f"Failed to force-accept: {e}")
 
 
 @router.post("/api/pipeline/compact")

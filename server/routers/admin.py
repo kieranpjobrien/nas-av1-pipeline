@@ -10,7 +10,6 @@ Routes:
     GET  /api/mkvpropedit-available  - check mkvpropedit availability
     GET  /api/history                - encode history entries
     GET  /api/history/summary        - aggregated history stats and forecast
-    POST /api/vmaf/check             - run VMAF quality check
     GET  /api/plex-audit             - last Plex metadata audit results
 """
 
@@ -19,9 +18,8 @@ import subprocess
 import sys
 import time
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Request
 
 from server.helpers import (
     CONFIG_OVERRIDES_FILE,
@@ -33,7 +31,6 @@ from server.helpers import (
     read_json_safe,
     write_json_safe,
 )
-from server.models import VmafRequest
 
 router = APIRouter()
 
@@ -416,50 +413,6 @@ def get_history_summary() -> dict:
         },
         "forecast": forecast,
     }
-
-
-# --- VMAF ---
-
-
-@router.post("/api/vmaf/check")
-def vmaf_check(req: VmafRequest) -> dict:
-    """Run VMAF quality check on a completed encode."""
-    state_data = _get_pipeline_state()
-    if not state_data or "files" not in state_data:
-        raise HTTPException(404, "Pipeline state not found")
-
-    file_info = state_data["files"].get(req.path)
-    if not file_info:
-        raise HTTPException(404, f"File not in pipeline state: {req.path}")
-
-    status = file_info.get("status", "")
-    if status not in ("verified", "replaced"):
-        raise HTTPException(400, f"File not in terminal state: {status}")
-
-    source = req.path
-    encoded = file_info.get("final_path") or file_info.get("dest_path")
-    if not encoded:
-        raise HTTPException(400, "No encoded path found in state")
-
-    vmaf_dir = STAGING_DIR / "vmaf_results"
-    safe_name = Path(encoded).stem.replace(" ", "_")[:80]
-    cached = vmaf_dir / f"{safe_name}.json"
-    if cached.exists():
-        data = read_json_safe(cached)
-        if data:
-            return data
-
-    try:
-        from tools.vmaf import run_vmaf
-
-        result = run_vmaf(source, encoded, duration=req.duration)
-        if "error" in result:
-            raise HTTPException(500, result["error"])
-        return result
-    except ImportError:
-        raise HTTPException(500, "VMAF tool not available")
-    except Exception as e:
-        raise HTTPException(500, str(e))
 
 
 # --- Plex audit ---

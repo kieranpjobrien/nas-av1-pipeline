@@ -55,10 +55,3 @@ class DeleteFileRequest(BaseModel):
     """Request to delete a single file."""
 
     path: str
-
-
-class VmafRequest(BaseModel):
-    """Request to run a VMAF quality check."""
-
-    path: str
-    duration: int = 30
