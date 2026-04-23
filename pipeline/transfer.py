@@ -1,16 +1,21 @@
-"""File transfer operations: fetch from NAS, upload to NAS, verify, replace.
-Handles buffer management, crash-safe renames, and retry logic.
-Extracted from stages.py — no encoding logic, no report updates."""
+"""File transfer operations: fetch from NAS + staging-space helpers.
+
+The upload/verify/replace functions that used to live here were dead code —
+they called `FileStatus.UPLOADED`, `FileStatus.VERIFIED`, `FileStatus.REPLACING`,
+`FileStatus.REPLACED`, none of which exist in the current enum. Any caller
+that tried to use them would `AttributeError`. Full_gamut.finalize_upload now
+owns the upload/verify/replace responsibility inline. Those ~200 lines were
+removed on the post-incident cleanup; keep this file small and living.
+"""
 
 import hashlib
 import logging
 import os
 import shutil
 import time
-from pathlib import Path
 from typing import Optional
 
-from pipeline.ffmpeg import format_bytes, format_duration, get_duration
+from pipeline.ffmpeg import format_bytes, format_duration
 from pipeline.state import FileStatus, PipelineState
 
 
@@ -127,205 +132,8 @@ def fetch_file(item: dict, staging_dir: str, config: dict, state: PipelineState,
         return None
 
 
-def upload_file(source_filepath: str, item: dict, staging_dir: str, config: dict, state: PipelineState) -> bool:
-    """Copy encoded file back to NAS alongside the original."""
-    file_info = state.get_file(source_filepath)
-    if not file_info:
-        return False
-
-    output_path = file_info.get("output_path")
-    if not output_path or not os.path.exists(output_path):
-        logging.error(f"Encoded file missing: {output_path}")
-        state.set_file(source_filepath, FileStatus.ERROR, error="encoded file missing", stage="upload")
-        return False
-
-    # Destination: same directory as original, with .av1.mkv suffix
-    source_dir = os.path.dirname(source_filepath)
-    original_stem = Path(item["filename"]).stem
-    dest_filename = original_stem + ".av1.mkv"
-    dest_path = os.path.join(source_dir, dest_filename)
-
-    if os.path.exists(dest_path) and not config["overwrite_existing"]:
-        logging.warning(f"Destination exists, skipping: {dest_path}")
-        state.set_file(source_filepath, FileStatus.DONE, reason="destination exists", dest_path=dest_path)
-        # Clean up local encoded file
-        if os.path.exists(output_path):
-            os.remove(output_path)
-        return True
-
-    upload_start = time.time()
-    state.set_file(source_filepath, FileStatus.UPLOADING, dest_path=dest_path, upload_start=upload_start)
-    logging.info(f"Uploading: {dest_filename} -> {source_dir}")
-
-    max_retries = 5
-    for attempt in range(max_retries):
-        try:
-            start = time.time()
-            shutil.copy2(output_path, dest_path)
-            elapsed = time.time() - start
-            output_size = os.path.getsize(output_path)
-            speed = output_size / elapsed / (1024**2) if elapsed > 0 else 0
-            logging.info(f"Uploaded in {format_duration(elapsed)} ({speed:.0f} MB/s)")
-
-            state.set_file(
-                source_filepath,
-                FileStatus.UPLOADED,
-                dest_path=dest_path,
-                upload_end=time.time(),
-                upload_time_secs=round(elapsed, 1),
-            )
-
-            # Clean up local encoded file (non-fatal if locked; will be swept up later)
-            try:
-                os.remove(output_path)
-                logging.info("Cleaned up local encoded file")
-            except OSError as rm_err:
-                logging.warning(f"Could not delete staging file (will retry): {rm_err}")
-
-            return True
-
-        except PermissionError as e:
-            if attempt < max_retries - 1:
-                wait = 15 * (attempt + 1)
-                logging.warning(f"Upload blocked (file in use), retry {attempt + 1}/{max_retries} in {wait}s: {e}")
-                time.sleep(wait)
-                continue
-            logging.error(f"Upload failed after {max_retries} retries: {e}")
-            state.set_file(source_filepath, FileStatus.ERROR, error=str(e), stage="upload")
-            return False
-
-        except Exception as e:
-            logging.error(f"Upload failed: {e}")
-            state.set_file(source_filepath, FileStatus.ERROR, error=str(e), stage="upload")
-            return False
-
-
-def verify_file(source_filepath: str, item: dict, config: dict, state: PipelineState) -> bool:
-    """Verify the uploaded file on NAS. Returns True if verification passes.
-
-    Does NOT update report entries or trigger Plex scans — those are handled
-    by the caller.
-    """
-    file_info = state.get_file(source_filepath)
-    if not file_info:
-        return False
-
-    dest_path = file_info.get("dest_path")
-    if not dest_path or not os.path.exists(dest_path):
-        logging.error(f"Destination file missing: {dest_path}")
-        state.set_file(source_filepath, FileStatus.ERROR, error="dest file missing after upload", stage="verify")
-        return False
-
-    # Check duration
-    dest_duration = get_duration(dest_path) or 0
-    source_duration = item.get("duration_seconds", 0)
-    tolerance = config["verify_duration_tolerance_secs"]
-
-    if source_duration > 0 and abs(source_duration - dest_duration) > tolerance:
-        if file_info.get("skip_duration_check"):
-            logging.warning(
-                f"Duration mismatch overridden by user (source={source_duration:.1f}s, dest={dest_duration:.1f}s)"
-            )
-        else:
-            logging.error(
-                f"Verification failed: duration mismatch (source={source_duration:.1f}s, dest={dest_duration:.1f}s)"
-            )
-            state.set_file(source_filepath, FileStatus.ERROR, error="duration mismatch", stage="verify")
-            return False
-
-    dest_size = os.path.getsize(dest_path)
-    source_size = item["file_size_bytes"]
-    saved = source_size - dest_size
-
-    state.set_file(
-        source_filepath,
-        FileStatus.VERIFIED,
-        dest_path=dest_path,
-        dest_size_bytes=dest_size,
-        bytes_saved=saved,
-        verify_end=time.time(),
-    )
-
-    logging.info(f"Verified: {item['filename']} -> saved {format_bytes(saved)}")
-
-    return True
-
-
-def replace_original(
-    source_filepath: str, item: dict, config: dict, state: PipelineState, clean_filename: str | None = None
-) -> bool:
-    """Replace original file on NAS with the AV1 version. Crash-safe via rename sequence.
-
-    Sequence: original -> .original.bak -> rename .av1.mkv -> original name (.mkv) -> delete .bak
-    On crash during REPLACING, resume detects and completes the sequence.
-
-    If clean_filename is provided, the final rename uses this name instead of the
-    original filename (useful for normalising filenames during replacement).
-    """
-    file_info = state.get_file(source_filepath)
-    if not file_info:
-        return False
-
-    dest_path = file_info.get("dest_path")  # the .av1.mkv on NAS
-    if not dest_path or not os.path.exists(dest_path):
-        logging.error(f"AV1 file missing for replace: {dest_path}")
-        state.set_file(source_filepath, FileStatus.ERROR, error="av1 file missing for replace", stage="replace")
-        return False
-
-    # Target: original filename but with .mkv extension (or clean_filename if provided)
-    source_dir = os.path.dirname(source_filepath)
-    if clean_filename:
-        final_name = clean_filename
-    else:
-        final_name = Path(item["filename"]).stem + ".mkv"
-    final_path = os.path.join(source_dir, final_name)
-    backup_path = source_filepath + ".original.bak"
-
-    state.set_file(
-        source_filepath, FileStatus.REPLACING, dest_path=dest_path, final_path=final_path, backup_path=backup_path
-    )
-
-    max_retries = 5
-    for attempt in range(max_retries):
-        try:
-            # Step 1: Rename original -> .original.bak (if original still exists)
-            if os.path.exists(source_filepath) and not os.path.exists(backup_path):
-                os.rename(source_filepath, backup_path)
-                logging.info(f"  Backed up original: {os.path.basename(source_filepath)} -> .original.bak")
-
-            # Step 2: Rename .av1.mkv -> final name
-            if os.path.exists(dest_path) and not os.path.exists(final_path):
-                os.rename(dest_path, final_path)
-                logging.info(f"  Renamed AV1 file -> {final_name}")
-            elif os.path.exists(dest_path) and dest_path != final_path:
-                # final_path already exists (maybe from a previous partial), overwrite
-                os.replace(dest_path, final_path)
-
-            # Step 3: Delete backup
-            if os.path.exists(backup_path):
-                os.remove(backup_path)
-                logging.info("  Deleted original backup")
-
-            state.set_file(source_filepath, FileStatus.REPLACED, final_path=final_path, replace_end=time.time())
-            logging.info(f"Replaced: {item['filename']} -> {final_name}")
-
-            return True
-
-        except PermissionError as e:
-            if attempt < max_retries - 1:
-                wait = 30 * (attempt + 1)
-                logging.warning(f"Replace blocked (file in use), retry {attempt + 1}/{max_retries} in {wait}s: {e}")
-                time.sleep(wait)
-                continue
-            logging.error(f"Replace failed after {max_retries} retries: {e}")
-            logging.error(f"  Manual recovery may be needed. Check: {source_dir}")
-            logging.error(f"  Backup: {backup_path}, AV1: {dest_path}, Target: {final_path}")
-            state.set_file(source_filepath, FileStatus.ERROR, error=str(e), stage="replace")
-            return False
-
-        except Exception as e:
-            logging.error(f"Replace failed: {e}")
-            logging.error(f"  Manual recovery may be needed. Check: {source_dir}")
-            logging.error(f"  Backup: {backup_path}, AV1: {dest_path}, Target: {final_path}")
-            state.set_file(source_filepath, FileStatus.ERROR, error=str(e), stage="replace")
-            return False
+# NOTE: upload_file / verify_file / replace_original used to live here.
+# They referenced FileStatus enum members that no longer exist (UPLOADED, VERIFIED,
+# REPLACING, REPLACED). Any caller would have raised AttributeError at import time.
+# The live upload/verify/replace path is `full_gamut.finalize_upload`; this dead
+# code was removed during the post-incident cleanup.
