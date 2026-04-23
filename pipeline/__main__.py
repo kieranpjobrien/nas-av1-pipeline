@@ -10,7 +10,7 @@ import sys
 from paths import MEDIA_REPORT, STAGING_DIR
 from pipeline.config import build_config
 from pipeline.control import PipelineControl
-from pipeline.state import PipelineState, migrate_from_json
+from pipeline.state import PipelineState
 
 
 def setup_logging(staging_dir: str):
@@ -167,9 +167,7 @@ def main():
     setup_logging(args.staging)
 
     # State
-    json_state = os.path.join(args.staging, "pipeline_state.json")
     db_path = args.state_file or os.path.join(args.staging, "pipeline_state.db")
-    migrate_from_json(json_state, db_path)
     state = PipelineState(db_path)
     serializable_config = copy.deepcopy(config)
     if isinstance(serializable_config.get("lossless_audio_codecs"), set):

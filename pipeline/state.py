@@ -7,7 +7,6 @@ JSON-based implementation so callers don't need to change.
 
 import json
 import logging
-import os
 import sqlite3
 import threading
 import time
@@ -31,19 +30,6 @@ class FileStatus(str, Enum):
     UPLOADING = "uploading"
     DONE = "done"
     ERROR = "error"
-
-
-# Map legacy statuses to current ones (for migration from old pipeline state)
-_LEGACY_STATUS_MAP = {
-    "fetched": "processing",
-    "encoding": "processing",
-    "encoded": "uploading",
-    "uploaded": "uploading",
-    "verified": "uploading",
-    "replacing": "uploading",
-    "replaced": "done",
-    "skipped": "done",
-}
 
 
 # Columns stored directly (not in extras JSON) for efficient queries
@@ -138,58 +124,7 @@ def _init_tables(conn: sqlite3.Connection) -> None:
     except sqlite3.OperationalError:
         pass  # column already exists
 
-    # Migrate legacy statuses to new simplified ones
-    for old_status, new_status in _LEGACY_STATUS_MAP.items():
-        conn.execute("UPDATE pipeline_files SET status = ? WHERE status = ?", (new_status, old_status))
-
     conn.commit()
-
-
-def migrate_from_json(json_path: str, db_path: str) -> None:
-    """One-time migration from pipeline_state.json to SQLite."""
-    if not os.path.exists(json_path):
-        return
-    if os.path.exists(db_path):
-        return  # already migrated
-
-    logging.info("Migrating pipeline state from JSON to SQLite...")
-    with open(json_path, "r", encoding="utf-8") as f:
-        data = json.load(f)
-
-    conn = get_db(db_path)
-    _init_tables(conn)
-
-    # Migrate files
-    files = data.get("files", {})
-    for filepath, info in files.items():
-        direct = {k: info.get(k) for k in _DIRECT_COLS if k in info}
-        extras = {k: v for k, v in info.items() if k not in _DIRECT_COLS}
-        # Convert booleans for SQLite
-        for bool_col in ("audio_only", "cleanup_strip", "sub_strip"):
-            if bool_col in direct and direct[bool_col] is not None:
-                direct[bool_col] = 1 if direct[bool_col] else 0
-        cols = ["filepath"] + list(direct.keys()) + ["extras"]
-        placeholders = ", ".join(["?"] * len(cols))
-        col_names = ", ".join(cols)
-        vals = [filepath] + list(direct.values()) + [json.dumps(extras)]
-        conn.execute(f"INSERT OR REPLACE INTO pipeline_files ({col_names}) VALUES ({placeholders})", vals)
-
-    # Migrate stats
-    stats = data.get("stats", {})
-    conn.execute("UPDATE pipeline_stats SET data = ? WHERE id = 1", (json.dumps(stats),))
-
-    # Migrate meta
-    for key in ("created", "last_updated", "config"):
-        if key in data:
-            val = json.dumps(data[key]) if isinstance(data[key], (dict, list)) else str(data[key])
-            conn.execute("INSERT OR REPLACE INTO pipeline_meta (key, value) VALUES (?, ?)", (key, val))
-
-    conn.commit()
-    conn.close()
-
-    # Rename old JSON to .migrated
-    os.rename(json_path, json_path + ".migrated")
-    logging.info(f"Migrated {len(files)} files from JSON to SQLite")
 
 
 class PipelineState:
