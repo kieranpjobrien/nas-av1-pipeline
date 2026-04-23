@@ -238,6 +238,20 @@ class PipelineState:
         Uses INSERT OR REPLACE for simplicity and atomicity — single statement,
         no SELECT+UPDATE race under concurrent thread access.
         """
+        # Runtime guard: DONE paired with a "deferred" or "skipped" reason is the
+        # anti-pattern that lost 65 files overnight 2026-04-23. The file-on-disk is
+        # unchanged but the state row looks complete, so the queue builder excludes
+        # it forever. If work is deferred, the correct state is ERROR (so the next
+        # queue build retries) or PENDING — never DONE.
+        if status == FileStatus.DONE:
+            reason = kwargs.get("reason") or ""
+            reason_low = str(reason).lower()
+            if "defer" in reason_low or "skip" in reason_low:
+                raise ValueError(
+                    "FileStatus.DONE with deferred/skipped reason is forbidden — "
+                    f"use ERROR instead. filepath={filepath!r} reason={reason!r}"
+                )
+
         with self._lock:
             now = datetime.now().isoformat()
 
