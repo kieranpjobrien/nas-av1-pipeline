@@ -701,14 +701,14 @@ class Orchestrator:
     # =========================================================================
 
     def _gap_filler_worker(self, queue: list[dict]):
-        """Parallel gap filler: operations split by type, not by file.
+        """Gap filler: one SSH-heavy worker + one local-quick worker.
 
-        3 MKV workers: track stripping + sub muxing (heavy NAS I/O via mkvmerge)
-        2 QUICK workers: rename, metadata, foreign sub delete (instant, ALL files)
+        Heavy (SSH): track stripping + sub muxing via remote mkvmerge on SERVER.
+        Quick (local): rename, metadata, foreign sub delete — instant NAS ops.
 
-        Quick workers scan ALL gap filler files for instant ops independently.
-        MKV workers handle the heavy remux ops. No conflicts — mkvmerge writes
-        to a tmp file, mkvpropedit/rename operate on the original.
+        Files can split between both queues (e.g. rename+strip both needed). The
+        two workers don't conflict: mkvmerge writes a tmp file, mkvpropedit/rename
+        operate on the original.
         """
         import queue as queue_mod
 
@@ -748,31 +748,22 @@ class Orchestrator:
         quick_total = quick_queue.qsize()
         logging.info(f"Gap filler: {heavy_total} heavy (mkvmerge) + {quick_total} quick (rename/meta/delete)")
 
-        # One breaker per remote machine. Both SRV and NAS can fail independently
-        # (SRV over SSH to ubuntu box, NAS over SSH to synology), so we don't want
-        # a cascading SRV failure to gate NAS workers and vice versa.
-        # threshold=5, cooldown=300s matches the overnight-2026-04-23 forensic — 5
-        # consecutive remote SSH+docker failures is the point where "transient" is
-        # no longer a credible explanation and we need to back off for 5 min.
-        breakers: dict[str, CircuitBreaker] = {
-            "SRV": CircuitBreaker(threshold=5, cooldown_secs=300, name="heavy_worker.SRV"),
-            "NAS": CircuitBreaker(threshold=5, cooldown_secs=300, name="heavy_worker.NAS"),
-        }
+        # Single circuit breaker for the SSH path. threshold=5, cooldown=300s matches
+        # the overnight-2026-04-23 forensic — 5 consecutive SSH+docker failures is the
+        # point where "transient" is no longer a credible explanation and we back off.
+        breaker = CircuitBreaker(threshold=5, cooldown_secs=300, name="heavy_worker.SRV")
 
         def heavy_worker(name: str, machine: dict):
-            machine_label = machine.get("label", "?")
-            breaker = breakers.get(machine_label)
             while not self._shutdown.is_set():
-                # Back off if the per-machine breaker is OPEN. wait_if_open raises
-                # CircuitBreakerOpen if shutdown fires while we're waiting — catch that
-                # and exit the worker cleanly. Otherwise we block (polling) until the
-                # breaker ages into HALF_OPEN and a trial is allowed through.
-                if breaker is not None:
-                    try:
-                        breaker.wait_if_open(shutdown=self._shutdown)
-                    except CircuitBreakerOpen:
-                        logging.info(f"[{name}] worker exiting — breaker open at shutdown")
-                        break
+                # Back off if the breaker is OPEN. wait_if_open raises CircuitBreakerOpen
+                # if shutdown fires while we're waiting — catch that and exit cleanly.
+                # Otherwise we block (polling) until the breaker ages into HALF_OPEN and
+                # a trial is allowed through.
+                try:
+                    breaker.wait_if_open(shutdown=self._shutdown)
+                except CircuitBreakerOpen:
+                    logging.info(f"[{name}] worker exiting — breaker open at shutdown")
+                    break
 
                 try:
                     item, gaps = heavy_queue.get(timeout=2)
@@ -792,9 +783,8 @@ class Orchestrator:
                     continue
 
                 logging.info(f"[{name} {p}/{heavy_total}] {gaps.describe()} | {item['filename']}")
-                # Pass machine config to gap_fill for remote execution
                 gaps._remote_machine = machine
-                was_open_before = breaker.is_open() if breaker is not None else False
+                was_open_before = breaker.is_open()
                 success = False
                 try:
                     success = bool(gap_fill(filepath, item, gaps, self.config, self.state))
@@ -811,13 +801,12 @@ class Orchestrator:
                     self.state.stats["errors"] = self.state.stats.get("errors", 0) + 1
                     self.state.save()
 
-                if breaker is not None:
-                    breaker.record(success)
-                    if not was_open_before and breaker.is_open():
-                        logging.warning(
-                            f"[{name}] circuit breaker OPENED for machine={machine_label} "
-                            f"(5 consecutive failures) — worker will pause for 300s"
-                        )
+                breaker.record(success)
+                if not was_open_before and breaker.is_open():
+                    logging.warning(
+                        f"[{name}] circuit breaker OPENED (5 consecutive failures) — "
+                        f"worker will pause for 300s"
+                    )
 
                 heavy_queue.task_done()
 
@@ -924,26 +913,18 @@ class Orchestrator:
 
                 quick_queue.task_done()
 
-        from pipeline.nas_worker import NAS, SERVER
+        from pipeline.nas_worker import SERVER
 
         threads = []
-        # Media server workers — 3 (was 10). With 16 concurrent mkvmerge calls we
-        # were OOM-killing mkvworker on big REMUX files (rc=137 SIGKILL) and
-        # saturating SSH/SMB on the Synology. 3+2 = 5 concurrent is plenty.
+        # Single SSH heavy worker against SERVER. When SERVER is configured it's always
+        # the better path (native Docker, NFS-mounted media — much faster than Synology).
+        # If not configured, skip heavy ops entirely rather than fall back to NAS SSH.
         if SERVER.get("host"):
-            for i in range(3):
-                threads.append(threading.Thread(target=heavy_worker, args=(f"SRV-{i}", SERVER), daemon=True))
+            threads.append(threading.Thread(target=heavy_worker, args=("SRV", SERVER), daemon=True))
         else:
-            logging.info("  SRV workers skipped (SERVER_SSH_HOST not set)")
-        # NAS workers — 2 (was 6). Same OOM/SSH-overload reasoning.
-        if NAS.get("host"):
-            for i in range(2):
-                threads.append(threading.Thread(target=heavy_worker, args=(f"NAS-{i}", NAS), daemon=True))
-        else:
-            logging.info("  NAS workers skipped (NAS_SSH_HOST not set)")
-        # Quick workers (run on PC — instant ops)
-        for i in range(2):
-            threads.append(threading.Thread(target=quick_worker, args=(f"QUICK-{i}",), daemon=True))
+            logging.info("  Heavy worker skipped (SERVER_SSH_HOST not set)")
+        # Single local quick worker (rename/metadata/delete — instant ops).
+        threads.append(threading.Thread(target=quick_worker, args=("QUICK",), daemon=True))
 
         for t in threads:
             t.start()
