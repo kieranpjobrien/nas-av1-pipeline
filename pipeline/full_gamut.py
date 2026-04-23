@@ -566,7 +566,24 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
     # Also captures the full probe for encode_history below — one ffprobe call, reused.
     output_probe = _probe_full(dest_path)
     if output_probe.get("error"):
-        logging.warning(f"  Output integrity probe failed ({output_probe['error']}) — proceeding with duration-check-only verify.")
+        # Probe failure used to be a warning that fell through — so a file ffprobe couldn't
+        # parse (truncated container header, unknown codec tag, etc.) skipped BOTH the
+        # integrity check AND the standards-compliance check and was committed to the
+        # library. Now it's a hard ERROR and the file is parked for manual review.
+        logging.error(
+            f"  Output integrity probe failed ({output_probe['error']}) — parking in ERROR."
+        )
+        try:
+            os.remove(dest_path)
+        except OSError:
+            pass
+        state.set_file(
+            filepath,
+            FileStatus.ERROR,
+            error=f"probe failed on staging output: {output_probe['error']}",
+            stage="verify",
+        )
+        return False
     else:
         out_video = output_probe.get("video") or {}
         out_codec = (out_video.get("codec") or "").lower()
