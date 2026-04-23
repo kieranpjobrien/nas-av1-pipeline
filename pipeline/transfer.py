@@ -71,11 +71,21 @@ def fetch_file(item: dict, staging_dir: str, config: dict, state: PipelineState,
     if fetch_usage + file_size > config["max_fetch_buffer_bytes"] and not force:
         return None  # buffer full — caller handles the wait
 
-    # Check source still exists on NAS (may have been renamed/deleted since scan)
+    # Check source still exists on NAS (may have been renamed/deleted since scan).
+    # Probe twice with a 2s delay to rule out transient SMB flap — marking DONE here
+    # used to hide genuinely-missing-file failures behind a cheerful terminal state;
+    # the ghost-detection sweep in the scanner cleans up legitimately-moved files.
     if not os.path.exists(source):
-        logging.warning(f"Source file not found, skipping: {item['filename']}")
-        state.set_file(source, FileStatus.DONE, reason="source file not found")
-        return None
+        time.sleep(2)
+        if not os.path.exists(source):
+            logging.warning(f"Source file not found after 2s re-probe: {item['filename']}")
+            state.set_file(
+                source,
+                FileStatus.ERROR,
+                stage="fetch",
+                error="source file not found",
+            )
+            return None
 
     # Atomically claim this file for fetching — prevents the prefetch thread
     # and main loop from copying the same file concurrently (WinError 32).
