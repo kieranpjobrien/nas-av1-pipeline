@@ -400,11 +400,21 @@ def _filename_matches_folder(filepath: str, library_type: str) -> bool:
         # strip SxxExx and everything after: "Show S01E01 Title" → "Show"
         m = _SXXEXX_RE.search(filename)
         fn_title = filename[: m.start()].rstrip(" .-") if m else filename
+        # Strip disambiguators from folder: year "(2018)", region "(US)/(UK)/(AU)" etc.
+        # Episode files correctly omit these — they're on the show folder for Plex.
         folder = grandparent  # show folder
+        folder = _YEAR_PAREN_RE.sub("", folder)
+        folder = re.sub(r"\s*\((?:US|UK|AU|NZ|CA|IE|IN|ZA|BR|MX|JP|KR)\)", "", folder, flags=re.IGNORECASE)
+        folder = folder.strip()
     else:
         return True
 
     if not fn_title or not folder:
+        return True
+
+    # If filename has NO title portion (bare "SxxExx.mkv" or just year), treat as match
+    # — Plex matches on SxxExx/year alone, so absence of series name is valid.
+    if not fn_title.strip() or fn_title.strip() in ("", "(", ")"):
         return True
 
     return _ascii_key(fn_title) == _ascii_key(folder)
