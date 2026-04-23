@@ -231,15 +231,6 @@ D:\MediaProject\
 |       +-- ControlPage.jsx     # Pipeline controls (pause, skip, profiles, priorities)
 |       +-- HistoryPage.jsx     # Encode history and space savings
 +-- tools/                      # Standalone CLI utilities (see Tools section)
-+-- control_templates/          # Template JSON files for pipeline control
-    +-- profiles.json           # Quality profile assignments
-    +-- priority.json           # Force-priority and pattern-based ordering
-    +-- gentle.json             # Per-file CQ offsets
-    +-- skip.json               # Files to skip
-    +-- reencode.json           # Force re-encode of already-processed files
-    +-- pause_all.json          # Pause everything
-    +-- pause_fetch.json        # Pause fetching only
-    +-- pause_encode.json       # Pause encoding only
 ```
 
 ## Configuration
@@ -266,7 +257,7 @@ The pipeline watches these JSON files at runtime. Edit them live (the pipeline r
 - **`reencode.json`** -- force re-encode of files already processed (e.g. with a better profile)
 - **`pause_all.json`** / **`pause_fetch.json`** / **`pause_encode.json`** -- drop these to pause
 
-Templates for all control files are in `control_templates/`.
+The pipeline auto-creates persistent control files with sensible defaults on startup (see `PipelineControl._PERSISTENT_FILES`).
 
 ### Key staging limits
 
