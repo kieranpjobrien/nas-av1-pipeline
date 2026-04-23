@@ -104,8 +104,6 @@ uv run python -m tools.vmaf              # VMAF quality comparison
 uv run python -m tools.duplicates        # Find duplicate files
 uv run python -m tools.rewatchables      # Sync Rewatchables collection to Plex
 uv run python -m tools.plex_metadata     # Audit/manage Plex metadata
-uv run python -m tools.plex_collections  # Manage Plex collections and genres
-uv run python -m tools.plex_languages    # Find movies without English audio (from Plex DB)
 uv run python -m tools.fix_extensions    # Fix missing .mkv extensions on series files
 ```
 
@@ -201,8 +199,6 @@ Non-English audio streams are stripped during encode, keeping the first stream (
 | `duplicates` | Finds potential duplicates via fuzzy title matching and duration/resolution clustering |
 | `rewatchables` | Parses The Rewatchables podcast RSS feed, matches to library via TMDb, maintains a Plex collection |
 | `plex_metadata` | Audits and manages Plex metadata -- genres, collections, content ratings, labels. Rules-based application. |
-| `plex_collections` | Creates smart collections based on rules (studio, genre, keyword). Audits and fixes miscategorised content. |
-| `plex_languages` | Finds movies without English audio from a Plex database backup |
 | `fix_extensions` | Fixes missing `.mkv` extensions on series files |
 | `report_lock` | File-based lock for safe concurrent access to `media_report.json` across tools |
 
@@ -274,6 +270,5 @@ The pipeline auto-creates persistent control files with sensible defaults on sta
 | `pipeline` | `pipeline.__main__:main` |
 | `scan` | `tools.scanner:main` |
 | `subtitles` | `tools.subtitles:main` |
-| `plex-collections` | `tools.plex_collections:main` |
 | `plex-metadata` | `tools.plex_metadata:main` |
 | `dashboard` | `server:run` |
