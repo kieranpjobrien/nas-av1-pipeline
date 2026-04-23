@@ -1,7 +1,14 @@
 """TMDb metadata enrichment and MKV tag writing.
-Searches TMDb for movie/series info, extracts metadata, writes to MKV via mkvpropedit.
-Extracted from tools/tmdb.py."""
 
+Single canonical source for TMDb lookup, metadata extraction, and
+MKV tag writing via mkvpropedit. Used both by the pipeline (via
+``enrich_and_tag``) and by the CLI (``tools/tmdb.py`` shim / ``main()``).
+"""
+
+from __future__ import annotations
+
+import argparse
+import html
 import json
 import logging
 import os
@@ -15,9 +22,10 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from paths import TMDB_API_KEY
+from paths import MEDIA_REPORT, TMDB_API_KEY
 
 TMDB_BASE = "https://api.themoviedb.org/3"
 
@@ -386,11 +394,6 @@ def _find_mkvpropedit() -> str | None:
     return None
 
 
-def _xml_escape(s: str) -> str:
-    """Escape XML special characters."""
-    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
-
-
 def write_tmdb_to_mkv(filepath: str, tmdb: dict) -> bool:
     """Write TMDb metadata into an MKV file's global tags via mkvpropedit.
 
@@ -408,10 +411,10 @@ def write_tmdb_to_mkv(filepath: str, tmdb: dict) -> bool:
         return False
 
     # Build MKV XML tags
-    tags = []
+    tags: list[str] = []
 
     def add_tag(name: str, value: str) -> None:
-        tags.append(f"    <Simple><Name>{name}</Name><String>{_xml_escape(value)}</String></Simple>")
+        tags.append(f"    <Simple><Name>{name}</Name><String>{html.escape(value, quote=True)}</String></Simple>")
 
     if tmdb.get("director"):
         add_tag("DIRECTOR", tmdb["director"])
@@ -484,7 +487,127 @@ def write_tmdb_to_mkv(filepath: str, tmdb: dict) -> bool:
                 pass
 
 
-# ---------- High-level convenience function ----------
+# ---------- Per-file enrichment (bulk CLI pipeline) ----------
+
+# Cache show lookups so we don't re-query every episode of the same show.
+_tv_cache_lock = threading.Lock()
+_tv_cache: dict[str, dict | None] = {}
+
+
+def _enrich_movie(entry: dict) -> dict | None:
+    """Look up and return TMDb metadata for a single movie entry."""
+    title, year = parse_movie_filename(entry["filename"])
+    if not title or title.startswith("tmp"):
+        return None
+
+    # Strip leftover edition suffixes the regex didn't catch
+    title = _EDITION_SUFFIXES.sub("", title).strip().rstrip(" -")
+
+    results = search_movie(title, year)
+    match = _pick_best_movie(results, title, year, entry.get("duration_seconds", 0))
+
+    # Retry: year might be part of the title (e.g. "Wonder Woman 1984")
+    if not match and year:
+        title_with_year = f"{title} {year}"
+        results2 = search_movie(title_with_year)
+        match = _pick_best_movie(results2, title_with_year, None, entry.get("duration_seconds", 0))
+
+    # Retry: without year (broader search)
+    if not match and year:
+        results3 = search_movie(title)
+        match = _pick_best_movie(results3, title, None, entry.get("duration_seconds", 0))
+
+    if not match:
+        return None
+
+    details = get_movie_details(match["id"])
+    if not details:
+        return None
+
+    meta = extract_movie_metadata(details)
+
+    # Runtime cross-check: if TMDb runtime differs by >20 min, it might be wrong match
+    tmdb_runtime = meta.get("runtime_minutes") or 0
+    file_runtime = entry.get("duration_seconds", 0) / 60
+    if tmdb_runtime and file_runtime and abs(tmdb_runtime - file_runtime) > 20:
+        # Try without year constraint
+        results2 = search_movie(title)
+        match2 = _pick_best_movie(results2, title, year, entry.get("duration_seconds", 0))
+        if match2 and match2["id"] != match["id"]:
+            details2 = get_movie_details(match2["id"])
+            if details2:
+                meta2 = extract_movie_metadata(details2)
+                rt2 = meta2.get("runtime_minutes") or 0
+                if rt2 and abs(rt2 - file_runtime) < abs(tmdb_runtime - file_runtime):
+                    return meta2
+
+    return meta
+
+
+def _enrich_series(entry: dict) -> dict | None:
+    """Look up and return TMDb metadata for a single series entry."""
+    # Try to get show name from directory path first (more reliable than filename)
+    filepath = entry.get("filepath", "")
+    show_name = None
+    parts = Path(filepath).parts
+    for i, p in enumerate(parts):
+        if p.lower().startswith("season") or re.match(r"[Ss]\d+", p):
+            if i > 0:
+                show_name = _clean_show_name(parts[i - 1])
+            break
+
+    if not show_name:
+        show_name, _, _ = parse_series_filename(entry["filename"])
+        if show_name:
+            show_name = _clean_show_name(show_name)
+
+    if not show_name:
+        return None
+
+    cache_key = show_name.lower().strip()
+
+    with _tv_cache_lock:
+        if cache_key in _tv_cache:
+            return _tv_cache[cache_key]
+
+    results = search_tv(show_name)
+    match = _pick_best_tv(results, show_name)
+    if not match:
+        with _tv_cache_lock:
+            _tv_cache[cache_key] = None
+        return None
+
+    details = get_tv_details(match["id"])
+    if not details:
+        with _tv_cache_lock:
+            _tv_cache[cache_key] = None
+        return None
+
+    meta = extract_tv_metadata(details)
+
+    with _tv_cache_lock:
+        _tv_cache[cache_key] = meta
+
+    return meta
+
+
+def _enrich_one(entry: dict, force: bool = False) -> tuple[str, dict | None]:
+    """Enrich a single file entry. Returns (filepath, metadata_or_None)."""
+    if not force and entry.get("tmdb"):
+        return entry["filepath"], None  # already enriched
+
+    lib = entry.get("library_type", "")
+    if lib == "movie":
+        meta = _enrich_movie(entry)
+    elif lib == "series":
+        meta = _enrich_series(entry)
+    else:
+        meta = None
+
+    return entry["filepath"], meta
+
+
+# ---------- High-level convenience function (used by pipeline modules) ----------
 
 
 def enrich_and_tag(
@@ -496,10 +619,10 @@ def enrich_and_tag(
     """Look up TMDb metadata for a file and write tags to the MKV.
 
     Args:
-        filepath: Full NAS path to the MKV file
-        filename: Clean filename for search
-        library_type: "movie" or "series"
-        tmdb_cache: Optional cache dict for show-level data (shared across episodes)
+        filepath: Full NAS path to the MKV file.
+        filename: Clean filename for search.
+        library_type: "movie" or "series".
+        tmdb_cache: Optional cache dict for show-level data (shared across episodes).
 
     Returns:
         TMDb metadata dict or None if not found.
@@ -507,7 +630,7 @@ def enrich_and_tag(
     if tmdb_cache is None:
         tmdb_cache = {}
 
-    meta = None
+    meta: dict | None = None
 
     if library_type == "movie":
         title, year = parse_movie_filename(filename)
@@ -542,7 +665,7 @@ def enrich_and_tag(
 
     elif library_type == "series":
         # Try to get show name from directory path first (more reliable than filename)
-        show_name = None
+        show_name: str | None = None
         parts = Path(filepath).parts
         for i, p in enumerate(parts):
             if p.lower().startswith("season") or re.match(r"[Ss]\d+", p):
@@ -551,9 +674,9 @@ def enrich_and_tag(
                 break
 
         if not show_name:
-            show_name, _, _ = parse_series_filename(filename)
-            if show_name:
-                show_name = _clean_show_name(show_name)
+            show_name_guess, _, _ = parse_series_filename(filename)
+            if show_name_guess:
+                show_name = _clean_show_name(show_name_guess)
 
         if not show_name:
             return None
@@ -585,3 +708,180 @@ def enrich_and_tag(
         write_tmdb_to_mkv(filepath, meta)
 
     return meta
+
+
+# ---------- Bulk enrichment ----------
+
+
+def enrich_report(report: dict, workers: int = 4, force: bool = False) -> dict:
+    """Enrich all files in the report with TMDb metadata.
+
+    Per-file patch model: each enrichment result is written back via patch_report()
+    immediately. Avoids the giant end-of-run write that tonight blocked for >120s
+    and lost the whole run's work. Trade-off: thousands of small file-rename ops
+    instead of one big one, but each patch holds the lock for <50ms and is fsync'd
+    atomically. Crash in the middle -> work already-done is already saved.
+
+    Args:
+        report: The full media_report dict (passed for reference; only used to pick
+                which files to process — writes go through patch_report()).
+        workers: Number of threads for concurrent lookups.
+        force: If True, re-enrich files that already have tmdb data.
+
+    Returns:
+        The same report dict (kept up-to-date in-memory as patches land).
+    """
+    from tools.report_lock import patch_report
+
+    files = report.get("files", [])
+    to_process = files if force else [f for f in files if not f.get("tmdb")]
+
+    if not to_process:
+        print("All files already have TMDb metadata. Use --force to re-enrich.")
+        return report
+
+    print(f"Enriching {len(to_process)} files with TMDb metadata ({workers} workers, per-file patch model)...")
+
+    completed = 0
+    enriched = 0
+    failed = 0
+
+    def _apply_tmdb(filepath: str, meta: dict) -> None:
+        """Patch exactly one file's tmdb field under lock. <50ms hold typically."""
+
+        def _patch(r: dict) -> None:
+            for e in r.get("files", []):
+                if e.get("filepath") == filepath:
+                    e["tmdb"] = meta
+                    return
+
+        patch_report(_patch)
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(_enrich_one, entry, force): entry for entry in to_process}
+        for future in as_completed(futures):
+            completed += 1
+            filepath, meta = future.result()
+
+            if meta:
+                try:
+                    _apply_tmdb(filepath, meta)
+                    # Also keep our in-memory copy consistent so the caller sees it
+                    for f in files:
+                        if f.get("filepath") == filepath:
+                            f["tmdb"] = meta
+                            break
+                    enriched += 1
+                except Exception as e:
+                    print(f"  Patch failed for {filepath}: {e}", flush=True)
+                    failed += 1
+            else:
+                if not futures[future].get("tmdb"):
+                    failed += 1
+
+            if completed % 50 == 0 or completed == len(to_process):
+                print(
+                    f"  Progress: {completed}/{len(to_process)} — {enriched} enriched, {failed} unmatched",
+                    flush=True,
+                )
+
+    print(
+        f"\nTMDb enrichment complete: {enriched} enriched, {failed} unmatched out of {len(to_process)}",
+        flush=True,
+    )
+    return report
+
+
+def apply_tmdb_to_files(report: dict) -> tuple[int, int]:
+    """Write TMDb metadata to all MKV files that have tmdb data in the report.
+
+    Returns (success_count, fail_count).
+    """
+    success = 0
+    failed = 0
+    files = [f for f in report.get("files", []) if f.get("tmdb")]
+    print(f"Writing TMDb metadata to {len(files)} files...", flush=True)
+
+    for i, entry in enumerate(files):
+        if (i + 1) % 100 == 0 or i + 1 == len(files):
+            print(f"  Progress: {i + 1}/{len(files)} ({success} written, {failed} failed)", flush=True)
+        ok = write_tmdb_to_mkv(entry["filepath"], entry["tmdb"])
+        if ok:
+            success += 1
+        else:
+            failed += 1
+
+    print(f"  Done: {success} written, {failed} failed", flush=True)
+    return success, failed
+
+
+# ---------- CLI ----------
+
+
+def main() -> None:
+    """CLI entrypoint.
+
+    Subcommand-less flags kept for backward compatibility with callers
+    (``tools/hourly_backfill.sh``, ``server/process_manager.py``):
+
+    * (default)            — enrich ``media_report.json``
+    * ``--apply``          — write existing TMDb metadata to MKV files
+    * ``--enrich-and-apply`` — both of the above
+    * ``--file PATH``      — enrich a single file by filepath/filename
+    """
+    sys.stdout.reconfigure(line_buffering=True)
+    parser = argparse.ArgumentParser(description="Enrich media report with TMDb metadata")
+    parser.add_argument("--report", type=str, default=str(MEDIA_REPORT), help="Path to media_report.json")
+    parser.add_argument("--force", action="store_true", help="Re-enrich files that already have tmdb data")
+    parser.add_argument("--apply", action="store_true", help="Write TMDb metadata into MKV file tags only")
+    parser.add_argument("--enrich-and-apply", action="store_true", help="Enrich report AND write to MKV files")
+    parser.add_argument("--file", type=str, default=None, help="Enrich a single file by path")
+    parser.add_argument("--workers", type=int, default=4, help="Number of parallel workers")
+    args = parser.parse_args()
+
+    from tools.report_lock import read_report, write_report
+
+    try:
+        report = read_report()
+    except FileNotFoundError:
+        print("media_report.json not found", file=sys.stderr)
+        sys.exit(1)
+
+    if args.apply:
+        # Apply-only mode: just write existing TMDb data to MKV files, no enrichment
+        apply_tmdb_to_files(report)
+    elif args.enrich_and_apply:
+        # Enrich report (per-file patches — no big end-write) AND write to MKVs
+        report = enrich_report(report, workers=args.workers, force=args.force)
+        # patches already landed per-file; no final write_report needed
+        print(f"Report patched incrementally: {MEDIA_REPORT}", flush=True)
+        apply_tmdb_to_files(report)
+    elif args.file:
+        # Single-file mode
+        target = None
+        for entry in report.get("files", []):
+            if entry.get("filepath") == args.file or entry.get("filename") == args.file:
+                target = entry
+                break
+        if not target:
+            print(f"File not found in report: {args.file}", file=sys.stderr)
+            sys.exit(1)
+
+        filepath, meta = _enrich_one(target, force=True)
+        if meta:
+            target["tmdb"] = meta
+            print(f"Enriched: {target['filename']}")
+            print(json.dumps(meta, indent=2))
+        else:
+            print(f"No TMDb match found for: {target['filename']}")
+            sys.exit(0)
+        write_report(report)
+        print(f"Saved: {MEDIA_REPORT}")
+    else:
+        # Enrichment mode (per-file patches)
+        enrich_report(report, workers=args.workers, force=args.force)
+        print(f"Report patched incrementally: {MEDIA_REPORT}")
+
+
+if __name__ == "__main__":
+    main()

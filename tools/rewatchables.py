@@ -20,7 +20,7 @@ from urllib.request import Request, urlopen
 from xml.etree import ElementTree
 
 from paths import MEDIA_REPORT, PLEX_TOKEN, PLEX_URL, STAGING_DIR
-from tools.tmdb import search_movie
+from pipeline.metadata import search_movie
 
 # ---------------------------------------------------------------------------
 # Constants
