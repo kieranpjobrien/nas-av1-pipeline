@@ -97,11 +97,35 @@ def _file_lock(lock_path: Path, timeout: float = 120.0):
             pass
 
 
-def read_report() -> dict:
-    """Read media_report.json under lock."""
-    with _file_lock(MEDIA_REPORT_LOCK):
+_EMPTY_REPORT = {"files": [], "scan_date": "", "total_files": 0}
+
+
+def _read_or_empty() -> dict:
+    """Read media_report.json, or return an empty skeleton on any read/parse error.
+
+    Protects against corruption: a malformed JSON on disk must not propagate
+    and brick every subsequent reader. If parse fails, we log once and return
+    an empty report — callers can still patch into it, and the next atomic
+    write overwrites the corrupted file with a valid one.
+    """
+    try:
         with open(MEDIA_REPORT, "r", encoding="utf-8") as f:
             return json.load(f)
+    except FileNotFoundError:
+        return dict(_EMPTY_REPORT)
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError) as e:
+        import logging
+        logging.warning(
+            f"media_report.json unreadable ({type(e).__name__}: {str(e)[:120]}). "
+            f"Treating as empty; next atomic write will overwrite."
+        )
+        return dict(_EMPTY_REPORT)
+
+
+def read_report() -> dict:
+    """Read media_report.json under lock. Returns empty skeleton if corrupt."""
+    with _file_lock(MEDIA_REPORT_LOCK):
+        return _read_or_empty()
 
 
 def write_report(report: dict) -> None:
@@ -116,8 +140,7 @@ def write_report(report: dict) -> None:
 def patch_report(fn) -> None:
     """Read report, apply fn(report) in-place, write back. All under one lock."""
     with _file_lock(MEDIA_REPORT_LOCK):
-        with open(MEDIA_REPORT, "r", encoding="utf-8") as f:
-            report = json.load(f)
+        report = _read_or_empty()
         fn(report)
         tmp = str(MEDIA_REPORT) + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
