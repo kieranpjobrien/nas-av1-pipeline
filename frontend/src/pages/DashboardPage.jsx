@@ -4,6 +4,7 @@ import { useWebSocket } from "../lib/useWebSocket";
 import { Glance } from "./dashboard/Glance";
 import { Library } from "./dashboard/Library";
 import { Worklist } from "./dashboard/Worklist";
+import { UpgradesPage } from "./UpgradesPage";
 import { Storage } from "./dashboard/Storage";
 import { Settings } from "./dashboard/Settings";
 import { Logs } from "./dashboard/Logs";
@@ -27,6 +28,7 @@ const VIEW_LABELS = {
   glance: "Glance",
   library: "Library",
   worklist: "Worklist",
+  upgrades: "Upgrades",
   queue: "Encode queue",
   workers: "Workers",
   errors: "Errors",
@@ -148,6 +150,7 @@ function Sidebar({ view, setView, data, errorCount, workersActive, workersTotal,
         { k: "glance", l: "Glance" },
         { k: "library", l: "Library", c: total != null ? fmtNum(total) : null },
         { k: "worklist", l: "Worklist" },
+        { k: "upgrades", l: "Upgrades" },
       ],
     },
     {
@@ -1075,6 +1078,9 @@ export function DashboardPage({ onClassic, onFileClick }) {
             )}
             {view === "worklist" && (
               <Worklist data={data} pipelineData={pipeline} onNavigate={setView} />
+            )}
+            {view === "upgrades" && (
+              <UpgradesPage onFileClick={onFileClick} />
             )}
             {view === "storage" && <Storage data={data} />}
             {view === "settings" && <Settings />}
