@@ -236,6 +236,50 @@ class TestHwaccelCuda:
         _assert_no_optional_audio_map(cmd)
         _assert_err_detect_scoped_to_video(cmd)
 
+    def test_hwaccel_uses_scale_cuda_not_pix_fmt(self) -> None:
+        """With hwaccel on, pixel format must come from ``scale_cuda`` — not ``-pix_fmt``.
+
+        Regression test for the 2026-04-24 filter-graph failure:
+
+          Impossible to convert between the formats supported by the filter
+          'Parsed_null_0' and the filter 'auto_scale_0'
+          src: cuda  dst: yuv420p ... p010le ...
+
+        ``-pix_fmt`` on the output with CUDA-memory input makes ffmpeg insert
+        a CPU-side ``auto_scale`` filter that can't accept GPU frames. The fix
+        is to do pixel-format conversion with ``scale_cuda`` (GPU-side) and
+        omit ``-pix_fmt`` entirely when hwaccel is on.
+        """
+        cmd = build_ffmpeg_cmd(
+            input_path="in.mkv",
+            output_path="out.mkv",
+            item=_base_item(),
+            config=_base_config(),
+        )
+        assert any("scale_cuda" in c for c in cmd), (
+            "expected scale_cuda filter when hwaccel is on; cmd: " + " ".join(cmd)
+        )
+        assert "-pix_fmt" not in cmd, (
+            "-pix_fmt with hwaccel causes the CPU auto_scale filter to reject "
+            "CUDA frames. Use scale_cuda=format=... instead."
+        )
+
+    def test_no_hwaccel_uses_pix_fmt_not_scale_cuda(self) -> None:
+        """Without hwaccel, ``-pix_fmt`` is the right mechanism — scale_cuda would
+        fail because the input is not in CUDA memory. Inverse of the above test.
+        """
+        cmd = build_ffmpeg_cmd(
+            input_path="in.mkv",
+            output_path="out.mkv",
+            item=_base_item(),
+            config=_base_config(),
+            use_hwaccel=False,
+        )
+        assert "-pix_fmt" in cmd
+        assert not any("scale_cuda" in c for c in cmd), (
+            "scale_cuda requires CUDA-memory input; can't use it without hwaccel"
+        )
+
 
 class TestSubtitleMapOptional:
     """Per-index subtitle maps must use the ``?`` (optional) suffix.

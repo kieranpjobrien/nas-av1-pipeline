@@ -390,6 +390,20 @@ def build_ffmpeg_cmd(
         for i in range(len(external_subs)):
             cmd.extend(["-map", f"{i + 1}:s"])
 
+    # Pixel format conversion.
+    #
+    # * With hwaccel (frames live in CUDA memory): use the ``scale_cuda`` video
+    #   filter to do the format conversion on the GPU. Using ``-pix_fmt`` alone
+    #   makes ffmpeg insert a CPU-side ``auto_scale`` filter that can't accept
+    #   CUDA-memory input, which fails at filter-graph init with
+    #   "Impossible to convert between the formats supported by the filter
+    #   'Parsed_null_0' and the filter 'auto_scale_0'". Observed 2026-04-24.
+    # * Without hwaccel (frames in system RAM via libavcodec decode): the
+    #   classic ``-pix_fmt`` form is correct. scale_cuda would fail because the
+    #   input isn't in CUDA memory.
+    if use_hwaccel:
+        cmd.extend(["-vf", f"scale_cuda=format={pix_fmt}"])
+
     # Video: NVENC AV1
     cmd.extend(
         [
@@ -405,10 +419,13 @@ def build_ffmpeg_cmd(
             "vbr",
             "-b:v",
             "0",
-            "-pix_fmt",
-            pix_fmt,
         ]
     )
+    # ``-pix_fmt`` only when hwaccel is OFF. With hwaccel, format was already
+    # set by ``scale_cuda=format=...`` above, and adding ``-pix_fmt`` forces
+    # ffmpeg to re-insert an auto_scale CPU filter, defeating the whole point.
+    if not use_hwaccel:
+        cmd.extend(["-pix_fmt", pix_fmt])
 
     # Multipass
     if params["multipass"] != "disabled":

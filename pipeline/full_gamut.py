@@ -941,19 +941,31 @@ def _run_encode(
 
             stderr_low = stderr.lower()
             # NVDEC decode failure — retry with software decode (libavcodec).
-            # Only from the first attempt, and only if we haven't already downgraded.
-            # Patterns cover the range of messages ffmpeg emits when NVDEC can't
-            # handle a source: unsupported profile/codec, CUDA context failures,
-            # hwaccel initialisation errors.
+            #
+            # CRITICAL: scan only the TAIL of stderr, not the full output. ffmpeg's
+            # startup banner always contains strings like "--enable-cuvid",
+            # "--enable-nvdec", "--enable-cuda-llvm" in its configuration dump, so
+            # naive substring matching on the whole stderr triggers this fallback
+            # on ANY non-zero exit regardless of the real cause. We only want to
+            # see ERROR messages, which appear near the end of stderr.
+            #
+            # Patterns are specific error-message fragments rather than feature
+            # keywords — matches NVDEC/CUVID runtime failures without false-positiving
+            # on the banner or unrelated CUDA diagnostics.
+            error_tail = "\n".join(stderr_low.strip().split("\n")[-20:])
             hwaccel_failure_markers = (
-                "cuvid",
-                "nvdec",
-                "cuda",
-                "hwaccel",
-                "hardware accelerator",
-                "no decoder could be found",
+                "cuvid error",
+                "cuvid decoder",
+                "cuviddecoder",
+                "cuvidcreatedecoder",
+                "cuda_error_",
+                "hwaccel initialisation returned error",
+                "hwaccel initialization returned error",
+                "failed setup for format cuda",
+                "no decoder could be found for codec",
+                "impossible to convert between the formats",
             )
-            if attempt == 0 and any(m in stderr_low for m in hwaccel_failure_markers):
+            if attempt == 0 and any(m in error_tail for m in hwaccel_failure_markers):
                 retry_mode = "no_hwaccel"
                 continue
             if attempt == 0 and ("subtitle" in stderr_low or "codec none" in stderr_low):
