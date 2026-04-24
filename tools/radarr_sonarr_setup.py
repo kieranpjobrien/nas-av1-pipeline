@@ -96,6 +96,38 @@ POSITIVE_FORMATS: list[dict[str, Any]] = [
         "includeCustomFormatWhenRenaming": False,
         "specifications": [_title_spec("Remux", r"\b(Remux|BluRay[-. ]?REMUX)\b")],
     },
+    # Cut preferences. For titles where multiple cuts exist (LOTR trilogy,
+    # Kingdom of Heaven, Apocalypse Now, Blade Runner, etc.), the extended /
+    # director's / final cut is almost always the definitive version. Score
+    # these high so Quality+ prefers them over theatrical when available.
+    # Films without an alternate cut just won't match — no effect.
+    {
+        "name": "nc-Extended-Cut",
+        "includeCustomFormatWhenRenaming": False,
+        "specifications": [_title_spec(
+            "Extended",
+            # Match "Extended Edition/Cut/Version", "EE" only as a standalone
+            # token (avoid "EEEK" false positive), and the LOTR-specific "EEv"
+            # bracketed variant some releasers use.
+            r"\b(Extended[-. ]?(Edition|Cut|Version)?|EE|EEv|EDC)\b",
+        )],
+    },
+    {
+        "name": "nc-Directors-Cut",
+        "includeCustomFormatWhenRenaming": False,
+        "specifications": [_title_spec(
+            "Director's Cut",
+            r"\b(Director.?s?[-. ]?Cut|DC)\b",
+        )],
+    },
+    {
+        "name": "nc-Final-Cut",
+        "includeCustomFormatWhenRenaming": False,
+        "specifications": [_title_spec(
+            "Final Cut",
+            r"\b(Final[-. ]?Cut|Ultimate[-. ]?Cut|Special[-. ]?Edition)\b",
+        )],
+    },
 ]
 
 # Negative formats — massive negative scores so they're rejected
@@ -112,14 +144,26 @@ NEGATIVE_FORMATS: list[dict[str, Any]] = [
     },
 ]
 
-# Name -> score to apply on the Quality+ profile
+# Name -> score to apply on the Quality+ profile.
+#
+# Cut preferences are scored HIGHER than audio/video tier because a 4K Atmos
+# Theatrical is worse than a 1080p Extended for the films where it matters
+# (LOTR Theatrical is 178 min; EE is 228 min — different viewing experience,
+# not a quality delta). User explicitly wants EE/DC to win when available.
 FORMAT_SCORES: dict[str, int] = {
+    # Cut preferences — highest tier, wins over audio/video tier when multiple
+    # cuts exist for a given film.
+    "nc-Extended-Cut": 8000,
+    "nc-Directors-Cut": 7500,
+    "nc-Final-Cut": 7000,
+    # Audio / video quality
     "nc-Atmos": 5000,
     "nc-TrueHD": 3000,
     "nc-DTS-HD-MA": 1500,
     "nc-Dolby-Vision": 2500,
     "nc-HDR10": 2000,
     "nc-BluRay-Remux": 3500,
+    # Rejections
     "nc-Reject-3D": -10000,
     "nc-Reject-CAM": -20000,
 }
@@ -298,18 +342,41 @@ def _build_quality_plus(
 def _ensure_profile(
     base_url: str, api_key: str, profile: dict[str, Any], app_label: str
 ) -> int | None:
-    """Create the Quality+ profile if absent; return its id (or None on failure)."""
+    """Create OR UPDATE the Quality+ profile. Returns profile id or None.
+
+    If the profile already exists we PUT an updated version with the current
+    format scores — this is how new custom formats (e.g. added via a later
+    setup-script revision) get layered onto a pre-existing profile without
+    the user having to delete and recreate it.
+    """
     try:
         profiles = _request(base_url, api_key, "GET", "/api/v3/qualityprofile") or []
     except AppError as e:
         logger.warning("%s: couldn't re-list profiles (%s)", app_label, e)
         return None
 
-    for p in profiles:
-        if p.get("name") == PROFILE_NAME:
-            logger.info("%s: '%s' profile already exists (id=%s) — leaving as-is",
-                        app_label, PROFILE_NAME, p.get("id"))
-            return p.get("id")
+    existing = next((p for p in profiles if p.get("name") == PROFILE_NAME), None)
+    if existing:
+        # Merge: keep the existing profile's id + upgradeAllowed etc, but
+        # overwrite formatItems with our current scoring (adds new formats,
+        # updates scores on old ones).
+        merged = dict(existing)
+        merged["formatItems"] = profile["formatItems"]
+        merged["minFormatScore"] = profile.get("minFormatScore", 0)
+        merged["cutoffFormatScore"] = profile.get("cutoffFormatScore", 5000)
+        try:
+            _request(
+                base_url, api_key, "PUT",
+                f"/api/v3/qualityprofile/{existing['id']}",
+                body=merged,
+            )
+            logger.info("%s: updated '%s' profile (id=%s) with current format scores",
+                        app_label, PROFILE_NAME, existing["id"])
+            return existing["id"]
+        except AppError as e:
+            logger.warning("%s: couldn't update '%s' profile (%s) — leaving as-is",
+                           app_label, PROFILE_NAME, e)
+            return existing["id"]
 
     try:
         created = _request(base_url, api_key, "POST", "/api/v3/qualityprofile", body=profile)
