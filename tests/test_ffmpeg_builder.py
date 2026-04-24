@@ -173,6 +173,84 @@ class TestBuildAudioRemuxCmdInvariants:
             )
 
 
+class TestSubtitleMapOptional:
+    """Per-index subtitle maps must use the ``?`` (optional) suffix.
+
+    Root cause (2026-04-24 incident, IT Crowd .mp4 → .mkv remux):
+      * Source .mp4 had one mov_text subtitle stream.
+      * ``_remux_to_mkv`` attempt 1 failed (mov_text can't copy to MKV).
+      * ``_remux_to_mkv`` attempt 2 succeeded by dropping subtitles.
+      * ``item["subtitle_streams"]`` was never updated — still reported "1 sub".
+      * ``_map_subtitle_streams`` emitted hard ``-map 0:s:0`` against the
+        sub-less remuxed input → ffmpeg: ``Stream map '' matches no streams``.
+
+    The fix: per-index maps use ``?`` so ffmpeg silently skips missing
+    indices. This is INTENTIONAL divergence from the audio-map policy —
+    rule 10 bans ``-map 0:a?`` (audio is mandatory; silent drop is the
+    incident we rebuilt discipline around). Subs are legitimately optional
+    (Bazarr backfill; sources without subs; remux drops).
+    """
+
+    def test_single_eng_sub_map_is_optional(self) -> None:
+        item = _base_item()
+        item["subtitle_streams"] = [{"language": "eng", "title": ""}]
+        cmd = build_ffmpeg_cmd(
+            input_path="in.mkv",
+            output_path="out.mkv",
+            item=item,
+            config=_base_config(),
+        )
+        # The per-index sub map must be 0:s:0? not 0:s:0
+        assert "0:s:0?" in cmd, f"expected optional per-index sub map; cmd: {cmd}"
+        assert "0:s:0" not in cmd or cmd[cmd.index("0:s:0?") - 1] == "-map", (
+            "hard 0:s:0 map present without ? — will crash ffmpeg on "
+            "stale metadata (e.g. remux dropped subs)"
+        )
+
+    def test_forced_and_regular_eng_both_optional(self) -> None:
+        item = _base_item()
+        item["subtitle_streams"] = [
+            {"language": "eng", "title": "Forced"},
+            {"language": "eng", "title": ""},
+        ]
+        cmd = build_ffmpeg_cmd(
+            input_path="in.mkv",
+            output_path="out.mkv",
+            item=item,
+            config=_base_config(),
+        )
+        # Both kept indices must be optional
+        assert "0:s:0?" in cmd
+        assert "0:s:1?" in cmd
+        # No hard per-index map survived
+        for i, tok in enumerate(cmd[:-1]):
+            if tok == "-map" and cmd[i + 1].startswith("0:s:") and not cmd[i + 1].endswith("?"):
+                pytest.fail(f"hard sub map at index {i}: {cmd[i:i + 2]}")
+
+    def test_stale_sub_metadata_survives(self) -> None:
+        """Regression: item says 1 sub, input (hypothetically) has 0 — builder must not crash.
+
+        We can't exec ffmpeg here, but we can assert the emitted command
+        carries the ``?`` suffix so ffmpeg would skip silently instead of
+        aborting with ``Stream map 0:s:0 matches no streams``.
+        """
+        item = _base_item()
+        item["subtitle_streams"] = [{"language": "eng", "title": ""}]
+        cmd = build_ffmpeg_cmd(
+            input_path="in.mkv",
+            output_path="out.mkv",
+            item=item,
+            config=_base_config(),
+        )
+        # Every per-index sub map must end with ?
+        for i, tok in enumerate(cmd[:-1]):
+            if tok == "-map" and cmd[i + 1].startswith("0:s:"):
+                assert cmd[i + 1].endswith("?"), (
+                    f"per-index sub map {cmd[i + 1]!r} missing ? — "
+                    "stale metadata after remux will crash ffmpeg"
+                )
+
+
 class TestAudioPassthroughPolicy:
     """Codecs that must NEVER be transcoded (rule 9a + audio policy)."""
 

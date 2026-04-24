@@ -144,6 +144,21 @@ def _map_subtitle_streams(cmd: list[str], item: dict, config: dict) -> None:
         return
 
     # Keep exactly 1 regular English sub + forced. Strip HI, duplicates, foreign.
+    #
+    # Per-index maps use the ``?`` (optional) suffix because subtitle streams
+    # are legitimately optional in this pipeline:
+    #   * Bazarr backfills missing subs post-encode — a zero-sub source is
+    #     expected, not an error.
+    #   * ``_remux_to_mkv`` drops incompatible subs (e.g. mov_text from .mp4)
+    #     on its retry attempt, leaving ``item["subtitle_streams"]`` stale
+    #     relative to the remuxed input file.
+    # Without ``?``, ffmpeg aborts with "Stream map 0:s:N matches no streams"
+    # instead of silently skipping the missing track.
+    #
+    # NOTE: this is INTENTIONALLY different from the audio-map policy
+    # (CLAUDE.md rule 10). Audio is mandatory — a silent audio drop is the
+    # incident we wrote discipline rules around. Subs are optional — silent
+    # skip is the desired behaviour.
     from pipeline.config import ENG_LANGS
 
     mapped = 0
@@ -151,10 +166,10 @@ def _map_subtitle_streams(cmd: list[str], item: dict, config: dict) -> None:
     for i, raw in enumerate(raw_subs):
         sub = parse_sub_stream(raw, index=i)
         if sub.is_forced:
-            cmd.extend(["-map", f"0:s:{i}"])
+            cmd.extend(["-map", f"0:s:{i}?"])
             mapped += 1
         elif sub.language in ENG_LANGS and not sub.is_hi and not found_regular_eng:
-            cmd.extend(["-map", f"0:s:{i}"])
+            cmd.extend(["-map", f"0:s:{i}?"])
             mapped += 1
             found_regular_eng = True
 
