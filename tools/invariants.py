@@ -414,6 +414,23 @@ def check_no_ghost_python_processes() -> InvariantResult:
                 continue
             if pid in registered_pids:
                 continue
+            # `uv run python -m pipeline` spawns a bootstrap python.exe
+            # that matches our pipeline cmdline but isn't itself the process
+            # the pipeline code registers — the REAL pipeline is the bootstrap's
+            # child. Before flagging a ghost, check whether any descendant
+            # process is in the registry OR is this invariants-process itself
+            # (the self-exemption extends to ancestors of my_pid since
+            # ``uv run python -m tools.invariants`` spawns the same kind of
+            # bootstrap wrapper). If so, this is the wrapper parent, not a ghost.
+            try:
+                descendants = proc.children(recursive=True)
+                descendant_pids = {int(child.pid) for child in descendants}
+                if descendant_pids & registered_pids:
+                    continue
+                if my_pid in descendant_pids:
+                    continue
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
             ghosts.append({"pid": pid, "cmd": cmdline[:240]})
             violations.append(f"pid={pid} cmd={cmdline[:120]}")
         except (psutil.NoSuchProcess, psutil.AccessDenied):
