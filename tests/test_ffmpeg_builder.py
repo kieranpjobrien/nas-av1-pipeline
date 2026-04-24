@@ -173,6 +173,70 @@ class TestBuildAudioRemuxCmdInvariants:
             )
 
 
+class TestHwaccelCuda:
+    """NVDEC decode path — ``-hwaccel cuda -hwaccel_output_format cuda``.
+
+    Root cause (2026-04-24 observation): ffmpeg at 520% CPU / 691 MB RAM while
+    the GPU encoder chip was only at 52% utilisation. The decode was happening
+    on CPU via libavcodec, PCIe-copying to GPU, encoding on NVENC, then copying
+    back. Adding the hwaccel pair routes decode through NVDEC (a separate chip
+    from NVENC on Ada cards — no encode/decode contention).
+
+    Invariants the tests enforce:
+      * Default build has the hwaccel pair BEFORE ``-i`` (ffmpeg requires this
+        ordering; placed after ``-i`` they're ignored).
+      * ``use_hwaccel=False`` omits them entirely — this is the fallback path
+        for NVDEC-incompatible sources (10-bit H.264 High-10, MPEG-4 ASP, etc.).
+      * Hwaccel presence does not break the err_detect-scoping or
+        audio-map-never-optional invariants (regression check).
+    """
+
+    def test_default_adds_hwaccel_before_input(self) -> None:
+        cmd = build_ffmpeg_cmd(
+            input_path="in.mkv",
+            output_path="out.mkv",
+            item=_base_item(),
+            config=_base_config(),
+        )
+        assert "-hwaccel" in cmd, "hwaccel should be present by default"
+        hwa_idx = cmd.index("-hwaccel")
+        assert cmd[hwa_idx + 1] == "cuda"
+        # Ordering: -hwaccel pair must be before -i (ffmpeg ignores hwaccel flags
+        # placed after -i without warning — silent performance regression).
+        i_idx = cmd.index("-i")
+        assert hwa_idx < i_idx, "hwaccel must precede -i or ffmpeg ignores it"
+        # Output-format pair
+        assert "-hwaccel_output_format" in cmd
+        hof_idx = cmd.index("-hwaccel_output_format")
+        assert cmd[hof_idx + 1] == "cuda"
+        assert hof_idx < i_idx
+
+    def test_use_hwaccel_false_omits_flags(self) -> None:
+        cmd = build_ffmpeg_cmd(
+            input_path="in.mkv",
+            output_path="out.mkv",
+            item=_base_item(),
+            config=_base_config(),
+            use_hwaccel=False,
+        )
+        assert "-hwaccel" not in cmd, (
+            "use_hwaccel=False must omit -hwaccel — this is the fallback path "
+            "for NVDEC-incompatible sources"
+        )
+        assert "-hwaccel_output_format" not in cmd
+
+    def test_hwaccel_does_not_break_other_invariants(self) -> None:
+        """Adding hwaccel must not regress the audio-map or err_detect rules."""
+        cmd = build_ffmpeg_cmd(
+            input_path="in.mkv",
+            output_path="out.mkv",
+            item=_base_item(),
+            config=_base_config(),
+        )
+        _assert_no_optional_audio_map(cmd)
+        _assert_err_detect_scoped_to_video(cmd)
+
+
 class TestSubtitleMapOptional:
     """Per-index subtitle maps must use the ``?`` (optional) suffix.
 

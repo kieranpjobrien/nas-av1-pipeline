@@ -896,12 +896,19 @@ def _run_encode(
     from pipeline.ffmpeg import build_ffmpeg_cmd
 
     retry_mode = "none"
-    attempts_total = 3
+    # 4 attempts: original (with hwaccel) → no_hwaccel → no_subs → audio_copy
+    # no_hwaccel is checked first because NVDEC-incompatible sources (10-bit H.264,
+    # MPEG-4 ASP, some edge cases) fail on decode before the subtitle or audio
+    # stages are even reached — retrying those with sw decode resolves them.
+    attempts_total = 4
     duration_secs = item.get("duration_seconds") or 0
 
     for attempt in range(attempts_total):
         if attempt == 0:
-            pass  # original cmd
+            pass  # original cmd (hwaccel on by default)
+        elif retry_mode == "no_hwaccel":
+            cmd = build_ffmpeg_cmd(input_path, output_path, item, config, use_hwaccel=False)
+            logging.warning("  Retrying with software decode (NVDEC incompatible source)")
         elif retry_mode == "no_subs":
             cmd = build_ffmpeg_cmd(input_path, output_path, item, config, include_subs=False)
             logging.warning("  Retrying without subtitles")
@@ -933,6 +940,22 @@ def _run_encode(
                 os.remove(output_path)
 
             stderr_low = stderr.lower()
+            # NVDEC decode failure — retry with software decode (libavcodec).
+            # Only from the first attempt, and only if we haven't already downgraded.
+            # Patterns cover the range of messages ffmpeg emits when NVDEC can't
+            # handle a source: unsupported profile/codec, CUDA context failures,
+            # hwaccel initialisation errors.
+            hwaccel_failure_markers = (
+                "cuvid",
+                "nvdec",
+                "cuda",
+                "hwaccel",
+                "hardware accelerator",
+                "no decoder could be found",
+            )
+            if attempt == 0 and any(m in stderr_low for m in hwaccel_failure_markers):
+                retry_mode = "no_hwaccel"
+                continue
             if attempt == 0 and ("subtitle" in stderr_low or "codec none" in stderr_low):
                 retry_mode = "no_subs"
                 continue

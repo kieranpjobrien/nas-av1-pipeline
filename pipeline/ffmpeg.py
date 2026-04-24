@@ -275,6 +275,7 @@ def build_ffmpeg_cmd(
     config: dict,
     include_subs: bool = True,
     external_subs: list[str] | None = None,
+    use_hwaccel: bool = True,
 ) -> list[str]:
     """Build the ffmpeg command for NVENC AV1 encoding.
 
@@ -283,6 +284,16 @@ def build_ffmpeg_cmd(
     re-encode an already-damaged file and produce another damaged output. There
     is no legitimate reason to run this builder on a zero-audio source; callers
     should filter those out upstream and surface them as errors.
+
+    Args:
+        use_hwaccel: If True (default), decode on the GPU via NVDEC (``-hwaccel cuda
+            -hwaccel_output_format cuda``) so frames flow NVDEC → CUDA memory →
+            NVENC without a PCIe round-trip through system RAM. Cuts ffmpeg CPU
+            from 5+ cores of software decode down to demux + mux only.
+            _run_encode flips this to False for the retry attempt if the first
+            attempt's stderr mentions CUDA/CUVID/NVDEC/hwaccel — NVDEC does not
+            support every codec/profile (e.g. 10-bit H.264, MPEG-4 ASP), so we
+            need a graceful fallback path.
     """
     is_hdr = item.get("hdr", False)
     params = resolve_encode_params(config, item)
@@ -315,6 +326,24 @@ def build_ffmpeg_cmd(
     cmd = [
         "ffmpeg",
         "-y",
+    ]
+
+    # GPU-resident decode path. ``-hwaccel cuda`` tells ffmpeg to hand decoding to
+    # NVDEC (a separate hardware block from NVENC — no contention on Ada RTX cards).
+    # ``-hwaccel_output_format cuda`` keeps decoded frames in CUDA memory so they
+    # go NVDEC → NVENC without copying through system RAM. Without this, ffmpeg
+    # burns 5+ CPU cores on libavcodec software decode (observed 2026-04-24, 520%
+    # ffmpeg CPU with GPU encoder chip only at 52% utilisation because the CPU
+    # decode couldn't feed it fast enough).
+    #
+    # Caveat: NVDEC doesn't support every codec/profile (10-bit H.264 High-10,
+    # MPEG-4 ASP, some exotic H.264 chroma subsampling). ``_run_encode`` in
+    # full_gamut.py detects hwaccel-related decode errors in stderr and retries
+    # with use_hwaccel=False before falling through to the subtitle / audio retries.
+    if use_hwaccel:
+        cmd.extend(["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"])
+
+    cmd.extend([
         # Scope `ignore_err` to VIDEO only. Global `-err_detect ignore_err` was the root
         # cause of silent audio loss: combined with `-map 0:a?`, a corrupt audio header
         # caused ffmpeg to skip the audio stream and exit 0 with a zero-audio output.
@@ -332,7 +361,7 @@ def build_ffmpeg_cmd(
         "-progress",
         "pipe:1",
         "-nostats",
-    ]
+    ])
 
     # Add external subtitle files as additional inputs
     if external_subs:
