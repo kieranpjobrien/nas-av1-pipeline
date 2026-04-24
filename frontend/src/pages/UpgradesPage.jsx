@@ -20,23 +20,31 @@ export function UpgradesPage({ onFileClick }) {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState(null);
   const [limit, setLimit] = useState(100);
+  const [libraryType, setLibraryType] = useState(
+    () => localStorage.getItem("nc.upgrades.libraryType") || "all",
+  );
   const [rescoringTitle, setRescoringTitle] = useState(null);
 
   const [seeds, setSeeds] = useState(null);
   const [seedsOpen, setSeedsOpen] = useState(false);
 
+  const setLibraryTypePersist = (t) => {
+    setLibraryType(t);
+    localStorage.setItem("nc.upgrades.libraryType", t);
+  };
+
   const load = useCallback(async () => {
     try {
       setLoading(true);
       setErr(null);
-      const r = await api.getUpgradesRanked(limit);
+      const r = await api.getUpgradesRanked(limit, libraryType);
       setCandidates(r.candidates || []);
     } catch (e) {
       setErr(e.message || String(e));
     } finally {
       setLoading(false);
     }
-  }, [limit]);
+  }, [limit, libraryType]);
 
   useEffect(() => {
     load();
@@ -88,11 +96,47 @@ export function UpgradesPage({ onFileClick }) {
 
   return (
     <div style={{ color: PALETTE.text }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 20 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 20, flexWrap: "wrap" }}>
         <h2 style={{ margin: 0, fontSize: 22, fontWeight: 600 }}>Upgrade candidates</h2>
         <span style={{ color: PALETTE.textMuted, fontSize: 13 }}>
           ranked by bluray.com gap × Claude taste score
         </span>
+
+        {/* Library-type filter (all / movies / series) */}
+        <div
+          style={{
+            display: "flex",
+            background: PALETTE.surfaceLight,
+            border: `1px solid ${PALETTE.border}`,
+            borderRadius: 8,
+            padding: 2,
+          }}
+        >
+          {[
+            { k: "all", l: "All" },
+            { k: "movie", l: "Movies" },
+            { k: "series", l: "Series" },
+          ].map(({ k, l }) => (
+            <button
+              key={k}
+              onClick={() => setLibraryTypePersist(k)}
+              style={{
+                background: libraryType === k ? PALETTE.accent : "transparent",
+                color: libraryType === k ? "#fff" : PALETTE.textMuted,
+                border: "none",
+                borderRadius: 6,
+                padding: "5px 12px",
+                fontSize: 12,
+                fontWeight: 500,
+                cursor: "pointer",
+                transition: "background 0.1s",
+              }}
+            >
+              {l}
+            </button>
+          ))}
+        </div>
+
         <div style={{ flex: 1 }} />
         <button onClick={() => setSeedsOpen((v) => !v)} style={ghostBtn}>
           {seedsOpen ? "Hide seeds" : "Edit taste seeds"}

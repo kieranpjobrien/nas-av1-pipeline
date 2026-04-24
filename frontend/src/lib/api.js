@@ -123,7 +123,8 @@ export const api = {
   getCompletionMissing: (category) => fetchJSON(`/completion-missing?category=${category}`),
   renameFile: (path, newName) => postJSON("/file/rename", { path, new_name: newName }),
   // Upgrades recommender (Claude-backed taste scorer + bluray.com gap)
-  getUpgradesRanked: (limit = 100) => fetchJSON(`/upgrades/ranked?limit=${limit}`),
+  getUpgradesRanked: (limit = 100, libraryType = "all") =>
+    fetchJSON(`/upgrades/ranked?limit=${limit}&library_type=${libraryType}`),
   getUpgradeSeeds: () => fetchJSON("/upgrades/seeds"),
   saveUpgradeSeeds: (bundle) => postJSON("/upgrades/seeds", bundle),
   addUpgradeSeed: (tier, seed) => postJSON("/upgrades/seeds/add", { tier, seed }),
