@@ -244,15 +244,229 @@ function Row({ row, onFileClick, onRescore, rescoring }) {
         )}
       </Td>
       <Td onClick={(e) => e.stopPropagation()}>
-        <button
-          onClick={() => onRescore(row)}
-          disabled={rescoring}
-          style={{ ...ghostBtn, padding: "4px 10px", fontSize: 12 }}
-        >
-          {rescoring ? "Scoring…" : taste == null ? "Score" : "Rescore"}
-        </button>
+        <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+          <button
+            onClick={() => onRescore(row)}
+            disabled={rescoring}
+            style={{ ...ghostBtn, padding: "4px 10px", fontSize: 12 }}
+            title="Re-ask Claude to score this film (5-15s)"
+          >
+            {rescoring ? "Scoring…" : taste == null ? "Score" : "Rescore"}
+          </button>
+          {row.filepath && (
+            <DeleteButton filepath={row.filepath} title={row.title} />
+          )}
+          {row.filepath && (
+            <RadarrButton filepath={row.filepath} title={row.title} year={row.year} />
+          )}
+        </div>
       </Td>
     </tr>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Delete / Radarr action buttons
+// ---------------------------------------------------------------------------
+
+/**
+ * Two-click delete with an undo window.
+ *
+ * First click: arm the button (turns red, says "Confirm?").
+ * Second click within 4s: actually delete via /api/file/delete.
+ * Timeout without second click: reverts to normal state.
+ *
+ * The intent is "I can see this file is a low-quality version of a film I
+ * care about (per the taste scorer) — delete it so Radarr/Sonarr grabs a
+ * better source on the next monitored search". Sonarr/Radarr will auto-
+ * re-download because the movie is still monitored.
+ */
+function DeleteButton({ filepath, title }) {
+  const [armed, setArmed] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState(false);
+  const [err, setErr] = useState(null);
+
+  useEffect(() => {
+    if (!armed) return;
+    const t = setTimeout(() => setArmed(false), 4000);
+    return () => clearTimeout(t);
+  }, [armed]);
+
+  if (done) {
+    return <span style={{ color: PALETTE.green, fontSize: 11 }}>✓ deleted</span>;
+  }
+  if (err) {
+    return (
+      <span style={{ color: PALETTE.red, fontSize: 11 }} title={err}>
+        ✗ failed
+      </span>
+    );
+  }
+
+  return (
+    <button
+      onClick={async (e) => {
+        e.stopPropagation();
+        if (!armed) {
+          setArmed(true);
+          return;
+        }
+        try {
+          setBusy(true);
+          await api.deleteFile(filepath);
+          setDone(true);
+        } catch (e2) {
+          setErr(e2.message || String(e2));
+        } finally {
+          setBusy(false);
+        }
+      }}
+      disabled={busy}
+      title={armed ? `Click again to delete "${title}"` : `Delete "${title}" from NAS`}
+      style={{
+        ...ghostBtn,
+        padding: "4px 10px",
+        fontSize: 12,
+        color: armed ? "#fff" : PALETTE.red,
+        background: armed ? PALETTE.red : "transparent",
+        borderColor: PALETTE.red,
+      }}
+    >
+      {busy ? "…" : armed ? "Confirm?" : "Delete"}
+    </button>
+  );
+}
+
+/**
+ * Radarr integration button.
+ *
+ * Clicking opens a profile picker; choosing a profile calls
+ * /api/upgrades/radarr/upgrade which (on the backend) flips the movie's
+ * quality profile in Radarr to the chosen one and triggers a search.
+ *
+ * Renders as "Radarr →" if Radarr is configured; greyed-out "Radarr (off)"
+ * if the backend reports RADARR_URL / RADARR_API_KEY are missing.
+ */
+function RadarrButton({ filepath, title, year }) {
+  const [profiles, setProfiles] = useState(null); // null = not loaded, [] = disabled, [...] = loaded
+  const [picking, setPicking] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);
+
+  const loadProfiles = useCallback(async () => {
+    try {
+      const r = await api.getRadarrProfiles();
+      if (r.disabled) {
+        setProfiles([]);
+      } else {
+        setProfiles(r.profiles || []);
+      }
+    } catch (e) {
+      setProfiles([]);
+      setMsg(e.detail || e.message || String(e));
+    }
+  }, []);
+
+  const handleClick = async (e) => {
+    e.stopPropagation();
+    if (profiles === null) await loadProfiles();
+    setPicking((v) => !v);
+  };
+
+  const choose = async (profileId, profileName) => {
+    try {
+      setBusy(true);
+      setMsg(null);
+      await api.radarrUpgrade({
+        filepath,
+        title,
+        year,
+        quality_profile_id: profileId,
+        quality_profile_name: profileName,
+      });
+      setMsg(`queued: ${profileName}`);
+      setPicking(false);
+    } catch (e) {
+      setMsg(`failed: ${e.detail || e.message || e}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (msg && !picking) {
+    return (
+      <span style={{ color: msg.startsWith("failed") ? PALETTE.red : PALETTE.green, fontSize: 11 }} title={msg}>
+        {msg.startsWith("failed") ? "✗ Radarr" : `✓ ${msg}`}
+      </span>
+    );
+  }
+
+  if (profiles !== null && profiles.length === 0) {
+    return (
+      <span
+        style={{ color: PALETTE.textMuted, fontSize: 11, fontStyle: "italic" }}
+        title={msg || "Configure RADARR_URL and RADARR_API_KEY env vars to enable"}
+      >
+        Radarr (off)
+      </span>
+    );
+  }
+
+  return (
+    <div style={{ position: "relative", display: "inline-block" }}>
+      <button
+        onClick={handleClick}
+        disabled={busy}
+        title="Change Radarr quality profile + trigger search"
+        style={{ ...ghostBtn, padding: "4px 10px", fontSize: 12, color: PALETTE.purple, borderColor: PALETTE.purple }}
+      >
+        {busy ? "…" : "Radarr →"}
+      </button>
+      {picking && profiles && profiles.length > 0 && (
+        <div
+          style={{
+            position: "absolute",
+            top: "calc(100% + 4px)",
+            right: 0,
+            background: PALETTE.surfaceLight,
+            border: `1px solid ${PALETTE.border}`,
+            borderRadius: 8,
+            padding: 6,
+            minWidth: 180,
+            zIndex: 30,
+            boxShadow: "0 6px 20px rgba(0,0,0,0.4)",
+          }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div style={{ fontSize: 11, color: PALETTE.textMuted, padding: "4px 8px" }}>
+            Pick target profile
+          </div>
+          {profiles.map((p) => (
+            <button
+              key={p.id}
+              onClick={() => choose(p.id, p.name)}
+              style={{
+                display: "block",
+                width: "100%",
+                textAlign: "left",
+                background: "transparent",
+                color: PALETTE.text,
+                border: "none",
+                padding: "6px 10px",
+                borderRadius: 6,
+                cursor: "pointer",
+                fontSize: 13,
+              }}
+              onMouseEnter={(e) => (e.currentTarget.style.background = PALETTE.surface)}
+              onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+            >
+              {p.name}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 

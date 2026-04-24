@@ -130,4 +130,6 @@ export const api = {
   removeUpgradeSeed: (tier, title, year) =>
     deleteJSON(`/upgrades/seeds/${tier}?title=${encodeURIComponent(title)}&year=${year}`),
   rescoreUpgrade: (req) => postJSON("/upgrades/rescore", req),
+  getRadarrProfiles: () => fetchJSON("/upgrades/radarr/profiles"),
+  radarrUpgrade: (req) => postJSON("/upgrades/radarr/upgrade", req),
 };

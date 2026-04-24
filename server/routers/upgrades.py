@@ -303,3 +303,72 @@ def rescore(req: RescoreRequest) -> dict[str, Any]:
         }
     finally:
         conn.close()
+
+
+# --------------------------------------------------------------------------
+# Radarr integration — flip profile + trigger search
+# --------------------------------------------------------------------------
+
+
+class RadarrUpgradeRequest(BaseModel):
+    """One-click 'ask Radarr to grab a better source' payload from the UI."""
+
+    filepath: str | None = None
+    title: str = Field(..., min_length=1)
+    year: int | None = None
+    quality_profile_id: int = Field(..., ge=1)
+    quality_profile_name: str = ""
+
+
+@router.get("/radarr/profiles")
+def get_radarr_profiles() -> dict[str, Any]:
+    """Return Radarr's quality profiles, or a ``disabled`` sentinel if creds
+    aren't set — the UI uses this to render "Radarr (off)" gracefully."""
+    from tools import radarr
+
+    if not radarr.is_configured():
+        return {
+            "disabled": True,
+            "reason": "RADARR_URL and/or RADARR_API_KEY not set",
+        }
+    try:
+        profiles = radarr.list_quality_profiles()
+    except radarr.RadarrError as exc:
+        raise HTTPException(502, detail=f"Radarr API error: {exc}")
+    return {
+        "disabled": False,
+        "profiles": [
+            {"id": p.get("id"), "name": p.get("name")}
+            for p in profiles
+            if p.get("id") is not None
+        ],
+    }
+
+
+@router.post("/radarr/upgrade")
+def radarr_upgrade(req: RadarrUpgradeRequest) -> dict[str, Any]:
+    """Change a movie's quality profile in Radarr and trigger a search.
+
+    Radarr finds a matching release per its indexers + custom-format scoring
+    and hands the grab off to your download client. Our pipeline will notice
+    the new file via Bazarr/scanner on the next scan. This endpoint does NOT
+    delete the current file — that's the delete button's job, and it should
+    be a separate deliberate action.
+    """
+    from tools import radarr
+
+    if not radarr.is_configured():
+        raise HTTPException(400, detail="Radarr not configured (RADARR_URL/RADARR_API_KEY)")
+    try:
+        result = radarr.upgrade_via_radarr(
+            filepath=req.filepath,
+            title=req.title,
+            year=req.year,
+            quality_profile_id=req.quality_profile_id,
+        )
+    except radarr.RadarrNotConfigured as exc:
+        raise HTTPException(400, detail=str(exc))
+    except radarr.RadarrError as exc:
+        raise HTTPException(502, detail=f"Radarr: {exc}")
+    result["profile_name"] = req.quality_profile_name
+    return result
