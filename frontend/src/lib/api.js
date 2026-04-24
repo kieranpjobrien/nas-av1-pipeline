@@ -132,4 +132,6 @@ export const api = {
   rescoreUpgrade: (req) => postJSON("/upgrades/rescore", req),
   getRadarrProfiles: () => fetchJSON("/upgrades/radarr/profiles"),
   radarrUpgrade: (req) => postJSON("/upgrades/radarr/upgrade", req),
+  getSonarrProfiles: () => fetchJSON("/upgrades/sonarr/profiles"),
+  sonarrUpgrade: (req) => postJSON("/upgrades/sonarr/upgrade", req),
 };

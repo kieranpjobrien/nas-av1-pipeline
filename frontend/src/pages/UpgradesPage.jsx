@@ -249,15 +249,18 @@ function Row({ row, onFileClick, onRescore, rescoring }) {
             onClick={() => onRescore(row)}
             disabled={rescoring}
             style={{ ...ghostBtn, padding: "4px 10px", fontSize: 12 }}
-            title="Re-ask Claude to score this film (5-15s)"
+            title="Re-ask Claude to score (5-15s)"
           >
             {rescoring ? "Scoring…" : taste == null ? "Score" : "Rescore"}
           </button>
+          <ArrButton
+            filepath={row.filepath}
+            title={row.title}
+            year={row.year}
+            libraryType={row.library_type}
+          />
           {row.filepath && (
             <DeleteButton filepath={row.filepath} title={row.title} />
-          )}
-          {row.filepath && (
-            <RadarrButton filepath={row.filepath} title={row.title} year={row.year} />
           )}
         </div>
       </Td>
@@ -339,16 +342,20 @@ function DeleteButton({ filepath, title }) {
 }
 
 /**
- * Radarr integration button.
+ * Arr integration button — uses Radarr for movies, Sonarr for series.
  *
- * Clicking opens a profile picker; choosing a profile calls
- * /api/upgrades/radarr/upgrade which (on the backend) flips the movie's
- * quality profile in Radarr to the chosen one and triggers a search.
+ * Clicking opens a profile picker; choosing a profile PUTs the target
+ * quality profile onto the movie/series and triggers a search.
  *
- * Renders as "Radarr →" if Radarr is configured; greyed-out "Radarr (off)"
- * if the backend reports RADARR_URL / RADARR_API_KEY are missing.
+ * Renders "Radarr (off)" / "Sonarr (off)" if the relevant env vars aren't
+ * set, or if the item has an unknown library_type.
  */
-function RadarrButton({ filepath, title, year }) {
+function ArrButton({ filepath, title, year, libraryType }) {
+  const isSeries = libraryType === "series";
+  const app = isSeries ? "Sonarr" : "Radarr";
+  const fetchProfiles = isSeries ? api.getSonarrProfiles : api.getRadarrProfiles;
+  const triggerUpgrade = isSeries ? api.sonarrUpgrade : api.radarrUpgrade;
+
   const [profiles, setProfiles] = useState(null); // null = not loaded, [] = disabled, [...] = loaded
   const [picking, setPicking] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -356,7 +363,7 @@ function RadarrButton({ filepath, title, year }) {
 
   const loadProfiles = useCallback(async () => {
     try {
-      const r = await api.getRadarrProfiles();
+      const r = await fetchProfiles();
       if (r.disabled) {
         setProfiles([]);
       } else {
@@ -366,7 +373,7 @@ function RadarrButton({ filepath, title, year }) {
       setProfiles([]);
       setMsg(e.detail || e.message || String(e));
     }
-  }, []);
+  }, [fetchProfiles]);
 
   const handleClick = async (e) => {
     e.stopPropagation();
@@ -378,7 +385,7 @@ function RadarrButton({ filepath, title, year }) {
     try {
       setBusy(true);
       setMsg(null);
-      await api.radarrUpgrade({
+      await triggerUpgrade({
         filepath,
         title,
         year,
@@ -397,7 +404,7 @@ function RadarrButton({ filepath, title, year }) {
   if (msg && !picking) {
     return (
       <span style={{ color: msg.startsWith("failed") ? PALETTE.red : PALETTE.green, fontSize: 11 }} title={msg}>
-        {msg.startsWith("failed") ? "✗ Radarr" : `✓ ${msg}`}
+        {msg.startsWith("failed") ? `✗ ${app}` : `✓ ${msg}`}
       </span>
     );
   }
@@ -406,9 +413,9 @@ function RadarrButton({ filepath, title, year }) {
     return (
       <span
         style={{ color: PALETTE.textMuted, fontSize: 11, fontStyle: "italic" }}
-        title={msg || "Configure RADARR_URL and RADARR_API_KEY env vars to enable"}
+        title={msg || `Configure ${app.toUpperCase()}_URL and ${app.toUpperCase()}_API_KEY to enable`}
       >
-        Radarr (off)
+        {app} (off)
       </span>
     );
   }
@@ -418,10 +425,10 @@ function RadarrButton({ filepath, title, year }) {
       <button
         onClick={handleClick}
         disabled={busy}
-        title="Change Radarr quality profile + trigger search"
+        title={`Change ${app} quality profile + trigger search`}
         style={{ ...ghostBtn, padding: "4px 10px", fontSize: 12, color: PALETTE.purple, borderColor: PALETTE.purple }}
       >
-        {busy ? "…" : "Radarr →"}
+        {busy ? "…" : `${app} →`}
       </button>
       {picking && profiles && profiles.length > 0 && (
         <div

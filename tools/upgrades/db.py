@@ -66,10 +66,12 @@ CREATE INDEX IF NOT EXISTS idx_upgrade_score
 -- LLM-backed taste scores. One row per (title, year) regardless of how many
 -- library files reference that film. seed_version enables auto-rescore when
 -- the user edits taste_seeds.json via the UI (stale rows get skipped by the
--- fetch helpers and re-computed on next pass).
+-- fetch helpers and re-computed on next pass). library_type ('movie'|'series')
+-- disambiguates because upgrade_info only covers movies today.
 CREATE TABLE IF NOT EXISTS taste_scores (
     title         TEXT    NOT NULL,
     year          INTEGER,
+    library_type  TEXT    NOT NULL DEFAULT 'movie',
     score         INTEGER NOT NULL CHECK (score >= 0 AND score <= 10),
     rationale     TEXT    NOT NULL,
     model         TEXT    NOT NULL,
@@ -81,6 +83,26 @@ CREATE TABLE IF NOT EXISTS taste_scores (
 CREATE INDEX IF NOT EXISTS idx_taste_score
     ON taste_scores(score DESC);
 """
+
+
+def _migrate_schema(conn: sqlite3.Connection) -> None:
+    """Best-effort additive migrations for existing installations.
+
+    Runs AFTER the CREATE TABLE IF NOT EXISTS in _SCHEMA so the table
+    definitely exists. Then we add columns that may be missing from older
+    installations (SQLite has no ``ADD COLUMN IF NOT EXISTS``, so sniff first).
+    Indexes that depend on added columns are created here too, not in _SCHEMA,
+    because referencing a column that hasn't been added yet raises.
+    """
+    cur = conn.execute("PRAGMA table_info(taste_scores)")
+    cols = {row[1] for row in cur.fetchall()}
+    if cols and "library_type" not in cols:
+        conn.execute(
+            "ALTER TABLE taste_scores ADD COLUMN library_type TEXT NOT NULL DEFAULT 'movie'"
+        )
+    # Safe to create now — column exists either via ALTER or fresh CREATE TABLE.
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_taste_library_type ON taste_scores(library_type)")
+    conn.commit()
 
 # Columns of upgrade_info in their insertion order.
 _UPGRADE_COLS: tuple[str, ...] = (
@@ -123,6 +145,7 @@ def connect(path: str | Path = UPGRADES_DB) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.executescript(_SCHEMA)
+    _migrate_schema(conn)
     conn.commit()
     return conn
 

@@ -42,24 +42,46 @@ router = APIRouter(prefix="/api/upgrades", tags=["upgrades"])
 
 
 @router.get("/ranked")
-def get_ranked(limit: int = 100) -> dict[str, Any]:
+def get_ranked(limit: int = 100, library_type: str = "all") -> dict[str, Any]:
     """Return candidates ordered by ``upgrade_score × (taste_score / 10)``.
 
-    Films without a taste_score yet are included with an assumed neutral 5/10
-    so the UI can surface them for the user to rescore rather than hiding
-    them entirely. The ``taste_score`` field is explicitly ``null`` in that
-    case so the frontend can render "rescore me" instead of a misleading 5.
+    Three sources get merged:
+      * Movies in ``upgrade_info`` (have a bluray.com gap) — full ranking.
+      * Series in ``taste_scores`` only (no gap detection for series yet) —
+        ranked by raw taste score. The UI still shows them so you can spin
+        "Masters of the Air / Band of Brothers are 10/10 → grab the best
+        available version" even without a scraper-sourced gap.
+
+    ``library_type`` query filters to ``movie``, ``series``, or ``all`` (default).
     """
     limit = max(1, min(int(limit), 500))
     conn = updb.connect()
     try:
+        rows: list[dict[str, Any]] = []
+
+        # Single source-of-truth for library_type: taste_scores.library_type.
+        # We LEFT JOIN to upgrade_info for the per-movie bluray.com gap so
+        # films with no gap-data still appear (just without the Available
+        # column populated). Combined score:
+        #   * Movies with a gap  : gap × (taste/10)     → [0, 100]
+        #   * Movies without gap : taste × 5            → [0, 50]
+        #   * Series             : taste × 10           → [0, 100]
+        # The asymmetric weighting keeps high-taste titles visible even
+        # without scraper data, while still rewarding real gap evidence
+        # when it exists.
+        want_types = ("movie", "series") if library_type == "all" else (library_type,)
+        placeholders = ",".join("?" * len(want_types))
         cur = conn.execute(
-            """
+            f"""
             SELECT
+                t.title,
+                t.year,
+                t.library_type,
+                t.score                AS taste_score,
+                t.rationale            AS taste_rationale,
+                t.scored_at            AS taste_scored_at,
+                t.seed_version         AS taste_seed_version,
                 u.filepath,
-                u.title,
-                u.year,
-                u.library_type,
                 u.current_video_res,
                 u.current_audio_codec,
                 u.current_has_atmos,
@@ -71,42 +93,37 @@ def get_ranked(limit: int = 100) -> dict[str, Any]:
                 u.confidence,
                 u.best_available_label,
                 u.best_source_url,
-                t.score AS taste_score,
-                t.rationale AS taste_rationale,
-                t.scored_at AS taste_scored_at,
-                t.seed_version AS taste_seed_version,
-                CAST(COALESCE(u.upgrade_score, 0) AS REAL)
-                    * (CAST(COALESCE(t.score, 5) AS REAL) / 10.0) AS combined_score
-            FROM upgrade_info u
-            LEFT JOIN taste_scores t
-                ON t.title = u.title
-                AND (t.year = u.year OR (t.year IS NULL AND u.year IS NULL))
-            WHERE u.upgrade_score IS NOT NULL
-            ORDER BY combined_score DESC, u.title ASC
+                CASE
+                    WHEN t.library_type = 'series' THEN
+                        CAST(t.score AS REAL) * 10.0
+                    WHEN u.upgrade_score IS NOT NULL THEN
+                        CAST(u.upgrade_score AS REAL) * (CAST(t.score AS REAL) / 10.0)
+                    ELSE
+                        CAST(t.score AS REAL) * 5.0
+                END AS combined_score
+            FROM taste_scores t
+            LEFT JOIN upgrade_info u
+                ON u.title = t.title
+                AND (u.year = t.year OR (u.year IS NULL AND t.year IS NULL))
+            WHERE t.library_type IN ({placeholders})
+            ORDER BY combined_score DESC, t.title ASC
             LIMIT ?
             """,
-            (limit,),
+            (*want_types, limit),
         )
-        rows: list[dict[str, Any]] = []
         for r in cur.fetchall():
             row = dict(r)
-            # Reasons is CSV in DB; render as list to the UI.
             reasons_csv = row.get("upgrade_reasons") or ""
             row["upgrade_reasons"] = [x for x in reasons_csv.split(",") if x]
-            # Bool normalisation for the UI
-            for col in (
-                "current_has_atmos",
-                "has_atmos_available",
-                "has_4k_hdr_available",
-                "has_truehd_available",
-            ):
+            for col in ("current_has_atmos", "has_atmos_available",
+                        "has_4k_hdr_available", "has_truehd_available"):
                 if row.get(col) is not None:
                     row[col] = bool(row[col])
             rows.append(row)
     finally:
         conn.close()
 
-    return {"count": len(rows), "limit": limit, "candidates": rows}
+    return {"count": len(rows), "limit": limit, "library_type": library_type, "candidates": rows}
 
 
 # --------------------------------------------------------------------------
@@ -370,5 +387,66 @@ def radarr_upgrade(req: RadarrUpgradeRequest) -> dict[str, Any]:
         raise HTTPException(400, detail=str(exc))
     except radarr.RadarrError as exc:
         raise HTTPException(502, detail=f"Radarr: {exc}")
+    result["profile_name"] = req.quality_profile_name
+    return result
+
+
+# --------------------------------------------------------------------------
+# Sonarr integration (mirror of Radarr)
+# --------------------------------------------------------------------------
+
+
+class SonarrUpgradeRequest(BaseModel):
+    """Payload for 'ask Sonarr to upgrade this series'."""
+
+    filepath: str | None = None
+    title: str = Field(..., min_length=1)
+    year: int | None = None
+    quality_profile_id: int = Field(..., ge=1)
+    quality_profile_name: str = ""
+
+
+@router.get("/sonarr/profiles")
+def get_sonarr_profiles() -> dict[str, Any]:
+    """Return Sonarr's quality profiles, or a ``disabled`` sentinel if unconfigured."""
+    from tools import sonarr
+
+    if not sonarr.is_configured():
+        return {
+            "disabled": True,
+            "reason": "SONARR_URL and/or SONARR_API_KEY not set",
+        }
+    try:
+        profiles = sonarr.list_quality_profiles()
+    except sonarr.SonarrError as exc:
+        raise HTTPException(502, detail=f"Sonarr API error: {exc}")
+    return {
+        "disabled": False,
+        "profiles": [
+            {"id": p.get("id"), "name": p.get("name")}
+            for p in profiles
+            if p.get("id") is not None
+        ],
+    }
+
+
+@router.post("/sonarr/upgrade")
+def sonarr_upgrade(req: SonarrUpgradeRequest) -> dict[str, Any]:
+    """Change a series' quality profile in Sonarr and trigger a full-series search."""
+    from tools import sonarr
+
+    if not sonarr.is_configured():
+        raise HTTPException(400, detail="Sonarr not configured (SONARR_URL/SONARR_API_KEY)")
+    try:
+        result = sonarr.upgrade_via_sonarr(
+            filepath=req.filepath,
+            title=req.title,
+            year=req.year,
+            quality_profile_id=req.quality_profile_id,
+        )
+    except sonarr.SonarrNotConfigured as exc:
+        raise HTTPException(400, detail=str(exc))
+    except sonarr.SonarrError as exc:
+        raise HTTPException(502, detail=f"Sonarr: {exc}")
     result["profile_name"] = req.quality_profile_name
     return result
