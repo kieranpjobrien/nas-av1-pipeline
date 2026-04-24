@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { PALETTE } from "../theme";
 import { api } from "../lib/api";
 
@@ -404,6 +404,12 @@ function ArrButton({ filepath, title, year, libraryType }) {
   const [picking, setPicking] = useState(false);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);
+  // Flip direction of the dropdown when the button is near the bottom of the
+  // viewport — otherwise the menu for rows at the end of the list gets
+  // clipped below the fold and is unreachable. Computed on open, not on
+  // every render.
+  const [openUpward, setOpenUpward] = useState(false);
+  const buttonRef = useRef(null);
 
   const loadProfiles = useCallback(async () => {
     try {
@@ -422,6 +428,15 @@ function ArrButton({ filepath, title, year, libraryType }) {
   const handleClick = async (e) => {
     e.stopPropagation();
     if (profiles === null) await loadProfiles();
+    // Decide direction: if there's less than ~240px between the button and
+    // the viewport bottom, open upward. 240 covers ~6 profile rows + the
+    // "Pick target profile" heading; with fewer profiles we still don't
+    // clip the top of the viewport because profile lists are short.
+    if (buttonRef.current) {
+      const rect = buttonRef.current.getBoundingClientRect();
+      const spaceBelow = window.innerHeight - rect.bottom;
+      setOpenUpward(spaceBelow < 240 && rect.top > 240);
+    }
     setPicking((v) => !v);
   };
 
@@ -467,6 +482,7 @@ function ArrButton({ filepath, title, year, libraryType }) {
   return (
     <div style={{ position: "relative", display: "inline-block" }}>
       <button
+        ref={buttonRef}
         onClick={handleClick}
         disabled={busy}
         title={`Change ${app} quality profile + trigger search`}
@@ -478,7 +494,9 @@ function ArrButton({ filepath, title, year, libraryType }) {
         <div
           style={{
             position: "absolute",
-            top: "calc(100% + 4px)",
+            ...(openUpward
+              ? { bottom: "calc(100% + 4px)" }
+              : { top: "calc(100% + 4px)" }),
             right: 0,
             background: PALETTE.surfaceLight,
             border: `1px solid ${PALETTE.border}`,
