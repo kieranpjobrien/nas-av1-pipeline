@@ -1,0 +1,282 @@
+{
+  "version": 1,
+  "updated_at": "2026-04-24",
+  "description": "Reference calibration points for the LLM taste scorer. User's stated taste: Martian/LOTR/Heat = high (8-10); Fast 5/Grey Man = low (1-3). Expand via the Upgrades UI — version bump triggers rescore of the library.",
+  "high": [
+    {
+      "title": "The Martian",
+      "year": 2015,
+      "score": 9,
+      "director": "Ridley Scott",
+      "rationale": "Ridley Scott directorial maturity + Dariusz Wolski's meticulous Mars cinematography. The HAB interiors, dust storms, and launch sequences were designed for scale; streaming compression robs them of practical-set detail. Strong Atmos remix with discrete object placement for wind, debris, and radio comms."
+    },
+    {
+      "title": "The Lord of the Rings: The Fellowship of the Ring",
+      "year": 2001,
+      "score": 10,
+      "director": "Peter Jackson",
+      "rationale": "User-flagged canonical reference. Howard Shore score, Andrew Lesnie photography, 80% practical-effects production. The Balrog, Moria, and Amon Hen sequences are landmark sound design. Atmos remix is a genuine fidelity upgrade over the original 5.1, not a marketing gimmick."
+    },
+    {
+      "title": "The Lord of the Rings: The Two Towers",
+      "year": 2002,
+      "score": 10,
+      "director": "Peter Jackson",
+      "rationale": "Helm's Deep battle is a demo-disc benchmark — directional rain, layered ambient war sound, discrete object-based thunder. Middle entry of a canonical trilogy."
+    },
+    {
+      "title": "The Lord of the Rings: The Return of the King",
+      "year": 2003,
+      "score": 10,
+      "director": "Peter Jackson",
+      "rationale": "Pelennor Fields charge, lighting of the beacons, and Mount Doom finale are reference-grade cinematography + sound. The Extended Edition UHD remaster genuinely reveals previously-buried grain structure and colour intent."
+    },
+    {
+      "title": "Heat",
+      "year": 1995,
+      "score": 9,
+      "director": "Michael Mann",
+      "rationale": "Mann's obsession with urban geometry, Dante Spinotti's LA night photography, Elliot Goldenthal score. The Downtown bank-heist shootout is landmark sound design — discrete gunshot positioning with room-scale reverb. Every subsequent transfer has revealed more; there's craft underneath to unearth."
+    },
+    {
+      "title": "2001: A Space Odyssey",
+      "year": 1968,
+      "score": 10,
+      "director": "Stanley Kubrick",
+      "rationale": "Possibly the purest case for fidelity investment ever committed to film. 70mm source, slit-scan Stargate, Kubrick's obsessive composition. Absence of dialogue means sound design and score (Ligeti, Strauss) carry structural weight. Recent restorations reveal original colour timing and grain."
+    },
+    {
+      "title": "Blade Runner 2049",
+      "year": 2017,
+      "score": 10,
+      "director": "Denis Villeneuve",
+      "rationale": "Deakins cinematography (Oscar-winning), Hans Zimmer + Benjamin Wallfisch score, Villeneuve's sustained long takes. Colour-graded for HDR from day one — SDR presentations literally discard tonal information. Atmos mix uses silence and bass extension deliberately."
+    },
+    {
+      "title": "Apocalypse Now",
+      "year": 1979,
+      "score": 10,
+      "director": "Francis Ford Coppola",
+      "rationale": "Storaro's photography, Walter Murch's sound design (invented surround mixing conventions still used today). The Ride of the Valkyries helicopter assault is a foundational sound-design text. Final Cut restoration preserves original 70mm intent."
+    },
+    {
+      "title": "Mad Max: Fury Road",
+      "year": 2015,
+      "score": 10,
+      "director": "George Miller",
+      "rationale": "90% practical stunts, Junkie XL score, John Seale photography. Colour-graded extremely aggressively for specific intent — accurate reproduction matters. Sound mix is dense, layered, and directional throughout. Few recent action films reward audio investment as directly."
+    },
+    {
+      "title": "Dune: Part Two",
+      "year": 2024,
+      "score": 10,
+      "director": "Denis Villeneuve",
+      "rationale": "Greig Fraser cinematography, Zimmer score with sub-sonic depth, Atmos mix with extensive vertical use. IMAX-originated sequences carry 1.43:1 framing preserved on UHD. Sandworm sequences are built for subwoofer calibration."
+    },
+    {
+      "title": "Interstellar",
+      "year": 2014,
+      "score": 9,
+      "director": "Christopher Nolan",
+      "rationale": "Hoyte van Hoytema IMAX cinematography, Zimmer pipe-organ score with aggressive dynamic range (controversial but intentional). Docking sequence sound design. Nolan's insistence on 35mm/IMAX source pays off in home presentation when delivered on UHD."
+    },
+    {
+      "title": "Children of Men",
+      "year": 2006,
+      "score": 10,
+      "director": "Alfonso Cuarón",
+      "rationale": "Lubezki's signature long takes (the car-ambush and Bexhill one-shots). Intimate directional sound design. Modest budget, zero CGI vanity — craft over spectacle. A masterclass in showing that big budgets aren't what makes a film fidelity-worthy."
+    },
+    {
+      "title": "Lawrence of Arabia",
+      "year": 1962,
+      "score": 10,
+      "director": "David Lean",
+      "rationale": "Shot in 65mm by Freddie Young. The 4K restoration is a revelation — micro-detail in fabric, grain, desert horizons. Maurice Jarre score. One of the handful of films where the difference between 1080p and 4K is genuinely structural, not cosmetic."
+    },
+    {
+      "title": "The Revenant",
+      "year": 2015,
+      "score": 9,
+      "director": "Alejandro G. Iñárritu",
+      "rationale": "Lubezki natural-light photography (Oscar-winning), long-take structure, Ryuichi Sakamoto score. Bear attack and river sequences use directional sound extensively. The image was built for big screens and large-dynamic-range displays."
+    },
+    {
+      "title": "Inception",
+      "year": 2010,
+      "score": 9,
+      "director": "Christopher Nolan",
+      "rationale": "Wally Pfister cinematography, Zimmer score (the BRAAM was invented here), Paris-folding and hotel-corridor sequences are landmark VFX/sound combinations. Atmos remix was a meaningful upgrade."
+    },
+    {
+      "title": "Gravity",
+      "year": 2013,
+      "score": 9,
+      "director": "Alfonso Cuarón",
+      "rationale": "Lubezki zero-gravity long takes, landmark use of silence in space (the sound mix pointedly honours vacuum where lesser films cheat). The opening 17-minute continuous shot demands a pristine source to read correctly."
+    },
+    {
+      "title": "The Tree of Life",
+      "year": 2011,
+      "score": 10,
+      "director": "Terrence Malick",
+      "rationale": "Lubezki natural-light photography, Alexandre Desplat score, formalist Malick direction. The cosmology sequence combines IMAX-scale imagery with orchestral layering — a film built for the biggest presentation you can offer it."
+    },
+    {
+      "title": "1917",
+      "year": 2019,
+      "score": 9,
+      "director": "Sam Mendes",
+      "rationale": "Roger Deakins photography constructed as apparent single take. Sound mix uses directional cues for threats off-screen. Trench sequences rely on scale and directional audio that collapse at streaming bitrates."
+    },
+    {
+      "title": "Oppenheimer",
+      "year": 2023,
+      "score": 10,
+      "director": "Christopher Nolan",
+      "rationale": "Hoyte van Hoytema 65mm IMAX (colour + b&w), Ludwig Göransson score with aggressive sub-bass. Trinity sequence is a sound-design case study. UHD disc preserves 1.43:1 IMAX framing; streaming doesn't."
+    },
+    {
+      "title": "No Country for Old Men",
+      "year": 2007,
+      "score": 9,
+      "director": "Joel Coen, Ethan Coen",
+      "rationale": "Deakins DP, near-scoreless sound design (the silence IS the tension). Extreme discipline in every craft dimension. The absence of music forces every footstep and breath to carry weight — needs a clean mix to land."
+    },
+    {
+      "title": "There Will Be Blood",
+      "year": 2007,
+      "score": 10,
+      "director": "Paul Thomas Anderson",
+      "rationale": "Robert Elswit photography (Oscar-winning), Jonny Greenwood score with extreme dynamic range, Anderson's long sustained takes. The opening 15 dialogue-free minutes define the register; needs fidelity to read."
+    },
+    {
+      "title": "Top Gun: Maverick",
+      "year": 2022,
+      "score": 9,
+      "director": "Joseph Kosinski",
+      "rationale": "Practical aerial photography with actual F-18 cockpit footage, Claudio Miranda DP, strong Atmos mix with engine directionality. Cruise's insistence on practical stunts gives the upgrade something real to reveal."
+    }
+  ],
+  "low": [
+    {
+      "title": "Fast Five",
+      "year": 2011,
+      "score": 2,
+      "director": "Justin Lin",
+      "rationale": "User-flagged canonical reference for 'don't bother'. Serviceable image, competent CGI, loud-is-good sound mix. Fun to watch but no fidelity upgrade will make this Scorsese — nothing of craft to reveal beyond what 1080p streaming already delivers."
+    },
+    {
+      "title": "The Gray Man",
+      "year": 2022,
+      "score": 2,
+      "director": "Anthony Russo, Joe Russo",
+      "rationale": "User-flagged canonical reference. Streaming-first action aesthetic — shaky-cam, hyper-cut, colour-graded for phone legibility. Direction by committee, DP assignment was anonymous, no memorable sound moments. Exactly the class of film the upgrade filter should de-prioritise."
+    },
+    {
+      "title": "Red Notice",
+      "year": 2021,
+      "score": 1,
+      "director": "Rawson Marshall Thurber",
+      "rationale": "Netflix-originated action-comedy. Flat lighting, CGI-heavy without the craft to back it up, dialogue-over-everything sound mix. Watchable once; no fidelity investment would change the viewing experience."
+    },
+    {
+      "title": "Bright",
+      "year": 2017,
+      "score": 1,
+      "director": "David Ayer",
+      "rationale": "Dim, muddy digital photography (by design; still unhelpful for fidelity). Streaming-native pacing. Nothing in the frame or mix that rewards examination."
+    },
+    {
+      "title": "Jurassic World Dominion",
+      "year": 2022,
+      "score": 3,
+      "director": "Colin Trevorrow",
+      "rationale": "Large budget, limited craft. CGI-saturated, score-by-the-numbers, directed to service setpieces rather than cumulative effect. Fidelity will reveal the CGI seams, not hidden depth."
+    },
+    {
+      "title": "Transformers: Rise of the Beasts",
+      "year": 2023,
+      "score": 2,
+      "director": "Steven Caple Jr.",
+      "rationale": "Loud, busy, indistinguishable from its predecessors at any resolution. The sound mix is compressed for maximum loudness; dynamic range is wasted on the viewer. Upgrade is entirely cosmetic."
+    },
+    {
+      "title": "Suicide Squad",
+      "year": 2016,
+      "score": 2,
+      "director": "David Ayer",
+      "rationale": "Over-graded, chaotic editing, jukebox needle-drop score. Colour and contrast have been ground down by grading passes; no 4K master can recover what was graded out. A film the upgrade filter should explicitly skip."
+    },
+    {
+      "title": "Day Shift",
+      "year": 2022,
+      "score": 2,
+      "director": "J.J. Perry",
+      "rationale": "Netflix vampire-action. Serviceable-to-poor direction, no DP signature, compressed sound mix. Typical example of streaming-native content with zero fidelity reward."
+    },
+    {
+      "title": "The Kissing Booth",
+      "year": 2018,
+      "score": 1,
+      "director": "Vince Marcello",
+      "rationale": "Streaming teen-romance. Phone-first framing, flat lighting, dialogue-only mix. No technical dimension rewards investment."
+    },
+    {
+      "title": "Murder Mystery 2",
+      "year": 2023,
+      "score": 1,
+      "director": "Jeremy Garelick",
+      "rationale": "Netflix star-vehicle comedy. Flat coverage, no visual identity, sitcom-grade sound mix. The film is indifferent to how you watch it."
+    },
+    {
+      "title": "The Mother",
+      "year": 2023,
+      "score": 2,
+      "director": "Niki Caro",
+      "rationale": "Streaming action thriller. Workmanlike direction and DP, no memorable craft moments. Identical experience at 1080p and 4K."
+    },
+    {
+      "title": "Rampage",
+      "year": 2018,
+      "score": 2,
+      "director": "Brad Peyton",
+      "rationale": "CGI monster movie with competent but indistinguishable craft. Sound is crowd-loudness optimised. Nothing a better encode would recover."
+    },
+    {
+      "title": "6 Underground",
+      "year": 2019,
+      "score": 1,
+      "director": "Michael Bay",
+      "rationale": "Bay at his most maximalist for Netflix. Hyper-cut, over-graded, every frame fighting for attention — nothing to linger on. Sound mix is peak-limited for streaming earbuds. Fidelity reveals seams and colour grading excess, not hidden craft."
+    },
+    {
+      "title": "The Adam Project",
+      "year": 2022,
+      "score": 2,
+      "director": "Shawn Levy",
+      "rationale": "Netflix star-vehicle with competent but anonymous direction. CGI is fine-for-streaming, DP is uncredited in any meaningful sense. Nothing the 4K encode exposes would change the viewing experience."
+    },
+    {
+      "title": "Thunder Force",
+      "year": 2021,
+      "score": 1,
+      "director": "Ben Falcone",
+      "rationale": "Netflix superhero comedy. Flat TV lighting, no cinematographer-of-record contribution, compressed sound. A representative example of the streaming-originals class that fidelity investment cannot rescue."
+    },
+    {
+      "title": "Army of the Dead",
+      "year": 2021,
+      "score": 3,
+      "director": "Zack Snyder",
+      "rationale": "Snyder self-DP; his digital photography is aggressive-but-muddy by design. Sound is dense but flat. Some craft visible (composition) but overall the grading and compression choices work against the upgrade."
+    },
+    {
+      "title": "Fast X",
+      "year": 2023,
+      "score": 2,
+      "director": "Louis Leterrier",
+      "rationale": "Further along the same diminishing-returns curve as Fast 5. Budget is larger, craft thinner. CGI-heavy with visible seams at 4K. Loud mix without layered design."
+    }
+  ]
+}

@@ -33,6 +33,24 @@ async function postJSON(path, body) {
   return res.json();
 }
 
+async function deleteJSON(path) {
+  const res = await fetch(`${BASE}${path}`, { method: "DELETE" });
+  if (!res.ok) {
+    let detail = `${res.status} ${res.statusText}`;
+    try {
+      const payload = await res.json();
+      if (payload?.detail) detail = payload.detail;
+    } catch {
+      /* non-JSON body */
+    }
+    const err = new Error(detail);
+    err.status = res.status;
+    err.detail = detail;
+    throw err;
+  }
+  return res.json();
+}
+
 async function putJSON(path, body) {
   const res = await fetch(`${BASE}${path}`, {
     method: "PUT",
@@ -104,5 +122,12 @@ export const api = {
   getForceList: () => fetchJSON("/control/force-list"),
   getCompletionMissing: (category) => fetchJSON(`/completion-missing?category=${category}`),
   renameFile: (path, newName) => postJSON("/file/rename", { path, new_name: newName }),
-  removeForce: (path) => postJSON("/control/priority/force", { path, action: "remove" }),
+  // Upgrades recommender (Claude-backed taste scorer + bluray.com gap)
+  getUpgradesRanked: (limit = 100) => fetchJSON(`/upgrades/ranked?limit=${limit}`),
+  getUpgradeSeeds: () => fetchJSON("/upgrades/seeds"),
+  saveUpgradeSeeds: (bundle) => postJSON("/upgrades/seeds", bundle),
+  addUpgradeSeed: (tier, seed) => postJSON("/upgrades/seeds/add", { tier, seed }),
+  removeUpgradeSeed: (tier, title, year) =>
+    deleteJSON(`/upgrades/seeds/${tier}?title=${encodeURIComponent(title)}&year=${year}`),
+  rescoreUpgrade: (req) => postJSON("/upgrades/rescore", req),
 };

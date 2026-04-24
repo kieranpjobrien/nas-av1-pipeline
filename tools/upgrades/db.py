@@ -62,6 +62,24 @@ CREATE TABLE IF NOT EXISTS scraper_cache (
 
 CREATE INDEX IF NOT EXISTS idx_upgrade_score
     ON upgrade_info(upgrade_score DESC);
+
+-- LLM-backed taste scores. One row per (title, year) regardless of how many
+-- library files reference that film. seed_version enables auto-rescore when
+-- the user edits taste_seeds.json via the UI (stale rows get skipped by the
+-- fetch helpers and re-computed on next pass).
+CREATE TABLE IF NOT EXISTS taste_scores (
+    title         TEXT    NOT NULL,
+    year          INTEGER,
+    score         INTEGER NOT NULL CHECK (score >= 0 AND score <= 10),
+    rationale     TEXT    NOT NULL,
+    model         TEXT    NOT NULL,
+    seed_version  INTEGER NOT NULL,
+    scored_at     REAL    NOT NULL,
+    PRIMARY KEY (title, year)
+);
+
+CREATE INDEX IF NOT EXISTS idx_taste_score
+    ON taste_scores(score DESC);
 """
 
 # Columns of upgrade_info in their insertion order.

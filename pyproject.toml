@@ -11,11 +11,13 @@ license = {text = "MIT"}
 authors = [{name = "Kieran O'Brien"}]
 
 dependencies = [
+    "anthropic>=0.45",
     "fastapi>=0.115",
     "langdetect>=1.0.9",
     "nvidia-cublas-cu12>=12.9.2.10",
     "nvidia-cudnn-cu12>=9.20.0.48",
     "psutil>=7.2.2",
+    "pydantic>=2.7",
     "uvicorn[standard]>=0.34",
 ]
 

@@ -5,6 +5,7 @@ import { LibraryPage } from "./pages/LibraryPage";
 import { ControlPage } from "./pages/ControlPage";
 import { HistoryPage } from "./pages/HistoryPage";
 import { DashboardPage } from "./pages/DashboardPage";
+import { UpgradesPage } from "./pages/UpgradesPage";
 import { GpuWidget } from "./components/GpuWidget";
 import { FileDrawer } from "./components/FileDrawer";
 import { useWebSocket } from "./lib/useWebSocket";
@@ -14,6 +15,7 @@ const TABS = [
   { id: "dashboard", label: "Dashboard" },
   { id: "pipeline", label: "Pipeline" },
   { id: "library", label: "Library" },
+  { id: "upgrades", label: "Upgrades" },
   { id: "controls", label: "Controls" },
   { id: "history", label: "History" },
 ];
@@ -124,6 +126,7 @@ export default function App() {
       <div style={{ maxWidth: 1200, margin: "0 auto", padding: "24px 24px 64px" }}>
         {tab === "pipeline" && <PipelinePage wsData={pipeline} onFileClick={setDrawerPath} />}
         {tab === "library" && <LibraryPage onFileClick={setDrawerPath} />}
+        {tab === "upgrades" && <UpgradesPage onFileClick={setDrawerPath} />}
         {tab === "controls" && <ControlPage wsControl={control} />}
         {tab === "history" && <HistoryPage />}
       </div>
