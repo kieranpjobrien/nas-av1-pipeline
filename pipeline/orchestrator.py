@@ -14,7 +14,7 @@ from typing import Optional
 from pipeline.circuit_breaker import CircuitBreaker, CircuitBreakerOpen
 from pipeline.ffmpeg import format_bytes
 from pipeline.full_gamut import finalize_upload, full_gamut
-from pipeline.state import FileStatus, PipelineState
+from pipeline.state import FileStatus, PipelineState, is_terminal
 from pipeline.transfer import fetch_file
 
 # Filename suffixes written by the pipeline's tmp-mux / staging steps.
@@ -619,7 +619,10 @@ class Orchestrator:
             filepath = item["filepath"]
             existing = self.state.get_file(filepath)
             status = existing["status"] if existing else None
-            if status in (FileStatus.DONE.value, FileStatus.ERROR.value):
+            # Skip terminal statuses (DONE + FLAGGED_*) and ERROR. ERROR is
+            # transient — retried on the next queue build — but currently we
+            # skip it here too because the queue builder will reset it.
+            if status == FileStatus.ERROR.value or (status and is_terminal(status)):
                 continue
 
             gaps = analyse_gaps(item, self.config)
@@ -857,7 +860,12 @@ class Orchestrator:
                 continue
             existing = self.state.get_file(fp)
             status = existing["status"] if existing else None
-            if status in (FileStatus.DONE.value, FileStatus.ERROR.value, FileStatus.PROCESSING.value):
+            # Skip currently-mid-flight + terminal (DONE / FLAGGED_*) + ERROR
+            if status and (
+                status == FileStatus.PROCESSING.value
+                or status == FileStatus.ERROR.value
+                or is_terminal(status)
+            ):
                 continue
             return item
         return None
@@ -869,7 +877,11 @@ class Orchestrator:
             fp = item["filepath"]
             existing = self.state.get_file(fp)
             status = existing["status"] if existing else None
-            if status not in (FileStatus.DONE.value, FileStatus.ERROR.value):
+            # ERROR counts as "settled" because retry happens on the next
+            # queue build, not within this one. FLAGGED_* and DONE count as
+            # settled (the is_terminal check covers both).
+            settled = status and (status == FileStatus.ERROR.value or is_terminal(status))
+            if not settled:
                 if fp not in dispatched or status is None:
                     return False
         return True

@@ -2,7 +2,15 @@
 
 import pytest
 
-from pipeline.state import FileStatus, PipelineState
+from pipeline.state import (
+    ACTIVE_STATUSES,
+    FLAGGED_STATUSES,
+    TERMINAL_STATUSES,
+    FileStatus,
+    PipelineState,
+    is_flagged,
+    is_terminal,
+)
 
 
 class TestPipelineStateBasics:
@@ -190,4 +198,107 @@ class TestDataProperty:
         state.stats["completed"] = 42
         state.save()
         assert state.data["stats"]["completed"] == 42
+        state.close()
+
+
+class TestStatusGroupings:
+    """Membership of FileStatus values in the TERMINAL / ACTIVE / FLAGGED groups."""
+
+    def test_terminal_includes_done_and_all_flagged(self):
+        """DONE and every FLAGGED_* are terminal — queue builder skips them."""
+        assert FileStatus.DONE in TERMINAL_STATUSES
+        assert FileStatus.FLAGGED_FOREIGN_AUDIO in TERMINAL_STATUSES
+        assert FileStatus.FLAGGED_UNDETERMINED in TERMINAL_STATUSES
+        assert FileStatus.FLAGGED_MANUAL in TERMINAL_STATUSES
+
+    def test_terminal_excludes_error(self):
+        """ERROR is NOT terminal — files in ERROR get retried on next queue build.
+
+        Discipline rule: a file the pipeline failed on must come back next pass,
+        not be silently skipped forever (that's how the 2026-04-23 incident lost
+        65 files).
+        """
+        assert FileStatus.ERROR not in TERMINAL_STATUSES
+        assert FileStatus.PENDING not in TERMINAL_STATUSES
+
+    def test_active_covers_in_flight_states(self):
+        """ACTIVE = currently mid-flight; orchestrator reaps these on startup."""
+        for s in (
+            FileStatus.QUALIFYING,
+            FileStatus.FETCHING,
+            FileStatus.PROCESSING,
+            FileStatus.UPLOADING,
+        ):
+            assert s in ACTIVE_STATUSES
+
+    def test_flagged_subset_of_terminal(self):
+        """All FLAGGED_* are terminal but not vice versa (DONE is also terminal)."""
+        assert FLAGGED_STATUSES.issubset(TERMINAL_STATUSES)
+        assert FileStatus.DONE in TERMINAL_STATUSES
+        assert FileStatus.DONE not in FLAGGED_STATUSES
+
+
+class TestStatusHelpers:
+    """is_terminal / is_flagged accept both string and FileStatus values."""
+
+    def test_is_terminal_accepts_string(self):
+        assert is_terminal("done") is True
+        assert is_terminal("flagged_foreign_audio") is True
+        assert is_terminal("pending") is False
+        assert is_terminal("error") is False
+
+    def test_is_terminal_accepts_filestatus(self):
+        assert is_terminal(FileStatus.DONE) is True
+        assert is_terminal(FileStatus.FLAGGED_UNDETERMINED) is True
+        assert is_terminal(FileStatus.PENDING) is False
+
+    def test_is_terminal_unknown_string_is_false(self):
+        """Garbage status string returns False rather than raising — defensive."""
+        assert is_terminal("bogus") is False
+        assert is_terminal("") is False
+
+    def test_is_flagged_only_flagged(self):
+        assert is_flagged("flagged_foreign_audio") is True
+        assert is_flagged(FileStatus.FLAGGED_MANUAL) is True
+        assert is_flagged("done") is False
+        assert is_flagged("error") is False
+        assert is_flagged(FileStatus.PENDING) is False
+
+
+class TestNewStatusRoundTrip:
+    """The new statuses persist through SQLite and can be retrieved unchanged."""
+
+    def test_qualifying_persists(self, tmp_state_db):
+        state = PipelineState(tmp_state_db)
+        fp = r"\\KieranNAS\Media\Series\Bluey\Season 1\Bluey S01E01.mkv"
+        state.set_file(fp, FileStatus.QUALIFYING, mode="qualify")
+        entry = state.get_file(fp)
+        assert entry["status"] == "qualifying"
+        state.close()
+
+    def test_flagged_foreign_audio_persists(self, tmp_state_db):
+        state = PipelineState(tmp_state_db)
+        fp = r"\\KieranNAS\Media\Series\Bluey\Season 1\Bluey S01E04 Daddy Robot.mkv"
+        # Real-world example: Swedish dub of a show whose original_language is en
+        state.set_file(
+            fp,
+            FileStatus.FLAGGED_FOREIGN_AUDIO,
+            reason="audio detected as sv (0.84), original is en",
+            stage="qualify",
+        )
+        entry = state.get_file(fp)
+        assert entry["status"] == "flagged_foreign_audio"
+        assert "sv" in entry["reason"]
+        state.close()
+
+    def test_flagged_undetermined_persists(self, tmp_state_db):
+        state = PipelineState(tmp_state_db)
+        fp = r"\\KieranNAS\Media\Movies\Mystery (1995).mkv"
+        state.set_file(
+            fp,
+            FileStatus.FLAGGED_UNDETERMINED,
+            reason="whisper exhausted (3 stages); audio remains und",
+        )
+        entry = state.get_file(fp)
+        assert entry["status"] == "flagged_undetermined"
         state.close()

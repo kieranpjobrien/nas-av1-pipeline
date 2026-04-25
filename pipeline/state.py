@@ -16,20 +16,91 @@ from typing import Optional
 
 
 class FileStatus(str, Enum):
-    """Simplified pipeline state machine (6 states).
+    """Pipeline state machine.
 
-    PENDING → FETCHING → PROCESSING → UPLOADING → DONE → ERROR
+    Happy path:
+        PENDING → QUALIFYING → QUALIFIED → FETCHING → PROCESSING → UPLOADING → DONE
 
-    Each file is owned by one thread start to finish. No handoffs.
-    The 'stage' field in the DB tracks which substep is active.
+    Failure / sidetrack paths:
+        ─→ ERROR                    transient/structural failure, retried later
+        ─→ FLAGGED_FOREIGN_AUDIO    audio language ≠ TMDb original_language
+                                    (Bluey dubbed Swedish, Amelie English-dub-only,
+                                    etc.) — file is encoded but the user should
+                                    delete + Sonarr/Radarr re-grab from the UI
+        ─→ FLAGGED_UNDETERMINED     audio is `und` and whisper couldn't
+                                    confidently identify it — manual review
+        ─→ FLAGGED_MANUAL           other ambiguous cases the qualify stage
+                                    surfaces for the user
+
+    Each file is owned by one thread start to finish; no handoffs. The 'stage'
+    field tracks which substep is active. Adding a state here is the first
+    step — also update:
+      * orchestrator queue-build filters (must include only PENDING + ERROR
+        for retry; QUALIFYING/QUALIFIED/FLAGGED_* live in their own pools)
+      * frontend status pills (so the new states render correctly)
+      * invariants (no_done_with_deferred_reason and friends)
     """
 
     PENDING = "pending"
+    QUALIFYING = "qualifying"
+    QUALIFIED = "qualified"
     FETCHING = "fetching"
     PROCESSING = "processing"
     UPLOADING = "uploading"
     DONE = "done"
     ERROR = "error"
+    FLAGGED_FOREIGN_AUDIO = "flagged_foreign_audio"
+    FLAGGED_UNDETERMINED = "flagged_undetermined"
+    FLAGGED_MANUAL = "flagged_manual"
+
+
+# Status groupings used by the orchestrator + UI for rapid filtering.
+# Source of truth: any change here MUST also be reflected in the
+# is_* helpers below and the SQL clauses that use them.
+
+# Statuses that mean "no more work to do" — the queue builder skips these.
+TERMINAL_STATUSES: frozenset[FileStatus] = frozenset({
+    FileStatus.DONE,
+    FileStatus.FLAGGED_FOREIGN_AUDIO,
+    FileStatus.FLAGGED_UNDETERMINED,
+    FileStatus.FLAGGED_MANUAL,
+})
+
+# Statuses where a file is mid-flight. The orchestrator reaps these on
+# startup (they were stranded by a crash).
+ACTIVE_STATUSES: frozenset[FileStatus] = frozenset({
+    FileStatus.QUALIFYING,
+    FileStatus.FETCHING,
+    FileStatus.PROCESSING,
+    FileStatus.UPLOADING,
+})
+
+# All FLAGGED_* — the UI's Flagged pane queries on this group.
+FLAGGED_STATUSES: frozenset[FileStatus] = frozenset({
+    FileStatus.FLAGGED_FOREIGN_AUDIO,
+    FileStatus.FLAGGED_UNDETERMINED,
+    FileStatus.FLAGGED_MANUAL,
+})
+
+
+def is_flagged(status: str | FileStatus) -> bool:
+    """True if ``status`` is any FLAGGED_* state."""
+    if isinstance(status, str):
+        try:
+            status = FileStatus(status)
+        except ValueError:
+            return False
+    return status in FLAGGED_STATUSES
+
+
+def is_terminal(status: str | FileStatus) -> bool:
+    """True if ``status`` means 'no more pipeline work needed'."""
+    if isinstance(status, str):
+        try:
+            status = FileStatus(status)
+        except ValueError:
+            return False
+    return status in TERMINAL_STATUSES
 
 
 # Columns stored directly (not in extras JSON) for efficient queries
