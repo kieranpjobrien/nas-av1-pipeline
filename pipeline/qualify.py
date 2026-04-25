@@ -153,7 +153,11 @@ _ISO1_EQUIV: dict[str, set[str]] = {
     "ru": {"ru", "rus", "russian"},
     "ar": {"ar", "ara", "arabic"},
     "hi": {"hi", "hin", "hindi"},
-    "no": {"no", "nor", "norwegian"},
+    # Norwegian: ISO 639-1 `no` is the macro; ISO 639-3 splits into `nob`
+    # (Bokmål, the dominant written form, ~85% of speakers) and `nno`
+    # (Nynorsk). MKV tags from Norwegian indexers commonly say nob. TMDb
+    # reports `no`. Treat them all as one bucket for the foreign-audio check.
+    "no": {"no", "nor", "nob", "nno", "norwegian", "bokmål", "bokmal", "nynorsk"},
     "da": {"da", "dan", "danish"},
     "fi": {"fi", "fin", "finnish"},
     "pl": {"pl", "pol", "polish"},
