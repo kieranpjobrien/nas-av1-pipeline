@@ -749,13 +749,38 @@ def _extract_all_audio_samples(
     # generous headroom because it's reading 50 min of audio off SMB.
     expected_seconds = sample_count * sample_duration * len(audio_indices)
     timeout = max(300, expected_seconds * 2 + 60)
+    proc_returncode: Optional[int] = None
+    proc_stderr: str = ""
     try:
-        subprocess.run(cmd, capture_output=True, timeout=timeout)
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        pass
+        proc = subprocess.run(cmd, capture_output=True, text=True,
+                              encoding="utf-8", errors="replace", timeout=timeout)
+        proc_returncode = proc.returncode
+        proc_stderr = proc.stderr or ""
+    except subprocess.TimeoutExpired:
+        proc_stderr = f"timeout after {timeout}s"
+    except FileNotFoundError:
+        proc_stderr = "ffmpeg not found on PATH"
 
     for aidx in list(result.keys()):
         result[aidx] = [p for p in result[aidx] if os.path.exists(p) and os.path.getsize(p) > 10_000]
+
+    # If extraction produced zero usable wavs, log the ffmpeg stderr so the
+    # audit operator can see WHY (codec quirk, SMB hiccup, malformed file).
+    # The bug-fix-day-2026-04-25 bulk audit silently flagged 1006 files as
+    # FLAGGED_UND because we never logged the underlying ffmpeg error and
+    # cached the "und" result as if whisper had genuinely failed to decide.
+    total_wavs = sum(len(v) for v in result.values())
+    if total_wavs == 0:
+        # Tail only — full ffmpeg output can be hundreds of lines on
+        # multi-output runs. Last 5 lines is enough to see the real error.
+        tail = "\n      ".join(proc_stderr.strip().splitlines()[-5:]) or "(empty)"
+        logging.warning(
+            "ffmpeg extraction produced 0 wavs (rc=%s) for %s — "
+            "stderr tail:\n      %s",
+            proc_returncode,
+            os.path.basename(filepath),
+            tail,
+        )
 
     return result
 
