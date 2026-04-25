@@ -567,11 +567,20 @@ def _assert_encoder_not_running() -> None:
 
 
 def _get_whisper_model(size: str = "tiny"):
-    """Lazy-load a faster-whisper model on GPU (CUDA / float16).
+    """Lazy-load a faster-whisper model on GPU (CUDA / float16) — GPU ONLY.
 
-    Falls back to CPU on load failure but the expectation is GPU. The encoder
-    pipeline must be stopped first (see _assert_encoder_not_running) because
-    NVENC + whisper on the same RTX 4080 triggered a kernel BSOD on 2026-04-21.
+    Policy (2026-04-25, user directive): production whisper runs on GPU. We do
+    NOT silently fall back to CPU on GPU failure — that would degrade throughput
+    by ~100x without anyone noticing. If GPU init fails, the function returns
+    None and the caller surfaces the failure.
+
+    The CPU path remains accessible via ``WHISPER_FORCE_CPU=1`` for explicit
+    dev / verification use only — it logs a WARNING when used and is unsuitable
+    for the bulk audit or the qualify worker.
+
+    The encoder pipeline must be stopped before invoking on GPU
+    (see ``_assert_encoder_not_running``) because NVENC + whisper on the same
+    RTX 4080 triggered a kernel BSOD on 2026-04-21.
     """
     global _whisper_tiny, _whisper_small, _whisper_medium
     if size == "tiny":
@@ -646,15 +655,32 @@ def _get_whisper_model(size: str = "tiny"):
             logging.warning(f"Whisper GPU path failed for {size} ({e}) — falling back to CPU")
             model = None
 
-    if model is None:
+    # CPU path — STRICTLY opt-in via WHISPER_FORCE_CPU=1.
+    # We do NOT fall through to CPU on GPU failure: silent degradation to a
+    # 100x-slower path would tank throughput without anyone noticing. If the
+    # GPU init fails for a real reason (driver, CUDA mismatch, OOM), surface
+    # it. Production callers (qualify worker, full_gamut) MUST run on GPU.
+    if model is None and force_cpu:
         try:
             from faster_whisper import WhisperModel
 
             model = WhisperModel(size, device="cpu", compute_type="int8")
-            logging.info(f"Loaded faster-whisper model ({size}, cpu/int8)")
+            logging.warning(
+                f"Loaded faster-whisper model ({size}, cpu/int8) — WHISPER_FORCE_CPU=1 set. "
+                "This is NOT for production use. Bulk audit + qualify worker MUST run on GPU."
+            )
         except Exception as e2:
-            logging.error(f"Failed to load whisper model {size}: {e2}")
+            logging.error(f"Failed to load whisper model {size} on CPU: {e2}")
             return None
+    elif model is None:
+        # GPU init failed and CPU bypass not requested. Refuse rather than
+        # silently slow the pipeline by 100x.
+        logging.error(
+            f"Whisper GPU load failed for {size} and WHISPER_FORCE_CPU is not set. "
+            "Refusing CPU fallback. Check CUDA/cuDNN install or set WHISPER_FORCE_CPU=1 "
+            "for explicit dev-mode CPU run."
+        )
+        return None
 
     if size == "tiny":
         _whisper_tiny = model
