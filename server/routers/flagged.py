@@ -150,17 +150,28 @@ def _action_dismiss(filepath: str) -> dict[str, Any]:
 def _action_encode_anyway(filepath: str) -> dict[str, Any]:
     """Override the flag — set back to PENDING so the queue builder picks it up.
 
-    The qualify pre-check inside full_gamut would normally re-flag this; the
-    pipeline needs a way to bypass that on user override. We set a flag in
-    the state row's ``stage`` column that the qualifier respects.
+    The qualify pre-check inside full_gamut would normally re-flag this. We
+    set ``qualify_override=True`` in the row's ``extras`` JSON (durable —
+    survives the stage churn as the file moves through fetching/encoding).
+    full_gamut reads it via state.get_file() and skips qualification when
+    set, so the user's override actually takes effect.
     """
-    _set_status(
-        filepath,
-        FileStatus.PENDING,
-        reason="user override: encode anyway",
-        mode="flagged_action",
-        stage="encode_anyway_override",
-    )
+    # Use the pipeline state machine rather than direct SQL so the kwargs
+    # land in the extras JSON correctly. ValueError-guarded by set_file.
+    from pipeline.state import PipelineState
+
+    state = PipelineState(str(_STATE_DB))
+    try:
+        state.set_file(
+            filepath,
+            FileStatus.PENDING,
+            reason="user override: encode anyway",
+            mode="flagged_action",
+            stage="",  # clear any stale stage
+            qualify_override=True,  # → extras JSON, survives stage churn
+        )
+    finally:
+        state.close()
     return {"ok": True, "filepath": filepath, "new_status": "pending"}
 
 

@@ -257,51 +257,61 @@ def full_gamut(
         # with NVENC on the same chip (BSOD risk per rule 9a). Whisper data,
         # if present, was populated earlier (offline `tools.qualify_audit` run
         # or the fetch worker's enrichment pass) and qualify_file uses it.
-        try:
-            from pipeline.qualify import QualifyOutcome, qualify_file
+        #
+        # User-override bypass: if the user clicked "Encode anyway" on the
+        # Flagged UI for this file, the state row carries qualify_override=True
+        # in its extras JSON. We respect that and skip the pre-check entirely.
+        existing = state.get_file(filepath) or existing
+        qualify_override = bool(existing and existing.get("qualify_override"))
 
-            qresult = qualify_file(item, config, use_whisper=False)
-            if qresult.outcome == QualifyOutcome.FLAGGED_FOREIGN:
-                logging.warning(
-                    f"  FLAGGED_FOREIGN_AUDIO: {filename} — {qresult.rationale}"
-                )
-                state.set_file(
-                    filepath,
-                    FileStatus.FLAGGED_FOREIGN_AUDIO,
-                    mode="full_gamut",
-                    stage="qualify",
-                    reason=qresult.rationale,
-                )
-                _cleanup(local_path, None, None)
-                return False
-            if qresult.outcome == QualifyOutcome.FLAGGED_UND:
-                logging.warning(
-                    f"  FLAGGED_UNDETERMINED: {filename} — {qresult.rationale}"
-                )
-                state.set_file(
-                    filepath,
-                    FileStatus.FLAGGED_UNDETERMINED,
-                    mode="full_gamut",
-                    stage="qualify",
-                    reason=qresult.rationale,
-                )
-                _cleanup(local_path, None, None)
-                return False
-            if qresult.outcome == QualifyOutcome.NOTHING_TO_DO:
-                # Already compliant — no encode needed.
-                logging.info(f"  Already compliant: {filename}")
-                state.set_file(
-                    filepath, FileStatus.DONE, mode="full_gamut", reason="already compliant"
-                )
-                _cleanup(local_path, None, None)
-                return True
-            # QUALIFIED: continue with the existing encode flow. The keep
-            # indices are computed inside build_ffmpeg_cmd from item's stream
-            # lists, which reflect the language detection above.
-        except Exception as e:
-            # Qualification itself shouldn't be a hard blocker — log and continue.
-            # The current language detection above is still in effect.
-            logging.warning(f"  Qualify pre-check failed (non-fatal): {e}")
+        if qualify_override:
+            logging.info(f"  Qualify pre-check SKIPPED (user override): {filename}")
+        else:
+            try:
+                from pipeline.qualify import QualifyOutcome, qualify_file
+
+                qresult = qualify_file(item, config, use_whisper=False)
+                if qresult.outcome == QualifyOutcome.FLAGGED_FOREIGN:
+                    logging.warning(
+                        f"  FLAGGED_FOREIGN_AUDIO: {filename} — {qresult.rationale}"
+                    )
+                    state.set_file(
+                        filepath,
+                        FileStatus.FLAGGED_FOREIGN_AUDIO,
+                        mode="full_gamut",
+                        stage="qualify",
+                        reason=qresult.rationale,
+                    )
+                    _cleanup(local_path, None, None)
+                    return False
+                if qresult.outcome == QualifyOutcome.FLAGGED_UND:
+                    logging.warning(
+                        f"  FLAGGED_UNDETERMINED: {filename} — {qresult.rationale}"
+                    )
+                    state.set_file(
+                        filepath,
+                        FileStatus.FLAGGED_UNDETERMINED,
+                        mode="full_gamut",
+                        stage="qualify",
+                        reason=qresult.rationale,
+                    )
+                    _cleanup(local_path, None, None)
+                    return False
+                if qresult.outcome == QualifyOutcome.NOTHING_TO_DO:
+                    # Already compliant — no encode needed.
+                    logging.info(f"  Already compliant: {filename}")
+                    state.set_file(
+                        filepath, FileStatus.DONE, mode="full_gamut", reason="already compliant"
+                    )
+                    _cleanup(local_path, None, None)
+                    return True
+                # QUALIFIED: continue with the existing encode flow. The keep
+                # indices are computed inside build_ffmpeg_cmd from item's stream
+                # lists, which reflect the language detection above.
+            except Exception as e:
+                # Qualification itself shouldn't be a hard blocker — log and continue.
+                # The current language detection above is still in effect.
+                logging.warning(f"  Qualify pre-check failed (non-fatal): {e}")
 
         # === STEP 4: Find external subs ===
         # Also eagerly computed by the fetch worker — use cached list if present.
