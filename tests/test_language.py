@@ -141,10 +141,12 @@ def test_apply_file_ffmpeg_refuses_zero_audio_source(tmp_path: Path) -> None:
 def test_detect_all_languages_no_whisper_title_hint() -> None:
     """Title hint populates detected_language without extraction or whisper.
 
-    Exercises the heuristic branch: the audio track's title contains
-    ``"English"`` so ``infer_audio_language`` returns early, before we ever
-    need to extract subtitle text or spin whisper up. No media files
-    required.
+    The track's ``title`` contains ``"English"``, which is high-signal
+    human-authored metadata. We accept it and label as ``title_hint`` —
+    distinct from the deleted ``heuristic`` inference branch (single-audio +
+    single-sub-language → infer match), which gave false positives on
+    foreign dubs (Bluey/Swedish + Bazarr English srt = falsely labelled
+    English audio).
     """
     entry = {
         "filepath": "/tmp/does-not-exist.mkv",
@@ -157,8 +159,69 @@ def test_detect_all_languages_no_whisper_title_hint() -> None:
     result = detect_all_languages(entry, use_whisper=False)
     audio = result["audio_streams"][0]
     assert audio["detected_language"] == "en"
-    assert audio["detection_method"] == "heuristic"
+    assert audio["detection_method"] == "title_hint"
     assert audio["detection_confidence"] >= 0.8
+
+
+def test_detect_all_languages_drops_inference_for_dub_with_english_sub() -> None:
+    """REGRESSION: Bluey-style dub-with-English-sub must NOT auto-label audio English.
+
+    The deleted heuristic said: 1 audio + 1 sub language → infer audio matches
+    sub. For Bluey episodes with Swedish/Dutch dubbed audio (tagged ``und``)
+    and a Bazarr-added English srt, that produced wrongly-labelled English
+    audio that the strip stage then preserved through encode.
+
+    The fix: with ``use_whisper=False`` and no title hint, we MUST leave the
+    audio's ``detected_language`` unset so downstream qualification flags
+    the file rather than blindly trusting the audio.
+    """
+    entry = {
+        "filepath": "/tmp/bluey-foreign-dub.mkv",
+        "duration_seconds": 1380,  # ~23 min episode
+        "audio_streams": [
+            # Single audio track tagged und, no helpful title — exactly the
+            # scenario where the old heuristic mis-fired
+            {"language": "und", "title": "Audio", "codec": "eac3"},
+        ],
+        "subtitle_streams": [
+            {"language": "eng", "codec": "subrip"},
+        ],
+    }
+    result = detect_all_languages(entry, use_whisper=False)
+    audio = result["audio_streams"][0]
+    # The fix: no inference, no fake "eng" label
+    assert audio.get("detected_language") is None, (
+        "audio language was inferred from sub language — that's the deleted "
+        "heuristic that mis-IDs Bluey/Spirited Away dubs. Should stay und."
+    )
+    assert audio.get("detection_method") is None
+
+
+def test_clear_legacy_heuristic_detections_strips_inference_only() -> None:
+    """Sweeper clears the deleted heuristic's results but keeps title_hint + whisper."""
+    from pipeline.language import clear_legacy_heuristic_detections
+
+    entry = {
+        "filepath": "/tmp/x.mkv",
+        "audio_streams": [
+            {"language": "und", "detected_language": "en", "detection_method": "heuristic"},
+            {"language": "und", "detected_language": "en", "detection_method": "title_hint"},
+            {"language": "und", "detected_language": "sv", "detection_method": "whisper_tiny_3x30"},
+        ],
+        "subtitle_streams": [
+            {"language": "eng", "detection_method": "text_extraction"},
+        ],
+    }
+    out, n = clear_legacy_heuristic_detections(entry)
+    assert n == 1, f"expected 1 cleared, got {n}"
+    # Heuristic-detected audio: cleared
+    assert "detected_language" not in out["audio_streams"][0]
+    # title_hint: kept (legitimate signal)
+    assert out["audio_streams"][1]["detected_language"] == "en"
+    # whisper: kept
+    assert out["audio_streams"][2]["detected_language"] == "sv"
+    # text_extraction sub: kept
+    assert out["subtitle_streams"][0]["detection_method"] == "text_extraction"
 
 
 def test_detect_all_languages_leaves_tagged_tracks_alone() -> None:

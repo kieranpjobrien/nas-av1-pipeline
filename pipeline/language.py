@@ -583,7 +583,14 @@ def _get_whisper_model(size: str = "tiny"):
     if ref is not None:
         return ref
 
-    _assert_encoder_not_running()
+    # The encoder-conflict check only matters for GPU mode — running whisper on
+    # CUDA shares the chip with NVENC and triggered a BSOD on 2026-04-21. CPU
+    # mode has no such contention, so allow it through even with the encoder
+    # running. Useful for ad-hoc verification and the bulk audit pass which we
+    # want to run alongside the pipeline.
+    force_cpu = os.environ.get("WHISPER_FORCE_CPU", "").strip() in {"1", "true", "yes"}
+    if not force_cpu:
+        _assert_encoder_not_running()
 
     # CTranslate2 was built against CUDA 12 but this machine has CUDA 13.2 —
     # we install cublas64_12.dll + cudnn*.dll via pip into the venv. The loader
@@ -601,8 +608,6 @@ def _get_whisper_model(size: str = "tiny"):
                         os.environ["PATH"] = dll_dir + os.pathsep + os.environ.get("PATH", "")
     except Exception as e:
         logging.debug(f"Couldn't add nvidia DLL dirs: {e}")
-
-    force_cpu = os.environ.get("WHISPER_FORCE_CPU", "").strip() in {"1", "true", "yes"}
 
     model = None
     if not force_cpu:
@@ -660,30 +665,41 @@ def _get_whisper_model(size: str = "tiny"):
     return model
 
 
+def _evenly_spread_offsets(duration_secs: float, count: int) -> list[int]:
+    """Pick ``count`` time offsets evenly spread across the runtime.
+
+    Skips the first/last 5% so we don't sample studio logos or end credits
+    where the audio is often music or silent. Falls back to clipping to a
+    minimum runtime of 120s for very short files.
+    """
+    total = max(duration_secs, 120)
+    if count <= 1:
+        return [int(total * 0.5)]
+    # Spread across [5%, 95%] of runtime
+    step = (total * 0.9) / (count - 1)
+    return [int(total * 0.05 + step * i) for i in range(count)]
+
+
 def _extract_all_audio_samples(
     filepath: str,
     audio_indices: list[int],
     duration_secs: float,
     sample_duration: int = 30,
+    sample_count: int = 5,
 ) -> dict[int, list[str]]:
     """Extract audio samples for ALL tracks of a file in one ffmpeg call.
 
-    5 x sample_duration WAVs spread across the runtime at 5%/20%/40%/60%/80%.
-    Returns {audio_index: [wav_path, ...], ...}. Single file open over SMB
-    regardless of how many tracks.
+    ``sample_count`` × ``sample_duration`` WAVs spread evenly across the
+    runtime, mono 16 kHz (whisper's native rate). Single file open over SMB
+    regardless of how many tracks or samples per track. Result paths
+    correspond to {audio_index: [wav_path, ...], ...}; files smaller than
+    10 KB (likely silence or extraction failure) are filtered out.
     """
     tmp_dir = os.path.join(str(STAGING_DIR), "whisper_tmp")
     os.makedirs(tmp_dir, exist_ok=True)
     base = f"{os.getpid()}_{threading.current_thread().ident}"
 
-    total = max(duration_secs, 120)
-    offsets = [
-        int(min(60, total * 0.05)),
-        int(total * 0.2),
-        int(total * 0.4),
-        int(total * 0.6),
-        int(total * 0.8),
-    ]
+    offsets = _evenly_spread_offsets(duration_secs, sample_count)
 
     result: dict[int, list[str]] = {}
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", filepath]
@@ -703,8 +719,12 @@ def _extract_all_audio_samples(
             ])
         result[aidx] = paths
 
+    # Timeout scales with sample count + duration. Stage 3 (10 × 300s) needs
+    # generous headroom because it's reading 50 min of audio off SMB.
+    expected_seconds = sample_count * sample_duration * len(audio_indices)
+    timeout = max(300, expected_seconds * 2 + 60)
     try:
-        subprocess.run(cmd, capture_output=True, timeout=300)
+        subprocess.run(cmd, capture_output=True, timeout=timeout)
     except (subprocess.TimeoutExpired, FileNotFoundError):
         pass
 
@@ -769,76 +789,233 @@ def _run_whisper_on(wavs: list[str], model_size: str) -> tuple[Optional[str], fl
     return _majority_vote(detections)
 
 
+def _cache_db_path() -> str:
+    """SQLite path for the language-detection cache.
+
+    Lives next to the rest of the pipeline state DBs so it's swept up by the
+    same backups + ignored-file rules. Schema is created on first connect.
+    """
+    return os.path.join(str(STAGING_DIR), "language_cache.sqlite")
+
+
+def _file_cache_key(filepath: str, audio_stream_index: int) -> Optional[str]:
+    """Key the cache on (path, mtime, size, audio_index) so a file edit busts the cache.
+
+    Returns None if the file is unreachable (we just skip caching in that case
+    rather than fail the detection itself). Using mtime+size is cheaper than
+    sha256 and good enough — the only failure modes (sub-second mtime+same
+    size after edit) are hyper-rare and would still produce a re-detection if
+    we ever DID re-encode the file (because the fresh encode shifts size).
+    """
+    try:
+        st = os.stat(filepath)
+    except OSError:
+        return None
+    return f"{filepath}|{int(st.st_mtime)}|{st.st_size}|{audio_stream_index}"
+
+
+def _cache_get(key: str) -> Optional[tuple[str, float, str]]:
+    """Return cached (lang, confidence, method) for ``key`` or None on miss."""
+    if not key:
+        return None
+    try:
+        import sqlite3
+        conn = sqlite3.connect(_cache_db_path(), timeout=5)
+        try:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS lang_cache (
+                    cache_key  TEXT PRIMARY KEY,
+                    language   TEXT,
+                    confidence REAL,
+                    method     TEXT,
+                    detected_at TEXT
+                )
+            """)
+            conn.commit()
+            row = conn.execute(
+                "SELECT language, confidence, method FROM lang_cache WHERE cache_key = ?",
+                (key,),
+            ).fetchone()
+        finally:
+            conn.close()
+        if row is None:
+            return None
+        lang, conf, method = row
+        return (lang or "und"), float(conf or 0.0), (method or "")
+    except Exception as exc:
+        logging.debug(f"language cache read failed: {exc}")
+        return None
+
+
+def _cache_set(key: str, language: str, confidence: float, method: str) -> None:
+    """Persist a detection result to the cache. Best-effort — failures are logged but not raised."""
+    if not key:
+        return
+    try:
+        import sqlite3
+        conn = sqlite3.connect(_cache_db_path(), timeout=5)
+        try:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS lang_cache (
+                    cache_key  TEXT PRIMARY KEY,
+                    language   TEXT,
+                    confidence REAL,
+                    method     TEXT,
+                    detected_at TEXT
+                )
+            """)
+            conn.execute(
+                "INSERT OR REPLACE INTO lang_cache (cache_key, language, confidence, method, detected_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (key, language, float(confidence), method, datetime.now().isoformat(timespec="seconds")),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as exc:
+        logging.debug(f"language cache write failed: {exc}")
+
+
+# --- Whisper escalation ladder ----------------------------------------------
+#
+# Stage spec (per the user's brief, 2026-04-25):
+#
+#   1. tiny  / 3 samples  / 30s each  — most files settle here (~5-15s wall)
+#   2. small / 5 samples  / 60s each  — escalation for borderline (~30-60s)
+#   3. base  / 10 samples / 300s each — heavy for genuinely ambiguous (~5-10 min)
+#
+# Each stage exits early if confidence ≥ MIN_CONFIDENCE AND the samples agree
+# (handled inside _majority_vote — we only return a confident lang when the
+# majority count equals the sample count, otherwise the confidence is
+# discounted, which fails the threshold and pushes to the next stage).
+#
+# Stage 3 represents heavy CPU spend (~10 min on slow CPUs); it should fire
+# only on the small minority of files where stages 1 + 2 couldn't agree.
+
+_LADDER_STAGES: list[tuple[str, int, int]] = [
+    # (model_size, sample_count, sample_duration_secs)
+    ("tiny",  3,  30),
+    ("small", 5,  60),
+    ("base",  10, 300),
+]
+_LADDER_MIN_CONFIDENCE = 0.85
+
+
 def detect_audio_language_deep(
     filepath: str,
     audio_stream_index: int,
     duration_secs: float,
-    min_confidence: float = 0.8,
+    min_confidence: float = _LADDER_MIN_CONFIDENCE,
+    *,
+    use_cache: bool = True,
 ) -> tuple[Optional[str], float, str]:
-    """Progressive-effort detection ladder on GPU (whisper cuda/float16).
+    """Three-stage escalation ladder for audio language detection.
 
-    Steps (all on same pre-extracted 5 x 30s samples):
-        1. 3 x 30s, whisper-tiny
-        2. 5 x 30s, whisper-tiny (all samples)
-        3. 5 x 30s, whisper-SMALL
+    Walks ``_LADDER_STAGES`` in order. At each stage, extracts the relevant
+    number/duration of samples and runs whisper at the corresponding model
+    size. Returns at the first stage whose result meets ``min_confidence``;
+    otherwise escalates to the next stage. After all three stages exhaust,
+    returns the best result we got (language might still be "und").
 
-    Returns (lang, confidence, method). Caller MUST stop the NVENC encoder first.
+    Cached by ``(filepath, mtime, size, audio_index)`` in
+    ``language_cache.sqlite`` — re-running on an unchanged file is free.
+
+    Caller MUST stop the NVENC encoder before invoking this on GPU; the
+    sample-extraction step is safe but whisper inference shares the same
+    chip as NVENC and a double-bind triggers BSOD (2026-04-21 incident).
+
+    Args:
+        filepath: full path to the media file.
+        audio_stream_index: 0-based index within ``streams.audio``.
+        duration_secs: full runtime in seconds (used to spread sample offsets).
+        min_confidence: stage-pass threshold; default 0.85.
+        use_cache: set False to force a fresh detection (rarely needed).
+
+    Returns:
+        (lang, confidence, method) — method is e.g. ``whisper_tiny_3x30``,
+        ``whisper_small_5x60``, ``whisper_base_10x300``, ``cached``, or
+        ``whisper_exhausted`` when no stage produced a usable result.
     """
     import time as _time
 
     name = os.path.basename(filepath)
+    cache_key = _file_cache_key(filepath, audio_stream_index)
+
+    if use_cache and cache_key:
+        hit = _cache_get(cache_key)
+        if hit is not None:
+            lang_c, conf_c, method_c = hit
+            logging.info(
+                f"    {name} a:{audio_stream_index} -> {lang_c} ({conf_c:.2f}) "
+                f"cached ({method_c})"
+            )
+            return lang_c, conf_c, "cached"
+
     t0 = _time.monotonic()
+    best_lang: Optional[str] = None
+    best_conf = 0.0
+    best_method = "whisper_exhausted"
 
-    samples = _extract_all_audio_samples(
-        filepath, [audio_stream_index], duration_secs, sample_duration=30,
-    )
-    wavs = samples.get(audio_stream_index, [])
-    t_extract = _time.monotonic() - t0
-    if not wavs:
-        logging.info(f"    {name} a:{audio_stream_index} — extraction failed ({t_extract:.1f}s)")
-        return "und", 0.0, "whisper_exhausted"
-
-    lang3: Optional[str] = None
-    conf3 = 0.0
-    try:
-        lang, conf = _run_whisper_on(wavs[:3], model_size="tiny")
-        if lang and conf >= min_confidence:
-            logging.info(
-                f"    {name} a:{audio_stream_index} -> {lang} ({conf:.2f}) tiny_3x30  "
-                f"{_time.monotonic() - t0:.1f}s"
-            )
-            return lang, conf, "whisper_tiny_3x30"
-
-        if len(wavs) > 3:
-            lang2, conf2 = _run_whisper_on(wavs, model_size="tiny")
-            if lang2 and conf2 >= min_confidence:
-                logging.info(
-                    f"    {name} a:{audio_stream_index} -> {lang2} ({conf2:.2f}) tiny_5x30  "
-                    f"{_time.monotonic() - t0:.1f}s"
-                )
-                return lang2, conf2, "whisper_tiny_5x30"
-
-        lang3, conf3 = _run_whisper_on(wavs, model_size="small")
-        if lang3 and conf3 >= min_confidence:
-            logging.info(
-                f"    {name} a:{audio_stream_index} -> {lang3} ({conf3:.2f}) small_5x30  "
-                f"{_time.monotonic() - t0:.1f}s"
-            )
-            return lang3, conf3, "whisper_small_5x30"
-    finally:
-        for w in wavs:
-            _safe_remove(w)
-
-    if lang3 and conf3 > 0:
-        logging.info(
-            f"    {name} a:{audio_stream_index} -> {lang3} ({conf3:.2f}) small_5x30_low_conf  "
-            f"{_time.monotonic() - t0:.1f}s"
+    for stage_idx, (model_size, sample_count, sample_duration) in enumerate(_LADDER_STAGES, start=1):
+        t_stage = _time.monotonic()
+        samples = _extract_all_audio_samples(
+            filepath,
+            [audio_stream_index],
+            duration_secs,
+            sample_duration=sample_duration,
+            sample_count=sample_count,
         )
-        return lang3, conf3, "whisper_small_5x30_low_conf"
+        wavs = samples.get(audio_stream_index, [])
+        if not wavs:
+            logging.warning(
+                f"    {name} a:{audio_stream_index} — stage {stage_idx} extraction "
+                f"failed (model={model_size}, want={sample_count}x{sample_duration}s)"
+            )
+            continue
+
+        try:
+            lang, conf = _run_whisper_on(wavs, model_size=model_size)
+            method = f"whisper_{model_size}_{sample_count}x{sample_duration}"
+            elapsed_stage = _time.monotonic() - t_stage
+            elapsed_total = _time.monotonic() - t0
+            if lang:
+                logging.info(
+                    f"    {name} a:{audio_stream_index} stage {stage_idx} ({method}) -> "
+                    f"{lang} ({conf:.2f}) in {elapsed_stage:.1f}s (total {elapsed_total:.1f}s)"
+                )
+                if conf > best_conf:
+                    best_lang, best_conf, best_method = lang, conf, method
+                if conf >= min_confidence:
+                    if cache_key:
+                        _cache_set(cache_key, lang, conf, method)
+                    return lang, conf, method
+            else:
+                logging.info(
+                    f"    {name} a:{audio_stream_index} stage {stage_idx} ({method}) -> "
+                    f"no detection in {elapsed_stage:.1f}s"
+                )
+        finally:
+            for w in wavs:
+                _safe_remove(w)
+
+    # All stages exhausted. Return best-so-far if any, else explicit und.
+    if best_lang:
+        method_low = f"{best_method}_low_conf"
+        if cache_key:
+            _cache_set(cache_key, best_lang, best_conf, method_low)
+        logging.info(
+            f"    {name} a:{audio_stream_index} -> {best_lang} ({best_conf:.2f}) "
+            f"{method_low} (total {_time.monotonic() - t0:.1f}s)"
+        )
+        return best_lang, best_conf, method_low
+
+    if cache_key:
+        _cache_set(cache_key, "und", 0.0, "whisper_exhausted")
     logging.info(
-        f"    {name} a:{audio_stream_index} -> und (step 3 exhausted)  {_time.monotonic() - t0:.1f}s"
+        f"    {name} a:{audio_stream_index} -> und (whisper_exhausted, "
+        f"total {_time.monotonic() - t0:.1f}s)"
     )
-    return "und", 0.0, "whisper_exhausted_step3"
+    return "und", 0.0, "whisper_exhausted"
 
 
 def detect_audio_language_whisper(
@@ -1188,6 +1365,9 @@ def detect_all_languages(file_entry: dict, use_whisper: bool = False) -> dict:
         if lang not in UND_LANGS:
             continue
 
+        # Title-based hint is allowed because the title field is human-authored
+        # ("English 5.1", "VFF", "Castellano") and gives a high-signal label
+        # when present. False positives here are rare.
         title = (stream.get("title") or "").lower()
         detected_from_title = None
         for hint, code in _TITLE_HINTS.items():
@@ -1198,34 +1378,60 @@ def detect_all_languages(file_entry: dict, use_whisper: bool = False) -> dict:
         if detected_from_title:
             stream["detected_language"] = detected_from_title
             stream["detection_confidence"] = 0.9
-            stream["detection_method"] = "heuristic"
+            stream["detection_method"] = "title_hint"
             continue
 
-        audio_streams = entry.get("audio_streams", [])
-        subs = entry.get("subtitle_streams", [])
-        if len(audio_streams) == 1:
-            sub_langs = set()
-            for s in subs:
-                sl = (s.get("language") or "und").lower().strip()
-                if sl not in UND_LANGS:
-                    sub_langs.add(sl)
-            for _idx, sl_detected in detected_text_langs.items():
-                sub_langs.add(sl_detected)
-            if len(sub_langs) == 1:
-                inferred = next(iter(sub_langs))
-                stream["detected_language"] = inferred
-                stream["detection_confidence"] = 0.9
-                stream["detection_method"] = "heuristic"
-                continue
+        # NOTE: the previous "single-audio + single-sub-language → infer audio
+        # matches sub" heuristic was DELETED on 2026-04-25. It misidentified
+        # foreign-dub episodes (e.g. Bluey with Swedish audio + Bazarr-added
+        # English sub got labelled English audio because there was 1 audio +
+        # 1 sub language). The only reliable signal for foreign audio is
+        # actually listening to it — which is what whisper does.
+        #
+        # No fallback inference here. If we have no whisper result and no
+        # title hint, the track stays `und` and the qualify stage flags it
+        # as FLAGGED_UNDETERMINED so the user can act.
 
         if use_whisper:
-            w_lang, w_conf = detect_audio_language_whisper(filepath, audio_idx, entry.get("duration_seconds", 0))
-            if w_lang and w_conf > 0.5:
+            w_lang, w_conf, w_method = detect_audio_language_deep(
+                filepath,
+                audio_idx,
+                entry.get("duration_seconds", 0),
+            )
+            if w_lang and w_lang != "und" and w_conf > 0.5:
                 stream["detected_language"] = w_lang
                 stream["detection_confidence"] = w_conf
-                stream["detection_method"] = "whisper"
+                stream["detection_method"] = w_method
 
     return entry
+
+
+def clear_legacy_heuristic_detections(file_entry: dict) -> tuple[dict, int]:
+    """Strip detection results that came from the deleted broken heuristic.
+
+    Returns ``(entry_copy, n_cleared)``. Streams whose ``detection_method``
+    is the now-defunct ``"heuristic"`` get their ``detected_language`` /
+    ``detection_confidence`` / ``detection_method`` fields wiped, so the
+    next ``detect_all_languages`` pass treats them as untouched and runs
+    whisper on them.
+
+    Called by qualify (Step 4) before re-detection on already-encoded files
+    so we don't trust stale labels. Title-hint detections (``title_hint``)
+    are kept — those are still considered valid.
+    """
+    import copy
+
+    entry = copy.deepcopy(file_entry)
+    cleared = 0
+    for track_kind in ("audio_streams", "subtitle_streams"):
+        for stream in entry.get(track_kind, []) or []:
+            method = stream.get("detection_method") or ""
+            if method == "heuristic":
+                stream.pop("detected_language", None)
+                stream.pop("detection_confidence", None)
+                stream.pop("detection_method", None)
+                cleared += 1
+    return entry, cleared
 
 
 # ---------------------------------------------------------------------------
