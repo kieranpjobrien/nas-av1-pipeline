@@ -131,6 +131,10 @@ export const api = {
   removeUpgradeSeed: (tier, title, year) =>
     deleteJSON(`/upgrades/seeds/${tier}?title=${encodeURIComponent(title)}&year=${year}`),
   rescoreUpgrade: (req) => postJSON("/upgrades/rescore", req),
+  // Flagged files (FLAGGED_FOREIGN_AUDIO / FLAGGED_UNDETERMINED / FLAGGED_MANUAL)
+  getFlaggedFiles: () => fetchJSON("/flagged"),
+  flaggedAction: (filepath, action) =>
+    postJSON("/flagged/action", { filepath, action }),
   getRadarrProfiles: () => fetchJSON("/upgrades/radarr/profiles"),
   radarrUpgrade: (req) => postJSON("/upgrades/radarr/upgrade", req),
   getSonarrProfiles: () => fetchJSON("/upgrades/sonarr/profiles"),

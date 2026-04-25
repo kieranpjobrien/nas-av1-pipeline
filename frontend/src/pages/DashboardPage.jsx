@@ -5,6 +5,7 @@ import { Glance } from "./dashboard/Glance";
 import { Library } from "./dashboard/Library";
 import { Worklist } from "./dashboard/Worklist";
 import { UpgradesPage } from "./UpgradesPage";
+import { FlaggedPage } from "./FlaggedPage";
 import { Storage } from "./dashboard/Storage";
 import { Settings } from "./dashboard/Settings";
 import { Logs } from "./dashboard/Logs";
@@ -29,6 +30,7 @@ const VIEW_LABELS = {
   library: "Library",
   worklist: "Worklist",
   upgrades: "Upgrades",
+  flagged: "Flagged",
   queue: "Encode queue",
   workers: "Workers",
   errors: "Errors",
@@ -151,6 +153,7 @@ function Sidebar({ view, setView, data, errorCount, workersActive, workersTotal,
         { k: "library", l: "Library", c: total != null ? fmtNum(total) : null },
         { k: "worklist", l: "Worklist" },
         { k: "upgrades", l: "Upgrades" },
+        { k: "flagged", l: "Flagged" },
       ],
     },
     {
@@ -1082,6 +1085,7 @@ export function DashboardPage({ onClassic, onFileClick }) {
             {view === "upgrades" && (
               <UpgradesPage onFileClick={onFileClick} />
             )}
+            {view === "flagged" && <FlaggedPage onFileClick={onFileClick} />}
             {view === "storage" && <Storage data={data} />}
             {view === "settings" && <Settings />}
             {view === "logs" && <Logs />}

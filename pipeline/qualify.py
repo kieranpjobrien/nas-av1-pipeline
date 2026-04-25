@@ -143,7 +143,12 @@ _ISO1_EQUIV: dict[str, set[str]] = {
     "it": {"it", "ita", "italian"},
     "ja": {"ja", "jpn", "japanese"},
     "ko": {"ko", "kor", "korean"},
-    "zh": {"zh", "chi", "zho", "chinese", "mandarin"},
+    # Chinese is genuinely ambiguous on tags (Mandarin vs Cantonese vs
+    # generic). TMDb uses cn (legacy) and zh; whisper returns zh. MKV tags
+    # are chi/zho/yue/cmn. Treat them as one bucket for the foreign-audio
+    # check — if any of them are present and TMDb says zh-anything, the
+    # file's "in original language" enough.
+    "zh": {"zh", "cn", "chi", "zho", "yue", "cmn", "chinese", "mandarin", "cantonese"},
     "pt": {"pt", "por", "portuguese"},
     "ru": {"ru", "rus", "russian"},
     "ar": {"ar", "ara", "arabic"},

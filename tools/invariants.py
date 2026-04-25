@@ -656,6 +656,128 @@ def check_no_banned_ffmpeg_flags_in_log(tail_bytes: int = 2_000_000) -> Invarian
 
 
 # --------------------------------------------------------------------------
+# HIGH — DONE with audio language ≠ TMDb original_language
+# --------------------------------------------------------------------------
+
+
+def check_no_done_with_foreign_audio(report: Optional[dict] = None) -> InvariantResult:
+    """Surface DONE files where the audio language doesn't match the original.
+
+    User policy (2026-04-25): "we want to watch in original language always."
+    Bluey (en-original) with only-Swedish audio, Amelie (fr-original) with
+    only-English-dub-only — both should have been FLAGGED, not silently
+    encoded to DONE.
+
+    Pre-fix data (older entries that pre-date the new qualifier) will
+    surface here. The fix is the qualify_audit CLI which retroactively
+    flags them. This invariant exists so we can confirm the audit ran +
+    catch any future regressions.
+
+    HIGH severity (not CRITICAL) because the file CAN still be played —
+    it's wrong-language but it's a real file. Distinct from
+    no_audioless_av1 which is a content-loss bug.
+    """
+    name = "no_done_with_foreign_audio"
+    severity: Severity = "HIGH"
+
+    if report is None:
+        report = _load_media_report()
+    if report is None:
+        return InvariantResult(name, severity, True, "media_report.json not present — skipped")
+
+    # Build a {filepath: status} map from pipeline_state for the DONE filter.
+    conn = _open_state_db()
+    if conn is None:
+        return InvariantResult(name, severity, True, "state DB unavailable — skipped")
+    try:
+        rows = conn.execute(
+            "SELECT filepath FROM pipeline_files WHERE LOWER(status) = 'done'"
+        ).fetchall()
+    except sqlite3.Error:
+        return InvariantResult(name, severity, True, "state DB query failed — skipped")
+    finally:
+        conn.close()
+    done_paths = {r[0] for r in rows}
+
+    # Lazy import to avoid the qualify module loading whisper deps when
+    # invariants are checked from contexts that don't need them.
+    from pipeline.qualify import _languages_equivalent  # noqa: PLC0415
+
+    offenders: list[str] = []
+    needs_audit: list[str] = []
+    sampled = 0
+    for entry in report.get("files", []) or []:
+        fp = entry.get("filepath")
+        if not fp or fp not in done_paths:
+            continue
+        sampled += 1
+        tmdb = entry.get("tmdb") or {}
+        original = (tmdb.get("original_language") or "").lower().strip()
+        if not original:
+            continue  # can't evaluate without ground truth
+        audio_streams = entry.get("audio_streams") or []
+        if not audio_streams:
+            continue  # zero-audio is its own invariant
+        # Has any track that matches original_language?
+        any_match = False
+        any_proven_foreign = False
+        any_unverified_und = False
+        for s in audio_streams:
+            tag = (s.get("language") or "").lower().strip()
+            detected = (s.get("detected_language") or "").lower().strip()
+            for cand in (tag, detected):
+                if cand and cand not in {"und", "unk"} and _languages_equivalent(cand, original):
+                    any_match = True
+                    break
+            if any_match:
+                break
+            # Track has a confident detected language that's NOT original — proven foreign
+            if detected and detected not in {"und", "unk"} and not _languages_equivalent(detected, original):
+                any_proven_foreign = True
+            # Track is und with no detection — needs audit before we can call it
+            if (not tag or tag in {"und", "unk"}) and not detected:
+                any_unverified_und = True
+        if any_match:
+            continue
+        # No track matches. Decide: hard violation (proven foreign) or
+        # soft "needs audit" (only und-undetected, no whisper run yet).
+        if any_proven_foreign:
+            offenders.append(fp)
+        elif any_unverified_und:
+            needs_audit.append(fp)
+
+    passed = not offenders
+    if offenders:
+        message = (
+            f"{len(offenders)} DONE file(s) with detected audio ≠ original_language "
+            f"(plus {len(needs_audit)} pending whisper audit)"
+        )
+    elif needs_audit:
+        # No proven violations — but there's unaudited content. Pass the
+        # invariant with a hint, don't fail it: "needs audit" is a workflow
+        # state, not a discipline breach.
+        message = (
+            f"all proven-language DONE files match their original; "
+            f"{len(needs_audit)} files still pending whisper audit "
+            f"(run `uv run python -m tools.qualify_audit` after stopping pipeline)"
+        )
+    else:
+        message = "all DONE files have at least one audio track in the original language"
+    return InvariantResult(
+        name,
+        severity,
+        passed,
+        message,
+        violations=offenders[:50],
+        details={
+            "sampled_done": sampled,
+            "offenders": len(offenders),
+            "needs_audit": len(needs_audit),
+        },
+    )
+
+
+# --------------------------------------------------------------------------
 # Orchestration
 # --------------------------------------------------------------------------
 
@@ -666,6 +788,7 @@ def _invariant_runners(skip_ssh: bool) -> list[Callable[[], InvariantResult]]:
         check_no_audioless_av1,
         check_no_done_with_deferred_reason,
         check_no_done_with_error_reason,
+        check_no_done_with_foreign_audio,
         lambda: check_no_stale_tmp_on_nas(skip_ssh=skip_ssh),
         lambda: check_no_zombie_mkvmerge(skip_ssh=skip_ssh),
         check_no_ghost_python_processes,

@@ -249,6 +249,60 @@ def full_gamut(
             except Exception as e:
                 logging.warning(f"  Language detection failed (non-fatal): {e}")
 
+        # === STEP 3b: Pre-encode qualification ===
+        # Catches the foreign-audio class (Bluey-Swedish-dub, Amelie-English-dub-only,
+        # Spirited-Away-English-dub-only) BEFORE we burn 5-15 min of GPU time
+        # producing a flagged-but-encoded AV1 file. Inline qualification runs
+        # WITHOUT whisper here — whisper requires a free GPU which conflicts
+        # with NVENC on the same chip (BSOD risk per rule 9a). Whisper data,
+        # if present, was populated earlier (offline `tools.qualify_audit` run
+        # or the fetch worker's enrichment pass) and qualify_file uses it.
+        try:
+            from pipeline.qualify import QualifyOutcome, qualify_file
+
+            qresult = qualify_file(item, config, use_whisper=False)
+            if qresult.outcome == QualifyOutcome.FLAGGED_FOREIGN:
+                logging.warning(
+                    f"  FLAGGED_FOREIGN_AUDIO: {filename} — {qresult.rationale}"
+                )
+                state.set_file(
+                    filepath,
+                    FileStatus.FLAGGED_FOREIGN_AUDIO,
+                    mode="full_gamut",
+                    stage="qualify",
+                    reason=qresult.rationale,
+                )
+                _cleanup(local_path, None, None)
+                return False
+            if qresult.outcome == QualifyOutcome.FLAGGED_UND:
+                logging.warning(
+                    f"  FLAGGED_UNDETERMINED: {filename} — {qresult.rationale}"
+                )
+                state.set_file(
+                    filepath,
+                    FileStatus.FLAGGED_UNDETERMINED,
+                    mode="full_gamut",
+                    stage="qualify",
+                    reason=qresult.rationale,
+                )
+                _cleanup(local_path, None, None)
+                return False
+            if qresult.outcome == QualifyOutcome.NOTHING_TO_DO:
+                # Already compliant — no encode needed.
+                logging.info(f"  Already compliant: {filename}")
+                state.set_file(
+                    filepath, FileStatus.DONE, mode="full_gamut", reason="already compliant"
+                )
+                _cleanup(local_path, None, None)
+                return True
+            # QUALIFIED: continue with the existing encode flow. The keep
+            # indices are computed inside build_ffmpeg_cmd from item's stream
+            # lists, which reflect the language detection above.
+        except Exception as e:
+            # Qualification itself shouldn't be a hard blocker — log and continue.
+            # The current language detection above is still in effect.
+            logging.warning(f"  Qualify pre-check failed (non-fatal): {e}")
+
         # === STEP 4: Find external subs ===
         # Also eagerly computed by the fetch worker — use cached list if present.
         cached_external = existing.get("external_subs") if existing else None
