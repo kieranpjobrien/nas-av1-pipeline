@@ -19,6 +19,7 @@ frontend/dist/
 
 # Claude Code local settings
 .claude/settings.local.json
+.claude/worktrees/
 
 # Generated data / reports
 media_report.json
@@ -31,6 +32,7 @@ series_fix_ext_report.txt
 
 # Local scratch scripts (one-offs, smoke tests)
 scratch/
+_sab_setup/
 
 # Runtime locks
 .claude/scheduled_tasks.lock
