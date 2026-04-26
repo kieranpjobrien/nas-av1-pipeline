@@ -349,12 +349,21 @@ class PipelineState:
     def reset_non_terminal(self) -> int:
         """Reset any non-terminal states (from crashed runs) back to pending.
 
+        TERMINAL_STATUSES (DONE + all FLAGGED_*) are preserved — those are
+        deliberate end states the user must action via the UI, not crash
+        residue. Earlier versions excluded only DONE/PENDING, which silently
+        flipped FLAGGED_* back to PENDING on every pipeline restart and let
+        the encode loop re-process audit-flagged files with the wrong audio.
+
         Returns the number of rows reset.
         """
         with self._lock:
+            preserve = ["pending"] + [s.value for s in TERMINAL_STATUSES]
+            placeholders = ",".join("?" * len(preserve))
             count = self._conn.execute(
-                "UPDATE pipeline_files SET status = ?, stage = NULL, error = NULL WHERE status NOT IN (?, ?)",
-                ("pending", "done", "pending"),
+                f"UPDATE pipeline_files SET status = ?, stage = NULL, error = NULL "
+                f"WHERE status NOT IN ({placeholders})",
+                ["pending", *preserve],
             ).rowcount
             self._conn.commit()
             return count

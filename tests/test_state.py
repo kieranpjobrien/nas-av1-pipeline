@@ -291,6 +291,83 @@ class TestNewStatusRoundTrip:
         assert "sv" in entry["reason"]
         state.close()
 
+
+class TestResetNonTerminal:
+    """reset_non_terminal must preserve every TERMINAL_STATUS, not just DONE.
+
+    Regression: 2026-04-26. The earlier SQL excluded only ('done', 'pending'),
+    so on every pipeline restart all FLAGGED_* rows silently flipped back to
+    PENDING, the queue builder picked them up, and the encode loop produced
+    AV1 files with the same wrong audio the audit had just flagged. ~942 files
+    were affected before the bug was caught.
+    """
+
+    def test_preserves_done(self, tmp_state_db):
+        state = PipelineState(tmp_state_db)
+        state.set_file("done.mkv", FileStatus.DONE)
+        state.reset_non_terminal()
+        assert state.get_file("done.mkv")["status"] == "done"
+        state.close()
+
+    def test_preserves_all_flagged_statuses(self, tmp_state_db):
+        """Every FLAGGED_* must survive a reset — they are deliberate end states."""
+        state = PipelineState(tmp_state_db)
+        state.set_file(
+            "foreign.mkv",
+            FileStatus.FLAGGED_FOREIGN_AUDIO,
+            reason="no audio matches original_language=en (detected: a:0=sv)",
+        )
+        state.set_file(
+            "und.mkv",
+            FileStatus.FLAGGED_UNDETERMINED,
+            reason="audio is `und` and whisper couldn't identify it",
+        )
+        state.set_file("manual.mkv", FileStatus.FLAGGED_MANUAL, reason="user parked")
+
+        state.reset_non_terminal()
+
+        assert state.get_file("foreign.mkv")["status"] == "flagged_foreign_audio"
+        assert state.get_file("und.mkv")["status"] == "flagged_undetermined"
+        assert state.get_file("manual.mkv")["status"] == "flagged_manual"
+        # And reasons must survive — recovery depends on them
+        assert "sv" in state.get_file("foreign.mkv")["reason"]
+        assert "whisper" in state.get_file("und.mkv")["reason"]
+        state.close()
+
+    def test_resets_active_states_to_pending(self, tmp_state_db):
+        """PROCESSING / FETCHING / UPLOADING / QUALIFYING all reset to PENDING."""
+        state = PipelineState(tmp_state_db)
+        state.set_file("p.mkv", FileStatus.PROCESSING)
+        state.set_file("f.mkv", FileStatus.FETCHING)
+        state.set_file("u.mkv", FileStatus.UPLOADING)
+        state.set_file("q.mkv", FileStatus.QUALIFYING)
+
+        reset_count = state.reset_non_terminal()
+
+        assert reset_count == 4
+        for name in ("p.mkv", "f.mkv", "u.mkv", "q.mkv"):
+            assert state.get_file(name)["status"] == "pending"
+        state.close()
+
+    def test_resets_error_to_pending(self, tmp_state_db):
+        """ERROR is NOT terminal — gets retried by going back to PENDING."""
+        state = PipelineState(tmp_state_db)
+        state.set_file("err.mkv", FileStatus.ERROR, error="ffmpeg rc=1")
+        state.reset_non_terminal()
+        assert state.get_file("err.mkv")["status"] == "pending"
+        state.close()
+
+    def test_returncount_matches_reset_rows(self, tmp_state_db):
+        """Mixed bag: only non-terminal rows are counted toward the return value."""
+        state = PipelineState(tmp_state_db)
+        state.set_file("done.mkv", FileStatus.DONE)
+        state.set_file("flag.mkv", FileStatus.FLAGGED_FOREIGN_AUDIO)
+        state.set_file("pend.mkv", FileStatus.PENDING)
+        state.set_file("proc.mkv", FileStatus.PROCESSING)  # only this one resets
+
+        assert state.reset_non_terminal() == 1
+        state.close()
+
     def test_flagged_undetermined_persists(self, tmp_state_db):
         state = PipelineState(tmp_state_db)
         fp = r"\\KieranNAS\Media\Movies\Mystery (1995).mkv"

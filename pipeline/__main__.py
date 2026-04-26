@@ -10,7 +10,7 @@ import sys
 from paths import MEDIA_REPORT, STAGING_DIR
 from pipeline.config import build_config
 from pipeline.control import PipelineControl
-from pipeline.state import PipelineState
+from pipeline.state import PipelineState, is_terminal
 
 
 def setup_logging(staging_dir: str):
@@ -48,10 +48,14 @@ def build_queues(report_path: str, config: dict, state: PipelineState, control: 
         if control.should_skip(filepath):
             continue
 
-        # Already done in pipeline? Skip. To force re-processing, delete the
-        # state DB row for the file.
+        # Already in a terminal state? Skip. DONE means encoded successfully;
+        # FLAGGED_* means the audit / qualify step deliberately parked the file
+        # for the user to action via the UI. Earlier versions only skipped
+        # "done", so flagged rows landed back in the queue and got re-encoded
+        # with the wrong audio. To force re-processing, delete the state DB
+        # row for the file.
         existing = state.get_file(filepath)
-        if existing and existing["status"] == "done":
+        if existing and is_terminal(existing["status"]):
             continue
 
         if codec_raw == "av1":
