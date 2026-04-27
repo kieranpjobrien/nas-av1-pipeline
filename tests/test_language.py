@@ -293,3 +293,283 @@ def test_detect_language_cjk_hangul_is_korean() -> None:
     lang, conf = detect_language(korean)
     assert lang == "ko"
     assert conf > 0.5
+
+
+# ---------------------------------------------------------------------------
+# Filename language hint (D-tier heuristic — runs before whisper)
+# ---------------------------------------------------------------------------
+
+
+def test_filename_hint_picks_up_german_token() -> None:
+    """`Movie.German.1080p.BluRay.mkv` → 'de' via the filename hint."""
+    from pipeline.language import _detect_lang_from_filename
+
+    assert _detect_lang_from_filename(r"\\NAS\Movies\Foo\Foo.German.1080p.BluRay.mkv") == "de"
+
+
+def test_filename_hint_picks_up_iso_token() -> None:
+    """3-letter ISO codes embedded in release names also work — `SPA`, `JPN`."""
+    from pipeline.language import _detect_lang_from_filename
+
+    assert _detect_lang_from_filename("Movie.SPA.1080p.x264.mkv") == "es"
+    assert _detect_lang_from_filename("Anime.JPN.WEB-DL.mkv") == "ja"
+
+
+def test_filename_hint_ignores_multi_language_releases() -> None:
+    """`MULTi` / `DUAL` / `MULTILANG` mean we can't pick one — return None."""
+    from pipeline.language import _detect_lang_from_filename
+
+    assert _detect_lang_from_filename("Movie.MULTi.1080p.mkv") is None
+    assert _detect_lang_from_filename("Movie.DUAL.German.English.mkv") is None
+
+
+def test_filename_hint_returns_none_when_ambiguous() -> None:
+    """If two distinct languages are present in the filename, return None
+    rather than guessing wrong."""
+    from pipeline.language import _detect_lang_from_filename
+
+    # German + Italian both appear → ambiguous
+    assert _detect_lang_from_filename("Movie.German.iTALiAN.1080p.mkv") is None
+
+
+def test_filename_hint_returns_none_for_plain_titles() -> None:
+    """Filenames without language tokens — return None, fall through to other signals."""
+    from pipeline.language import _detect_lang_from_filename
+
+    assert _detect_lang_from_filename("Inception (2010).mkv") is None
+    assert _detect_lang_from_filename("Avatar.2009.1080p.BluRay.x264.mkv") is None
+
+
+def test_filename_hint_token_boundary_not_substring() -> None:
+    """`English` as a substring of an unrelated word shouldn't false-positive.
+    Tokens are split on `.`/`_`/`-`/space — substring matches don't apply."""
+    from pipeline.language import _detect_lang_from_filename
+
+    # "engineering" contains "eng" as substring but not as a separate token
+    assert _detect_lang_from_filename("Engineering.Disasters.S01E01.mkv") is None
+
+
+def test_detect_all_languages_applies_filename_hint_on_solo_und() -> None:
+    """detect_all_languages should set detected_language='de' on a single
+    und audio track when the filename has a strong German token."""
+    entry = {
+        "filepath": r"\\NAS\Movies\Foo (2020)\Foo.German.1080p.mkv",
+        "filename": "Foo.German.1080p.mkv",
+        "library_type": "movie",
+        "duration_seconds": 6000,
+        "audio_streams": [
+            {"language": "und", "codec": "eac3", "channels": 6, "title": ""},
+        ],
+        "subtitle_streams": [],
+    }
+    enriched = detect_all_languages(entry, use_whisper=False)
+    a = enriched["audio_streams"][0]
+    assert a.get("detected_language") == "de"
+    assert a.get("detection_method") == "filename_hint"
+
+
+def test_detect_all_languages_skips_filename_hint_when_multiple_und_tracks() -> None:
+    """With multiple und tracks, we can't tell which one the filename refers to.
+    The hint must NOT be applied — better to leave them und than mark a dub
+    as the original."""
+    entry = {
+        "filepath": r"\\NAS\Movies\Foo (2020)\Foo.German.mkv",
+        "filename": "Foo.German.mkv",
+        "library_type": "movie",
+        "duration_seconds": 6000,
+        "audio_streams": [
+            {"language": "und", "codec": "eac3", "channels": 6, "title": ""},
+            {"language": "und", "codec": "eac3", "channels": 2, "title": ""},
+        ],
+        "subtitle_streams": [],
+    }
+    enriched = detect_all_languages(entry, use_whisper=False)
+    for a in enriched["audio_streams"]:
+        assert a.get("detection_method") != "filename_hint", (
+            "filename hint must not fire when there are multiple und tracks"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Channel-layout + bitrate heuristic (runs after filename hint, before whisper)
+# ---------------------------------------------------------------------------
+
+
+def test_channel_bitrate_heuristic_corroborated_signals_pick_original() -> None:
+    """5.1+640k vs 2.0+192k, TMDb says es → 5.1 track tagged es, conf 0.75.
+
+    Both channel and bitrate signals agree on track 0. We tag it with TMDb's
+    original_language ('es') and label as ``heuristic_channel_bitrate`` with
+    the corroborated 0.75 confidence.
+    """
+    entry = {
+        "filepath": r"\\NAS\Movies\Foo (2020)\Foo.mkv",
+        "duration_seconds": 6000,
+        "audio_streams": [
+            {"language": "und", "codec": "eac3", "channels": 6, "bitrate_kbps": 640, "title": ""},
+            {"language": "und", "codec": "eac3", "channels": 2, "bitrate_kbps": 192, "title": ""},
+        ],
+        "subtitle_streams": [],
+        "tmdb": {"original_language": "es"},
+    }
+    enriched = detect_all_languages(entry, use_whisper=False)
+    a0 = enriched["audio_streams"][0]
+    a1 = enriched["audio_streams"][1]
+    assert a0.get("detected_language") == "es"
+    assert a0.get("detection_method") == "heuristic_channel_bitrate"
+    assert a0.get("detection_confidence") == 0.75
+    # The losing track must remain untouched.
+    assert a1.get("detected_language") is None
+    assert a1.get("detection_method") is None
+
+
+def test_channel_bitrate_heuristic_no_signal_on_identical_tracks() -> None:
+    """Two identical 2.0 / 192k und tracks → neither signal qualifies, no winner."""
+    entry = {
+        "filepath": r"\\NAS\Movies\Foo\Foo.mkv",
+        "duration_seconds": 6000,
+        "audio_streams": [
+            {"language": "und", "codec": "eac3", "channels": 2, "bitrate_kbps": 192, "title": ""},
+            {"language": "und", "codec": "eac3", "channels": 2, "bitrate_kbps": 192, "title": ""},
+        ],
+        "subtitle_streams": [],
+        "tmdb": {"original_language": "es"},
+    }
+    enriched = detect_all_languages(entry, use_whisper=False)
+    for a in enriched["audio_streams"]:
+        assert a.get("detected_language") is None
+        assert a.get("detection_method") is None
+
+
+def test_channel_bitrate_heuristic_channel_only_uses_065() -> None:
+    """Only channel signal applies (similar bitrates, ratio < 1.5x) → conf 0.65.
+
+    5.1 vs 2.0 channel split is decisive, but bitrates of 384 / 320 kbps fall
+    well under the 1.5x ratio threshold, so the bitrate signal does not vote.
+    """
+    entry = {
+        "filepath": r"\\NAS\Movies\Foo\Foo.mkv",
+        "duration_seconds": 6000,
+        "audio_streams": [
+            {"language": "und", "codec": "eac3", "channels": 6, "bitrate_kbps": 384, "title": ""},
+            {"language": "und", "codec": "eac3", "channels": 2, "bitrate_kbps": 320, "title": ""},
+        ],
+        "subtitle_streams": [],
+        "tmdb": {"original_language": "ja"},
+    }
+    enriched = detect_all_languages(entry, use_whisper=False)
+    a0 = enriched["audio_streams"][0]
+    assert a0.get("detected_language") == "ja"
+    assert a0.get("detection_method") == "heuristic_channel_bitrate"
+    assert a0.get("detection_confidence") == 0.65
+
+
+def test_channel_bitrate_heuristic_skipped_for_single_und_track() -> None:
+    """One und track → heuristic doesn't fire (filename hint already handles solo-und).
+
+    The heuristic deliberately requires at least 2 und tracks because, with
+    only one, there's nothing to compare against and the filename hint covers
+    the use case more precisely.
+    """
+    entry = {
+        "filepath": r"\\NAS\Movies\Foo\Foo.mkv",
+        "duration_seconds": 6000,
+        "audio_streams": [
+            {"language": "und", "codec": "eac3", "channels": 6, "bitrate_kbps": 640, "title": ""},
+        ],
+        "subtitle_streams": [],
+        "tmdb": {"original_language": "es"},
+    }
+    enriched = detect_all_languages(entry, use_whisper=False)
+    a = enriched["audio_streams"][0]
+    assert a.get("detection_method") != "heuristic_channel_bitrate"
+
+
+def test_channel_bitrate_heuristic_skipped_when_no_tmdb_data() -> None:
+    """Without TMDb original_language we can't claim a specific language, so
+    the heuristic must not fire even when its signals would otherwise win."""
+    entry = {
+        "filepath": r"\\NAS\Movies\Foo\Foo.mkv",
+        "duration_seconds": 6000,
+        "audio_streams": [
+            {"language": "und", "codec": "eac3", "channels": 6, "bitrate_kbps": 640, "title": ""},
+            {"language": "und", "codec": "eac3", "channels": 2, "bitrate_kbps": 192, "title": ""},
+        ],
+        "subtitle_streams": [],
+        # No 'tmdb' key at all.
+    }
+    enriched = detect_all_languages(entry, use_whisper=False)
+    for a in enriched["audio_streams"]:
+        assert a.get("detected_language") is None
+        assert a.get("detection_method") is None
+
+    # Empty original_language string is also a no-op.
+    entry["tmdb"] = {"original_language": ""}
+    enriched2 = detect_all_languages(entry, use_whisper=False)
+    for a in enriched2["audio_streams"]:
+        assert a.get("detected_language") is None
+
+
+def test_channel_bitrate_heuristic_skipped_when_all_tracks_tagged() -> None:
+    """All audio tracks already have an explicit language → no und tracks for
+    the heuristic to act on, even with strong channel/bitrate signals."""
+    entry = {
+        "filepath": r"\\NAS\Movies\Foo\Foo.mkv",
+        "duration_seconds": 6000,
+        "audio_streams": [
+            {"language": "eng", "codec": "eac3", "channels": 6, "bitrate_kbps": 640, "title": ""},
+            {"language": "spa", "codec": "eac3", "channels": 2, "bitrate_kbps": 192, "title": ""},
+        ],
+        "subtitle_streams": [],
+        "tmdb": {"original_language": "es"},
+    }
+    enriched = detect_all_languages(entry, use_whisper=False)
+    for a in enriched["audio_streams"]:
+        # detected_language stays None because the explicit lang tag was
+        # already authoritative — heuristic must not overwrite tagged tracks.
+        assert a.get("detected_language") is None
+        assert a.get("detection_method") is None
+
+
+def test_channel_bitrate_heuristic_bitrate_only_uses_06() -> None:
+    """Both tracks 2.0 (no channel signal) but one is 4x the other → bitrate-only,
+    confidence 0.6. Confirms the single-signal branches are wired correctly."""
+    entry = {
+        "filepath": r"\\NAS\Movies\Foo\Foo.mkv",
+        "duration_seconds": 6000,
+        "audio_streams": [
+            {"language": "und", "codec": "eac3", "channels": 2, "bitrate_kbps": 640, "title": ""},
+            {"language": "und", "codec": "eac3", "channels": 2, "bitrate_kbps": 160, "title": ""},
+        ],
+        "subtitle_streams": [],
+        "tmdb": {"original_language": "fr"},
+    }
+    enriched = detect_all_languages(entry, use_whisper=False)
+    a0 = enriched["audio_streams"][0]
+    assert a0.get("detected_language") == "fr"
+    assert a0.get("detection_method") == "heuristic_channel_bitrate"
+    assert a0.get("detection_confidence") == 0.6
+
+
+def test_channel_bitrate_heuristic_conflicting_signals_no_winner() -> None:
+    """Channel signal points to one track, bitrate signal to another → abort.
+
+    Conflicting signals mean we can't confidently identify the original. The
+    heuristic must not pick a side; both tracks stay und.
+    """
+    entry = {
+        "filepath": r"\\NAS\Movies\Foo\Foo.mkv",
+        "duration_seconds": 6000,
+        "audio_streams": [
+            # 5.1 surround but lower bitrate
+            {"language": "und", "codec": "eac3", "channels": 6, "bitrate_kbps": 192, "title": ""},
+            # 2.0 stereo but a much higher bitrate
+            {"language": "und", "codec": "eac3", "channels": 2, "bitrate_kbps": 640, "title": ""},
+        ],
+        "subtitle_streams": [],
+        "tmdb": {"original_language": "es"},
+    }
+    enriched = detect_all_languages(entry, use_whisper=False)
+    for a in enriched["audio_streams"]:
+        assert a.get("detected_language") is None
+        assert a.get("detection_method") is None

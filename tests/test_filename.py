@@ -38,6 +38,43 @@ class TestCleanSeriesName:
         assert result is not None
         assert "S01E01E02" in result
 
+    def test_multi_episode_hyphen_range_with_episode_titles(self):
+        """Hyphen-separated SxxExx-Eyy ranges preserve marker AND episode titles.
+
+        Regression: cleaner used to match only S01E22 and drop -E24 + titles,
+        producing collisions like Puffin.Rock.mkv x N for a multi-episode show.
+        """
+        result = clean_series_name(
+            "Puffin Rock - S01E22-E24 - Finding Bernie + The Foggy Day + Run, Flap, Fly"
+        )
+        assert result is not None
+        assert "Puffin Rock" in result
+        assert "S01E22-E24" in result
+        # Episode title text after the range must survive
+        assert "Finding Bernie" in result
+        assert "Foggy Day" in result
+        assert "Run, Flap, Fly" in result
+
+    def test_multi_episode_hyphen_short_range(self):
+        """Short-form hyphen range S03E05-06 is canonicalised to S03E05-E06."""
+        result = clean_series_name("Show - S03E05-06 - Title Goes Here")
+        assert result is not None
+        assert "S03E05-E06" in result
+        assert "Title Goes Here" in result
+
+    def test_multi_episode_dot_separated(self):
+        """Dot-separated multi-episode SxxExx.Eyy keeps both episodes."""
+        result = clean_series_name("Show.S01E22.E23.Episode.Name.1080p")
+        assert result is not None
+        assert "S01E22-E23" in result
+        assert "Episode Name" in result
+
+    def test_multi_episode_does_not_swallow_resolution(self):
+        """A trailing 1080/720 must not be swallowed by the multi-episode regex."""
+        # If the regex were greedy, S01E02.1080p could match "S01E02.10".
+        result = clean_series_name("Show.S01E02.1080p.WEB-DL.x264-GROUP")
+        assert result == "Show S01E02"
+
     def test_no_episode_marker_returns_none(self):
         """Filenames without SxxExx return None (not a series)."""
         result = clean_series_name("Just.A.Random.Movie.2020.1080p")

@@ -372,9 +372,11 @@ class TestAudioPassthroughPolicy:
         # Transcoding to EAC-3 would drop the object layer.
         assert _should_transcode_audio({"codec_raw": "truehd", "channels": 8}, _base_config()) is False
 
-    def test_opus_passthrough(self) -> None:
-        # Opus is already an efficient lossy codec — no benefit to re-encoding.
-        assert _should_transcode_audio({"codec_raw": "opus"}, _base_config()) is False
+    def test_opus_now_transcoded(self) -> None:
+        # Opus was previously passthrough on the assumption of "efficient lossy,
+        # already good", but Sonos Arc cannot decode Opus natively — Plex transcoded
+        # it on every play. Pre-transcoding to EAC-3 once eliminates that overhead.
+        assert _should_transcode_audio({"codec_raw": "opus"}, _base_config()) is True
 
     def test_dts_hd_ma_still_transcoded(self) -> None:
         # DTS-HD MA is lossless but doesn't carry Atmos — transcode to EAC-3 640k.
@@ -386,3 +388,229 @@ class TestAudioPassthroughPolicy:
     def test_ac3_still_transcoded(self) -> None:
         # Plain AC-3 → upgrade to EAC-3 (better codec at same 640k).
         assert _should_transcode_audio({"codec_raw": "ac3"}, _base_config()) is True
+
+
+class TestOriginalLanguageAudioKeep:
+    """The "original_language" audio-keep policy.
+
+    Strips foreign dubs (including English dubs of foreign-origin films).
+    Falls back to the legacy KEEP_LANGS rule when there's no TMDb data.
+    Conservative on `und` tracks whisper hasn't resolved.
+    """
+
+    @staticmethod
+    def _config() -> dict:
+        cfg = _base_config()
+        cfg["audio_keep_policy"] = "original_language"
+        cfg["audio_keep_english_with_original"] = False
+        return cfg
+
+    def test_spanish_original_strips_english_dub(self) -> None:
+        """Y tu mamá también-style: TMDb original=es, keep Spanish, strip English dub."""
+        from pipeline.ffmpeg import _select_audio_streams
+
+        item = {
+            "filename": "Y Tu Mama Tambien.mkv",
+            "tmdb": {"original_language": "es"},
+            "audio_streams": [
+                {"index": 0, "codec_raw": "eac3", "language": "eng", "title": "English"},
+                {"index": 1, "codec_raw": "eac3", "language": "spa", "title": "Spanish"},
+                {"index": 2, "codec_raw": "eac3", "language": "fra", "title": "French dub"},
+            ],
+        }
+        kept = _select_audio_streams(item, self._config())
+        assert kept == [1], "should strip English + French, keep Spanish"
+
+    def test_english_original_keeps_english_strips_dub(self) -> None:
+        """Bluey-style: TMDb original=en, English original kept, Swedish dub stripped."""
+        from pipeline.ffmpeg import _select_audio_streams
+
+        item = {
+            "filename": "Bluey S01E01.mkv",
+            "tmdb": {"original_language": "en"},
+            "audio_streams": [
+                {"index": 0, "codec_raw": "eac3", "language": "eng"},
+                {"index": 1, "codec_raw": "eac3", "language": "swe"},
+            ],
+        }
+        kept = _select_audio_streams(item, self._config())
+        assert kept == [0], "should strip Swedish dub, keep English original"
+
+    def test_no_tmdb_falls_back_to_legacy_rule(self) -> None:
+        """When TMDb has no original_language, use the historical English+und+stream0 rule."""
+        from pipeline.ffmpeg import _select_audio_streams
+
+        item = {
+            "filename": "Untagged.mkv",
+            "tmdb": {},  # no TMDb data
+            "audio_streams": [
+                {"index": 0, "codec_raw": "eac3", "language": "fra"},
+                {"index": 1, "codec_raw": "eac3", "language": "eng"},
+                {"index": 2, "codec_raw": "eac3", "language": "spa"},
+            ],
+        }
+        kept = _select_audio_streams(item, self._config())
+        # Legacy rule: stream 0 + English/und. French stream 0 stays, English stays, Spanish goes.
+        assert kept == [0, 1]
+
+    def test_und_track_not_stripped_conservatively(self) -> None:
+        """Tracks with `und` language whisper hasn't resolved must NOT be stripped."""
+        from pipeline.ffmpeg import _select_audio_streams
+
+        item = {
+            "filename": "Movie.mkv",
+            "tmdb": {"original_language": "es"},
+            "audio_streams": [
+                {"index": 0, "codec_raw": "eac3", "language": "spa"},
+                {"index": 1, "codec_raw": "eac3", "language": "und"},  # unresolved
+                {"index": 2, "codec_raw": "eac3", "language": "deu"},  # German dub
+            ],
+        }
+        kept = _select_audio_streams(item, self._config())
+        # Spanish (original) + und (conservative keep). German stripped.
+        assert kept == [0, 1]
+
+    def test_keep_english_too_flag(self) -> None:
+        """When keep_english_with_original=True, English is kept alongside the original."""
+        from pipeline.ffmpeg import _select_audio_streams
+
+        cfg = self._config()
+        cfg["audio_keep_english_with_original"] = True
+
+        item = {
+            "filename": "Foreign Film.mkv",
+            "tmdb": {"original_language": "ja"},
+            "audio_streams": [
+                {"index": 0, "codec_raw": "eac3", "language": "jpn"},
+                {"index": 1, "codec_raw": "eac3", "language": "eng"},
+                {"index": 2, "codec_raw": "eac3", "language": "fra"},
+            ],
+        }
+        kept = _select_audio_streams(item, cfg)
+        assert kept == [0, 1], "should keep Japanese (original) + English (extra), strip French"
+
+    def test_iso_code_equivalence(self) -> None:
+        """ISO 639-1 (es) matches ISO 639-2 (spa) and the English name."""
+        from pipeline.ffmpeg import _select_audio_streams
+
+        item = {
+            "filename": "Movie.mkv",
+            "tmdb": {"original_language": "es"},  # ISO 639-1
+            "audio_streams": [
+                {"index": 0, "codec_raw": "eac3", "language": "spa"},  # ISO 639-2
+                {"index": 1, "codec_raw": "eac3", "language": "spanish"},  # English name
+                {"index": 2, "codec_raw": "eac3", "language": "eng"},  # genuinely foreign
+            ],
+        }
+        kept = _select_audio_streams(item, self._config())
+        assert kept == [0, 1], "es ≡ spa ≡ spanish (all match); eng is foreign"
+
+    def test_whisper_overrides_metadata(self) -> None:
+        """detected_language (whisper) takes precedence over the language tag."""
+        from pipeline.ffmpeg import _select_audio_streams
+
+        item = {
+            "filename": "Movie.mkv",
+            "tmdb": {"original_language": "es"},
+            "audio_streams": [
+                # Tagged eng but whisper detected Spanish — whisper wins.
+                {"index": 0, "codec_raw": "eac3", "language": "eng", "detected_language": "spa"},
+                # Genuinely English.
+                {"index": 1, "codec_raw": "eac3", "language": "eng"},
+            ],
+        }
+        kept = _select_audio_streams(item, self._config())
+        assert kept == [0], "whisper-detected Spanish wins over tagged eng"
+
+    def test_disabled_master_switch_keeps_all(self) -> None:
+        """strip_non_english_audio=False overrides the policy — keep everything."""
+        from pipeline.ffmpeg import _select_audio_streams
+
+        cfg = self._config()
+        cfg["strip_non_english_audio"] = False
+        item = {
+            "filename": "Anything.mkv",
+            "tmdb": {"original_language": "es"},
+            "audio_streams": [
+                {"index": 0, "codec_raw": "eac3", "language": "fra"},
+                {"index": 1, "codec_raw": "eac3", "language": "deu"},
+            ],
+        }
+        assert _select_audio_streams(item, cfg) is None  # None = keep all
+
+
+class TestTMDbMetadataPreEncode:
+    """ffmpeg -metadata flags from TMDb data (task C — TMDb tags pre-encode).
+
+    Container-level title/date/language/comment must land in the encoded MKV
+    immediately so it doesn't depend on the post-encode mkvpropedit step
+    succeeding. Rich tags (director, cast) still flow through mkvpropedit.
+    """
+
+    def test_movie_writes_title_date_language(self) -> None:
+        from pipeline.ffmpeg import _build_tmdb_metadata_args
+
+        item = {
+            "filename": "Inception (2010).mkv",
+            "tmdb": {
+                "title": "Inception",
+                "release_year": 2010,
+                "original_language": "en",
+            },
+        }
+        args = _build_tmdb_metadata_args(item)
+        assert "-metadata" in args
+        assert "title=Inception" in args
+        assert "date=2010" in args
+        assert "language=en" in args
+
+    def test_series_uses_first_air_year(self) -> None:
+        from pipeline.ffmpeg import _build_tmdb_metadata_args
+
+        item = {
+            "filename": "The Wire S01E01.mkv",
+            "tmdb": {
+                "name": "The Wire",
+                "first_air_year": 2002,
+                "original_language": "en",
+            },
+        }
+        args = _build_tmdb_metadata_args(item)
+        assert "title=The Wire" in args
+        assert "date=2002" in args
+
+    def test_no_tmdb_returns_empty_list(self) -> None:
+        from pipeline.ffmpeg import _build_tmdb_metadata_args
+
+        assert _build_tmdb_metadata_args({"filename": "Untagged.mkv"}) == []
+        assert _build_tmdb_metadata_args({"filename": "Untagged.mkv", "tmdb": {}}) == []
+
+    def test_filename_fallback_when_no_tmdb_title(self) -> None:
+        """If TMDb has data but no title, fall back to the filename stem."""
+        from pipeline.ffmpeg import _build_tmdb_metadata_args
+
+        item = {
+            "filename": "Some Movie (2020).mkv",
+            "tmdb": {"original_language": "en", "release_year": 2020},
+        }
+        args = _build_tmdb_metadata_args(item)
+        assert "title=Some Movie (2020)" in args
+
+    def test_metadata_appears_in_full_ffmpeg_cmd(self) -> None:
+        """The full build_ffmpeg_cmd must include -metadata flags for tagged items."""
+        item = _base_item()
+        item["tmdb"] = {
+            "title": "Test Movie",
+            "release_year": 2024,
+            "original_language": "es",
+        }
+        cmd = build_ffmpeg_cmd("/in/file.mkv", "/out/file.mkv", item, _base_config())
+        # -map_metadata -1 must come BEFORE our -metadata flags so source bloat
+        # is stripped before our values land.
+        joined = " ".join(cmd)
+        assert "-map_metadata -1" in joined
+        assert "title=Test Movie" in cmd
+        assert "date=2024" in cmd
+        assert "language=es" in cmd
+        # The comment marker survives so future runs can spot pipeline-encoded files.
+        assert any("comment=encoded by NASCleanup" in arg for arg in cmd)

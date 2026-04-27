@@ -350,6 +350,118 @@ def select_audio_keep_indices(
     return sorted(keep)
 
 
+# ISO 639-1 ↔ 639-2/3 ↔ name equivalence buckets. Used by the
+# original-language selector so a TMDb `es` matches an MKV `spa` matches a
+# whisper-detected `Spanish`. Mirrors qualify._ISO1_EQUIV — kept in sync there.
+_ORIG_LANG_BUCKETS: dict[str, frozenset[str]] = {
+    "en": frozenset({"en", "eng", "english"}),
+    "sv": frozenset({"sv", "swe", "swedish"}),
+    "nl": frozenset({"nl", "nld", "dut", "dutch"}),
+    "de": frozenset({"de", "deu", "ger", "german"}),
+    "fr": frozenset({"fr", "fra", "fre", "french"}),
+    "es": frozenset({"es", "spa", "spanish"}),
+    "it": frozenset({"it", "ita", "italian"}),
+    "ja": frozenset({"ja", "jpn", "japanese"}),
+    "ko": frozenset({"ko", "kor", "korean"}),
+    "zh": frozenset({"zh", "cn", "chi", "zho", "yue", "cmn", "chinese", "mandarin", "cantonese"}),
+    "pt": frozenset({"pt", "por", "portuguese"}),
+    "ru": frozenset({"ru", "rus", "russian"}),
+    "ar": frozenset({"ar", "ara", "arabic"}),
+    "hi": frozenset({"hi", "hin", "hindi"}),
+    "no": frozenset({"no", "nor", "nob", "nno", "norwegian", "bokmål", "bokmal", "nynorsk"}),
+    "da": frozenset({"da", "dan", "danish"}),
+    "fi": frozenset({"fi", "fin", "finnish"}),
+    "pl": frozenset({"pl", "pol", "polish"}),
+    "cs": frozenset({"cs", "ces", "cze", "czech"}),
+    "tr": frozenset({"tr", "tur", "turkish"}),
+    "he": frozenset({"he", "heb", "hebrew"}),
+    "th": frozenset({"th", "tha", "thai"}),
+    "vi": frozenset({"vi", "vie", "vietnamese"}),
+    "el": frozenset({"el", "ell", "gre", "greek"}),
+}
+
+_UND_TOKENS: frozenset[str] = frozenset({"", "und", "unk", "undetermined"})
+
+
+def _lang_in_bucket(lang: str, target: str) -> bool:
+    """True if ``lang`` belongs to the same equivalence bucket as ``target``.
+
+    Both arguments are lowercased and stripped. Empty / und / unk values
+    match nothing — caller must decide what to do with unknowns.
+    """
+    a = (lang or "").lower().strip()
+    b = (target or "").lower().strip()
+    if not a or not b or a in _UND_TOKENS or b in _UND_TOKENS:
+        return False
+    if a == b:
+        return True
+    for codes in _ORIG_LANG_BUCKETS.values():
+        if a in codes and b in codes:
+            return True
+    return False
+
+
+def select_audio_keep_indices_by_original_language(
+    streams: list[AudioStream],
+    original_language: str | None,
+    *,
+    keep_english_too: bool = False,
+) -> list[int] | None:
+    """Keep only audio tracks whose language matches TMDb ``original_language``.
+
+    This is the "strict" rule: foreign dubs (including English dubs of
+    foreign-origin films) are stripped. Used by the audio-keep policy
+    ``"original_language"``. Behaviour:
+
+      * ``original_language is None`` (no TMDb data): return None — caller
+        falls back to legacy KEEP_LANGS rule rather than guessing.
+      * Track language matches ``original_language`` bucket: KEEP.
+      * Track language matches English AND ``keep_english_too``: KEEP.
+      * Track language is ``und``/empty AND whisper hasn't resolved it:
+        KEEP (conservative — never strip what we can't identify).
+      * Track language is a known foreign dub: STRIP.
+
+    Returns ``None`` when no stripping is needed (everything would be kept)
+    so the caller can no-op the audio map. Returns ``[]`` only if the input
+    list is empty.
+
+    The ``keep_english_too`` flag exists for users who want the original
+    audio AND an English dub on top (convenience). Default False matches
+    the policy "strip non-original including English".
+    """
+    if not streams:
+        return []
+    if not original_language:
+        return None  # no TMDb signal — defer to legacy rule
+
+    keep: set[int] = set()
+    for s in streams:
+        # detected_language (whisper) takes precedence over the MKV tag
+        # because we set it specifically when text metadata is unreliable.
+        detected = (s.detected_language or "").lower().strip()
+        tagged = (s.language or "").lower().strip()
+        effective = detected or tagged
+
+        if effective in _UND_TOKENS:
+            # Unknown language — never strip what we can't identify.
+            keep.add(s.index)
+            continue
+
+        if _lang_in_bucket(effective, original_language):
+            keep.add(s.index)
+            continue
+
+        if keep_english_too and _lang_in_bucket(effective, "en"):
+            keep.add(s.index)
+            continue
+
+        # Known foreign dub — strip.
+
+    if len(keep) >= len(streams):
+        return None  # nothing to strip
+    return sorted(keep)
+
+
 def select_sub_keep_indices(
     streams: list[SubStream],
     eng_langs: set[str] | None = None,

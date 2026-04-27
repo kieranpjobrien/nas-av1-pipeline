@@ -324,24 +324,59 @@ def qualify_file(
     # is in KEEP_LANGS for stripping purposes, it's the wrong language for
     # films whose original is, say, French or Japanese.
     #
-    # If ``original_language`` is unknown (TMDb not yet enriched), we can't
-    # make the call — we skip the foreign check and fall through to the
-    # normal qualified path. The user can re-qualify after enrichment.
+    # Tier-2 fallback (2026-04-27): when whisper has been TRIED on the und
+    # tracks (use_whisper=True at the call site) and STILL can't ID them,
+    # but TMDb tells us original_language=es, we ASSUME the und tracks are
+    # the original Spanish rather than flagging. Most foreign-origin files
+    # come with a single `und`-tagged track that IS the original — release
+    # groups are lazy on language tags. TMDb is a stronger signal than
+    # `und`. The result is annotated `inferred_from_tmdb` so the user can
+    # see what we did and override per-file if it's wrong.
+    #
+    # CRITICAL: Tier-2 only fires when ``use_whisper`` was True. With whisper
+    # disabled (e.g. unit tests, or a deliberate config), an `und` tag is
+    # truly unknown — we have no right to claim it's anything. Falling back
+    # to TMDb in that case would silently keep a Swedish-dubbed Bluey on
+    # the assumption it's English, which is the opposite of what we want.
+    all_und = has_und_track and all(
+        lang in {"und", "unk", ""} for _, lang, _, _ in track_langs
+    )
+
     if original_lang:
         if not has_original_track:
-            # No track matches original_language. Two sub-cases distinguished
-            # by whether we have ANY confident detection at all.
-            if has_und_track and all(
-                lang in {"und", "unk", ""} for _, lang, _, _ in track_langs
-            ):
-                # Every track is undetermined. Whisper either skipped or
-                # couldn't decide. User reviews via Flagged pane.
+            if all_und and use_whisper:
+                # Whisper exhausted on every track. TMDb knows the original
+                # language — trust it and proceed with low-confidence inference.
+                result.rationale = (
+                    f"all audio tracks `und` after whisper; inferring "
+                    f"original_language={original_lang} from TMDb"
+                )
+                result.outcome = QualifyOutcome.QUALIFIED
+                # Mark every und track with the inferred language so the
+                # downstream keep-rule recognises them as original-language
+                # tracks rather than stripping them.
+                for stream in (enriched.get("audio_streams") or []):
+                    cur = (stream.get("language") or "").lower().strip()
+                    if cur in {"und", "unk", ""}:
+                        det = (stream.get("detected_language") or "").lower().strip()
+                        if det in {"", "und", "unk"}:
+                            stream["detected_language"] = original_lang
+                            stream["detection_confidence"] = 0.55
+                            stream["detection_method"] = "inferred_from_tmdb"
+                # fall through to the gaps / qualified path
+            elif all_und:
+                # Whisper wasn't run; we have no detection evidence at all.
+                # Flag UND — user reviews / re-runs with whisper enabled.
                 result.outcome = QualifyOutcome.FLAGGED_UND
                 result.rationale = (
-                    f"audio is `und` and whisper couldn't confidently identify it; "
+                    f"audio is `und` and whisper hasn't been run; "
                     f"original_language={original_lang}"
                 )
+                return result
             else:
+                # We have at least one CONFIDENTLY-detected track and none
+                # match the original. That's a real foreign-only file
+                # (e.g. English-dub-only of a Spanish film). Flag.
                 detected_summary = ", ".join(
                     f"a:{i}={lang}" for i, lang, _, _ in track_langs
                 )
@@ -350,15 +385,14 @@ def qualify_file(
                     f"no audio track matches original_language={original_lang} "
                     f"(detected: {detected_summary})"
                 )
-            return result
+                return result
     else:
-        # No TMDb original_language — can't evaluate foreign-audio without
-        # ground truth. Only flag if EVERY audio track is undetermined; with
-        # at least one identified track, encode normally and let the user
-        # re-qualify after TMDb enrichment if needed.
-        if has_und_track and all(
-            lang in {"und", "unk", ""} for _, lang, _, _ in track_langs
-        ):
+        # No TMDb original_language — and every audio track is still
+        # undetermined. We have no signal to act on, so flag for the user.
+        # (Tightened 2026-04-27: only fires when TMDb is also missing —
+        # previously fired for any all-und file even when TMDb could have
+        # backstopped it.)
+        if all_und:
             result.outcome = QualifyOutcome.FLAGGED_UND
             result.rationale = (
                 "audio is `und` and whisper couldn't identify it; "

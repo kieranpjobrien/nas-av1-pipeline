@@ -66,20 +66,19 @@ def _should_transcode_audio(audio: dict, config: dict) -> bool:
         would drop the object layer and flatten overhead effects to
         front-wall. The size cost (TrueHD is ~3-5 GB on a 4K remux) is
         worth it for titles where the user actually has Atmos gear.
-      - Opus (efficient lossy, already good)
 
-    Everything else (DTS, DTS-HD MA, FLAC, PCM, AC-3, AAC, MP3) transcodes
-    to EAC-3. DTS-HD MA is lossless but not Atmos; 640k EAC-3 is transparent
-    on Sonos-class gear. DTS:X Atmos-equivalent is rare enough to ignore
-    for now — if it shows up, add 'dts' with a profile check.
+    Everything else (Opus, DTS, DTS-HD MA, FLAC, PCM, AC-3, AAC, MP3)
+    transcodes to EAC-3. Opus was previously passthrough on the assumption
+    of "efficient lossy, already good", but Sonos Arc cannot decode Opus
+    natively — Plex transcodes it on every play. Pre-transcoding to EAC-3
+    once here removes the per-play transcode cost. DTS-HD MA is lossless
+    but not Atmos; 640k EAC-3 is transparent on Sonos-class gear.
     """
     codec = normalise_codec(audio.get("codec_raw") or audio.get("codec"))
     if codec == "eac3":
         return False
     if codec == "truehd":
         return False  # preserve Atmos object layer
-    if codec == "opus":
-        return False  # already efficient lossy
     return True
 
 
@@ -95,16 +94,52 @@ def _select_audio_streams(item: dict, config: dict) -> list[int] | None:
     """Determine which audio stream indices to keep.
 
     Returns list of input stream indices to map, or None to keep all.
-    Rule: keep stream 0 (original language) + all English/und tracks.
 
-    NOTE: This wraps pipeline.streams.select_audio_keep_indices but preserves
-    ffmpeg.py's historical policy of "don't bother stripping 1-2 tracks" via
-    the ``len <= 2`` short-circuit.
+    Dispatches on ``config["audio_keep_policy"]``:
+      * ``"original_language"`` (default) — keep tracks matching TMDb
+        ``original_language``. Strips foreign dubs including English dubs
+        of foreign-origin films. Falls back to "english_und" when there's
+        no TMDb data. Never strips `und` tracks whisper hasn't resolved.
+      * ``"english_und"`` (legacy) — keep stream 0 + every English/und
+        track. Subject to the historical "don't strip 1-2 tracks" guard
+        (not worth the complexity for trivially-small files).
     """
     if not config.get("strip_non_english_audio", True):
         return None
 
     audio_streams = item.get("audio_streams", [])
+    if not audio_streams:
+        return None
+
+    policy = config.get("audio_keep_policy", "original_language")
+
+    if policy == "original_language":
+        from pipeline.streams import (
+            parse_audio_stream,
+            select_audio_keep_indices_by_original_language,
+        )
+
+        tmdb = (item.get("tmdb") or {})
+        original_language = (tmdb.get("original_language") or "").strip().lower() or None
+
+        if original_language:
+            parsed = [parse_audio_stream(a, i) for i, a in enumerate(audio_streams)]
+            kept = select_audio_keep_indices_by_original_language(
+                parsed,
+                original_language,
+                keep_english_too=bool(config.get("audio_keep_english_with_original", False)),
+            )
+            if kept is None:
+                return None
+            stripped = len(audio_streams) - len(kept)
+            logging.info(
+                f"  Keeping {len(kept)} of {len(audio_streams)} audio streams "
+                f"(original_language={original_language}, stripped {stripped} foreign dubs)"
+            )
+            return kept
+        # No TMDb signal — fall through to legacy rule rather than strip blind.
+
+    # Legacy "english_und" policy (also the no-TMDb fallback for original_language).
     if len(audio_streams) <= 2:
         return None  # not worth stripping 1-2 tracks
 
@@ -525,8 +560,15 @@ def build_ffmpeg_cmd(
             if ".hi." in basename or ".sdh." in basename:
                 cmd.extend([f"-disposition:s:{out_idx}", "hearing_impaired"])
 
-    # Strip encoder metadata bloat (scene group tags, encoder info)
+    # Strip encoder metadata bloat (scene group tags, encoder info) BEFORE we
+    # write our own — `-map_metadata -1` drops everything from the source.
     cmd.extend(["-map_metadata", "-1"])
+
+    # Pre-encode TMDb metadata: container-level title/date/comment go in via
+    # ffmpeg `-metadata` so the encoded MKV carries them as soon as it lands.
+    # Rich XML tags (DIRECTOR/CAST/GENRE/...) still flow through mkvpropedit
+    # post-encode — ffmpeg can't write Matroska's structured Tag elements.
+    cmd.extend(_build_tmdb_metadata_args(item))
 
     # Hard duration cap (see note at top of fn)
     if source_duration > 0:
@@ -536,6 +578,49 @@ def build_ffmpeg_cmd(
     cmd.append(output_path)
 
     return cmd
+
+
+def _build_tmdb_metadata_args(item: dict) -> list[str]:
+    """Container-level `-metadata` flags built from the TMDb-enriched entry.
+
+    Returns a flat ffmpeg-arg list. Empty list if the item has no TMDb data
+    (still safe to extend cmd with). Only writes simple top-level fields:
+
+      * ``title``    — cleaned filename if available, else TMDb title
+      * ``date``     — release_year for movies, first_air_year for series
+      * ``language`` — TMDb ``original_language`` (ISO 639-1)
+      * ``comment``  — a stable marker so future runs can recognise that this
+                       file already passed through our pipeline
+
+    Rich tags (director, cast, genres, etc.) are still written post-encode
+    via mkvpropedit because Matroska's XML <Tag> structure isn't reachable
+    from ffmpeg's flat ``-metadata`` interface.
+    """
+    args: list[str] = []
+    tmdb = item.get("tmdb") or {}
+    if not tmdb:
+        return args
+
+    title = tmdb.get("title") or tmdb.get("name")
+    if not title:
+        # Fall back to the filename without extension — better than nothing,
+        # and avoids ffmpeg leaving the title field blank.
+        fn = item.get("filename") or ""
+        title = os.path.splitext(fn)[0] if fn else None
+    if title:
+        args.extend(["-metadata", f"title={title}"])
+
+    year = tmdb.get("release_year") or tmdb.get("first_air_year")
+    if year:
+        args.extend(["-metadata", f"date={year}"])
+
+    original_language = (tmdb.get("original_language") or "").strip().lower()
+    if original_language:
+        args.extend(["-metadata", f"language={original_language}"])
+
+    args.extend(["-metadata", "comment=encoded by NASCleanup AV1 pipeline"])
+
+    return args
 
 
 def build_audio_remux_cmd(

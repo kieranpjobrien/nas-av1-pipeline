@@ -23,8 +23,16 @@ from pathlib import Path
 
 # Regex for SxxExx (case-insensitive). Captures season+episode marker.
 # Also matches "Season.01.Episode.01" long-form format.
+#
+# Multi-episode forms supported in the first alternative:
+#   - Single:        S01E02
+#   - Concatenated:  S01E01E02, S01E01E02E03
+#   - Hyphen range:  S01E22-E24, S03E05-06
+#   - Dot range:     S01E22.E23, S01E22.E23.E24
+# The trailing `(?!\d)` after the range digits prevents matching into a
+# resolution token (so `S01E02.1080p` stops at `S01E02`, not `S01E02.10`).
 EPISODE_RE = re.compile(
-    r"(S\d{1,4}\s?E\d{1,2}(?:\s?E\d{1,2})?)"
+    r"(S\d{1,4}\s?E\d{1,2}(?:[-.]\s?E?\d{1,2}(?!\d))*(?:\s?E\d{1,2})*)"
     r"|(S\d{1,4})(?=[\s.\-](?:1080|720|480|2160|4K|UHD|WEB|BluRay|HDTV|DSNP|AMZN|NF|ATVP|HMAX))"
     r"|Season[\s.]?(\d{1,4})[\s.]?Episode[\s.]?(\d{1,2})",
     re.IGNORECASE,
@@ -180,10 +188,23 @@ def clean_series_name(stem: str, tag_re: re.Pattern = _TAG_BOUNDARY_RE) -> str |
     title = stem[: m.start()]
     # Strip trailing year — bare or parenthesized (e.g. "Show.2019.", "Show (2019) -")
     title = re.sub(r"[\s.]*\(?(19[2-9]\d|20[0-2]\d)\)?[\s.\-]*$", "", title)
-    # Normalize episode marker: group(1) is SxxExx, group(2) is season-only,
-    # groups 3+4 are Season/Episode long form
+    # Normalize episode marker: group(1) is SxxExx (single or multi-episode),
+    # group(2) is season-only, groups 3+4 are Season/Episode long form.
     if m.group(1):
-        episode_marker = re.sub(r"\s+", "", m.group(1)).upper()
+        raw = re.sub(r"\s+", "", m.group(1)).upper()
+        # Multi-episode normalisation: if the marker uses hyphen or dot
+        # separators (e.g. "S01E22-E24", "S03E05-06", "S01E22.E23.E24"),
+        # canonicalise to hyphenated form with explicit "E" on every part:
+        # "S03E05-06" -> "S03E05-E06", "S01E22.E23" -> "S01E22-E23".
+        # Concatenated form ("S01E01E02") is preserved as-is.
+        if "-" in raw or "." in raw:
+            head, *tail = re.split(r"[-.]+", raw)
+            episode_marker = head
+            for part in tail:
+                if part:
+                    episode_marker += "-" + (part if part.startswith("E") else f"E{part}")
+        else:
+            episode_marker = raw
     elif m.group(2):
         episode_marker = m.group(2).upper()
     else:

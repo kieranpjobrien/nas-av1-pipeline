@@ -199,6 +199,218 @@ _TITLE_HINTS = {
 }
 
 
+# Filename release-group tokens that strongly indicate a single audio language.
+# Match is exact-token (split on `.`, `-`, `_`, ` `) so `iTALiAN` matches
+# `Movie.iTALiAN.1080p.mkv` but not titles that happen to contain "italian"
+# substring. Conservative — only single-language tokens, not MULTi or DUAL.
+# Applied ONLY when the file has exactly one `und`-tagged audio track AND no
+# whisper / title hint resolved it; the caller is expected to be in fallback
+# territory before consulting filename heuristics.
+_FILENAME_HINTS = {
+    "english": "en",
+    "eng": "en",
+    "french": "fr",
+    "vff": "fr",      # version française française (true French dub)
+    "vf": "fr",       # version française (French dub, looser variant)
+    "german": "de",
+    "deutsch": "de",
+    "ger": "de",
+    "italian": "it",
+    "ita": "it",
+    "spanish": "es",
+    "español": "es",
+    "spa": "es",
+    "japanese": "ja",
+    "jpn": "ja",
+    "korean": "ko",
+    "kor": "ko",
+    "chinese": "zh",
+    "mandarin": "zh",
+    "portuguese": "pt",
+    "russian": "ru",
+    "rus": "ru",
+    "polish": "pl",
+    "pol": "pl",
+    "dutch": "nl",
+    "swedish": "sv",
+    "swe": "sv",
+    "norwegian": "no",
+    "nor": "no",
+    "danish": "da",
+    "dan": "da",
+    "finnish": "fi",
+    "fin": "fi",
+    "czech": "cs",
+    "hungarian": "hu",
+    "turkish": "tr",
+    "thai": "th",
+    "vietnamese": "vi",
+    "hebrew": "he",
+}
+
+# Tokens that signal a multi-language release — we deliberately do NOT
+# attempt to infer a specific language from these. Listed so future
+# maintainers don't try to add them to _FILENAME_HINTS.
+_FILENAME_MULTI_TOKENS = frozenset({"multi", "dual", "multilang", "multilingual"})
+
+
+def _detect_lang_from_filename(filepath: str) -> Optional[str]:
+    """Return ISO 639-1 code if the filename contains a single-language token.
+
+    Splits on common release-group separators (``.``, ``_``, ``-``, space)
+    and checks each token against ``_FILENAME_HINTS``. Returns None if:
+      * No matching token, or
+      * Multiple distinct languages match (ambiguous), or
+      * A multi-language token is present (e.g. ``MULTi``).
+
+    Conservative by design — false positives here mark `und` tracks with the
+    wrong language, which then either pollutes the keep set or strips real
+    audio. Better to leave a track `und` and fall through to whisper / TMDb.
+    """
+    if not filepath:
+        return None
+    import os as _os
+    import re as _re
+
+    name = _os.path.basename(filepath).lower()
+    tokens = _re.split(r"[.\s_\-\(\)\[\]]+", name)
+    if not tokens:
+        return None
+
+    # Bail on multi-language releases — we can't pick one.
+    if any(t in _FILENAME_MULTI_TOKENS for t in tokens):
+        return None
+
+    found: set[str] = set()
+    for tok in tokens:
+        code = _FILENAME_HINTS.get(tok)
+        if code:
+            found.add(code)
+    if len(found) == 1:
+        return next(iter(found))
+    return None
+
+
+# Channel/bitrate heuristic thresholds — see _apply_channel_bitrate_heuristic.
+_CHANNEL_HEURISTIC_MIN_CHANNELS = 6     # 5.1 or above to count as "likely original"
+_BITRATE_HEURISTIC_RATIO = 1.5          # winner must be >= 1.5x next-highest
+_HEURISTIC_CONF_CHANNEL_ONLY = 0.65
+_HEURISTIC_CONF_BITRATE_ONLY = 0.6
+_HEURISTIC_CONF_CORROBORATED = 0.75
+
+
+def _audio_track_bitrate_kbps(stream: dict) -> Optional[int]:
+    """Pull a kbps integer from an audio stream dict, tolerating both formats.
+
+    Scanner output uses ``bitrate_kbps`` (int); raw ffprobe uses ``bit_rate``
+    (string, in bps). Returns None when neither is present or parseable.
+    """
+    raw = stream.get("bitrate_kbps")
+    if raw is not None:
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            pass
+    raw = stream.get("bit_rate")
+    if raw is not None:
+        try:
+            return int(raw) // 1000
+        except (TypeError, ValueError):
+            pass
+    return None
+
+
+def _apply_channel_bitrate_heuristic(entry: dict) -> None:
+    """Pick the most likely original-language audio track via channels + bitrate.
+
+    Foreign dubs are typically downmixed to 2.0 stereo and re-encoded at lower
+    bitrates than the original. When a file has multiple `und`-tagged audio
+    tracks and no other signal resolved them, the highest-channel and
+    highest-bitrate track is almost always the original.
+
+    Mutates ``entry`` in place. Only fires when:
+      * Two or more audio tracks remain `und` AND have no ``detected_language``
+        set by an earlier signal (title / filename hint).
+      * TMDb ``original_language`` is known — without it we have no language
+        code to assign even if we identify the original track.
+
+    Signals:
+      * Channel: exactly one und-track has the most channels AND >= 6 (5.1+).
+      * Bitrate: one und-track's bitrate is >= 1.5x the next-highest und-track.
+
+    Confidence:
+      * Both signals agree on the same track → 0.75 (corroborated).
+      * Only channel signal qualifies → 0.65.
+      * Only bitrate signal qualifies → 0.60.
+
+    On a winner, sets ``detected_language`` to TMDb's ``original_language``,
+    ``detection_method`` to ``"heuristic_channel_bitrate"``, and the chosen
+    confidence.
+    """
+    audio_streams = entry.get("audio_streams") or []
+    tmdb = entry.get("tmdb") or {}
+    original_lang = (tmdb.get("original_language") or "").strip().lower()
+    if not original_lang:
+        return
+
+    # Eligible tracks: still `und` AND not yet detected by an earlier signal.
+    candidates: list[tuple[int, dict]] = []
+    for idx, stream in enumerate(audio_streams):
+        lang = (stream.get("language") or "und").lower().strip()
+        if lang not in UND_LANGS:
+            continue
+        if stream.get("detected_language"):
+            continue
+        candidates.append((idx, stream))
+
+    if len(candidates) < 2:
+        return
+
+    # Channel signal — exactly one candidate has the maximum channel count and
+    # that maximum is at least the 5.1 floor.
+    channel_winner: Optional[int] = None
+    channel_counts = [(idx, int(s.get("channels") or 0)) for idx, s in candidates]
+    max_channels = max(c for _, c in channel_counts)
+    if max_channels >= _CHANNEL_HEURISTIC_MIN_CHANNELS:
+        leaders = [idx for idx, c in channel_counts if c == max_channels]
+        if len(leaders) == 1:
+            channel_winner = leaders[0]
+
+    # Bitrate signal — top und-track is >= 1.5x the next-highest.
+    bitrate_winner: Optional[int] = None
+    bitrates = [(idx, _audio_track_bitrate_kbps(s)) for idx, s in candidates]
+    bitrates_known = [(idx, br) for idx, br in bitrates if br is not None and br > 0]
+    if len(bitrates_known) >= 2:
+        bitrates_known.sort(key=lambda pair: pair[1], reverse=True)
+        top_idx, top_br = bitrates_known[0]
+        _, second_br = bitrates_known[1]
+        if second_br > 0 and top_br >= second_br * _BITRATE_HEURISTIC_RATIO:
+            bitrate_winner = top_idx
+
+    if channel_winner is None and bitrate_winner is None:
+        return
+
+    # Combine: corroborated wins outright; conflicting signals abort (we can't
+    # tell which is right). A single signal still tags but with lower conf.
+    if channel_winner is not None and bitrate_winner is not None:
+        if channel_winner != bitrate_winner:
+            return
+        winner_idx = channel_winner
+        confidence = _HEURISTIC_CONF_CORROBORATED
+    elif channel_winner is not None:
+        winner_idx = channel_winner
+        confidence = _HEURISTIC_CONF_CHANNEL_ONLY
+    else:
+        assert bitrate_winner is not None
+        winner_idx = bitrate_winner
+        confidence = _HEURISTIC_CONF_BITRATE_ONLY
+
+    target = audio_streams[winner_idx]
+    target["detected_language"] = original_lang
+    target["detection_confidence"] = confidence
+    target["detection_method"] = "heuristic_channel_bitrate"
+
+
 # ---------------------------------------------------------------------------
 # Utility functions
 # ---------------------------------------------------------------------------
@@ -1411,6 +1623,20 @@ def detect_all_languages(file_entry: dict, use_whisper: bool = False) -> dict:
                     stream["detection_method"] = "ocr_extraction"
                     detected_text_langs[sub_all_idx] = detected
 
+    # Filename hint applies once per file and only when there's exactly ONE
+    # `und` audio track — otherwise we can't tell which track the filename
+    # tag refers to. Computed up-front so we don't re-parse for every track.
+    und_audio_indices = [
+        i for i, s in enumerate(entry.get("audio_streams", []))
+        if (s.get("language") or "und").lower().strip() in UND_LANGS
+    ]
+    filename_hint: Optional[str] = None
+    if len(und_audio_indices) == 1:
+        filename_hint = _detect_lang_from_filename(filepath)
+
+    # Pass 1 — cheap per-track hints (title, then filename for the solo-und case).
+    # These run for every und track before any cross-track or whisper logic so
+    # subsequent passes see the up-to-date detected_language fields.
     for audio_idx, stream in enumerate(entry.get("audio_streams", [])):
         lang = (stream.get("language") or "und").lower().strip()
         if lang not in UND_LANGS:
@@ -1432,18 +1658,41 @@ def detect_all_languages(file_entry: dict, use_whisper: bool = False) -> dict:
             stream["detection_method"] = "title_hint"
             continue
 
+        # Filename hint — only used if no title hint AND there's exactly one
+        # und audio track. Conservative: a single-language token in the
+        # release name is a moderate signal (0.7 confidence) — strong enough
+        # to be useful, weak enough that whisper still runs and can override.
+        if filename_hint and audio_idx == und_audio_indices[0]:
+            stream["detected_language"] = filename_hint
+            stream["detection_confidence"] = 0.7
+            stream["detection_method"] = "filename_hint"
+            # Don't `continue` — if whisper is enabled, let it run too. It'll
+            # only overwrite if its own confidence > 0.5, which means it'll
+            # corroborate the filename hint or correct it with stronger evidence.
+
         # NOTE: the previous "single-audio + single-sub-language → infer audio
         # matches sub" heuristic was DELETED on 2026-04-25. It misidentified
         # foreign-dub episodes (e.g. Bluey with Swedish audio + Bazarr-added
         # English sub got labelled English audio because there was 1 audio +
         # 1 sub language). The only reliable signal for foreign audio is
         # actually listening to it — which is what whisper does.
-        #
-        # No fallback inference here. If we have no whisper result and no
-        # title hint, the track stays `und` and the qualify stage flags it
-        # as FLAGGED_UNDETERMINED so the user can act.
 
-        if use_whisper:
+    # Pass 2 — channel-layout / bitrate heuristic. Picks the "likely original"
+    # track when multiple und audio remain after the per-track hints. Tags it
+    # with TMDb's original_language; no-op if TMDb is missing.
+    _apply_channel_bitrate_heuristic(entry)
+
+    # Pass 3 — whisper. Runs on every und track regardless of whether an earlier
+    # hint has set detected_language, so a >0.5-confidence whisper result still
+    # overrides a filename / channel-bitrate hint. (Title hint already
+    # `continue`d above and is treated as authoritative.)
+    if use_whisper:
+        for audio_idx, stream in enumerate(entry.get("audio_streams", [])):
+            lang = (stream.get("language") or "und").lower().strip()
+            if lang not in UND_LANGS:
+                continue
+            if stream.get("detection_method") == "title_hint":
+                continue
             w_lang, w_conf, w_method = detect_audio_language_deep(
                 filepath,
                 audio_idx,

@@ -152,10 +152,64 @@ def test_qualify_bluey_swedish_dub_flags_foreign(cfg):
     # Disable whisper for the unit test — but the und tag remains.
     result = qualify_file(entry, cfg, use_whisper=False)
     # No detection ran, audio is `und`, original_language is en.
-    # Verdict: undetermined (we can't prove it's foreign; we can't prove it's
-    # not). User reviews via the Flagged pane.
+    # Whisper hasn't been attempted (use_whisper=False), so we don't apply
+    # the Tier-2 TMDb fallback — still FLAG_UND for user review.
     assert result.outcome == QualifyOutcome.FLAGGED_UND
     assert "und" in result.rationale.lower()
+
+
+def test_qualify_tier2_und_with_whisper_attempted_falls_back_to_tmdb(cfg):
+    """Tier-2 (2026-04-27): when whisper HAS been tried (use_whisper=True)
+    on the und tracks and STILL can't identify them, but TMDb knows the
+    original_language, infer that rather than flagging UND. Most foreign-
+    origin files come with a single und track that IS the original.
+
+    Simulates "whisper exhausted" by patching detect_audio_language_deep to
+    return ('und', 0.0, 'whisper_exhausted') for any track it's called on.
+    """
+    entry = _bluey_swedish_dub_entry()
+    with patch(
+        "pipeline.language.detect_audio_language_deep",
+        return_value=("und", 0.0, "whisper_exhausted"),
+    ):
+        result = qualify_file(entry, cfg, use_whisper=True)
+    # Tier-2 applies: original=en, all-und after whisper → infer en.
+    assert result.outcome != QualifyOutcome.FLAGGED_UND
+    assert result.outcome != QualifyOutcome.FLAGGED_FOREIGN
+    # Inference lands on the audio stream so the keep rule sees it.
+    enriched_streams = result.enriched_entry["audio_streams"]
+    assert enriched_streams[0]["detected_language"] == "en"
+    assert enriched_streams[0]["detection_method"] == "inferred_from_tmdb"
+    # Bluey's audio is now treated as English, sub stream is English, codec
+    # is eac3 — Tier-2 produces a fully-compliant file → NOTHING_TO_DO is
+    # the correct downstream outcome.
+    assert result.outcome in (QualifyOutcome.QUALIFIED, QualifyOutcome.NOTHING_TO_DO)
+
+
+def test_qualify_tier2_does_not_fire_without_whisper(cfg):
+    """Tier-2 fallback MUST be gated on use_whisper=True. With whisper off,
+    an `und` track is truly unknown — falling back to TMDb would silently
+    keep a Swedish-dub Bluey on the assumption it's English."""
+    entry = _bluey_swedish_dub_entry()
+    result = qualify_file(entry, cfg, use_whisper=False)
+    assert result.outcome == QualifyOutcome.FLAGGED_UND, (
+        f"with whisper off + all-und, must FLAG_UND not infer; got "
+        f"{result.outcome.value}: {result.rationale}"
+    )
+
+
+def test_qualify_tier2_no_tmdb_still_flags_und(cfg):
+    """Without TMDb original_language, even if whisper exhausted, we have
+    no signal to fall back to — must still FLAG_UND."""
+    entry = _bluey_swedish_dub_entry()
+    entry["tmdb"] = {}  # no original_language
+    with patch(
+        "pipeline.language.detect_audio_language_deep",
+        return_value=("und", 0.0, "whisper_exhausted"),
+    ):
+        result = qualify_file(entry, cfg, use_whisper=True)
+    assert result.outcome == QualifyOutcome.FLAGGED_UND
+    assert "tmdb" in result.rationale.lower()
 
 
 def test_qualify_bluey_with_whisper_detected_swedish_flags_foreign(cfg):

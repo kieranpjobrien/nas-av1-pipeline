@@ -13,7 +13,28 @@ DEFAULT_CONFIG = {
     "min_free_space_bytes": 50_000_000_000,  # 50 GB minimum free on staging drive
     # Concurrent NVENC sessions. RTX 40-series has 2 NVENC chips so 2 is the practical cap
     # with zero perf penalty. Set to 1 on older Turing/Ampere cards with one chip.
-    "gpu_concurrency": 2,
+    # IMPORTANT: keep gpu_concurrency at 1. The RTX 4080 has dual NVENC chips
+    # but running two concurrent NVENC encodes triggered system BSODs in
+    # production. Treat this as the same severity class as rule 9a (no
+    # whisper+NVENC). One encode at a time is the safe operating envelope —
+    # the gain from a second concurrent encode isn't worth the crash risk.
+    "gpu_concurrency": 1,
+    # CPU prep workers — run filename clean, language detect (whisper),
+    # qualify gate, external sub scan, and container remux AHEAD of the
+    # GPU. Multiple workers can prep multiple files simultaneously so the
+    # GPU never waits on CPU work. Tuneable; CPU-only so no GPU contention.
+    "prep_concurrency": 2,
+    # Cap on prepped-and-waiting-for-GPU files. Prep workers pause when
+    # this many files already sit in the "prepped, awaiting encode" state —
+    # avoids burning CPU producing more than the single GPU can consume.
+    "prep_buffer_max": 3,
+    # Upload workers — run finalize_upload (NAS upload, verify, atomic
+    # replace, mkvpropedit tags, Plex scan) AFTER the GPU encode. Splitting
+    # this off the GPU thread lets the GPU dive straight into the next
+    # encode while bytes ship back over SMB. Default 1 = single concurrent
+    # upload (SMB is already saturated by one transfer). Set to 0 to
+    # restore inline-upload behaviour (e.g. for unit tests).
+    "upload_concurrency": 1,
     # Concurrent SMB fetches. One transfer already saturates the SMB link; more threads
     # just add contention. Keep the loop, just drop the second thread.
     "fetch_concurrency": 1,
@@ -87,10 +108,13 @@ DEFAULT_CONFIG = {
         "alac",
     },
     # Audio re-encoding: codecs/bitrates considered "bulky" (transcode to EAC-3)
-    # - lossless codecs: always transcode (TrueHD, FLAC, PCM, DTS-HD MA, ALAC)
+    # - lossless codecs: always transcode (FLAC, PCM, DTS-HD MA, ALAC) — TrueHD
+    #   stays passthrough because it carries Atmos object data the Sonos Arc decodes
     # - DTS core: transcode if >700kbps (typical 1536kbps → 640kbps EAC-3)
     # - AC-3: transcode if >400kbps (640kbps AC-3 → ~448kbps EAC-3)
-    # - Everything else (AAC, Opus, EAC-3, MP3, low-bitrate AC-3): copy
+    # - Opus: ALWAYS transcode (Sonos Arc has no native Opus decode → Plex would
+    #   transcode on every play; pre-transcoding once eliminates that overhead)
+    # - Everything else (AAC, EAC-3, MP3, low-bitrate AC-3): copy
     "audio_bulky_threshold_kbps": {
         "dts": 700,  # DTS core at 1536kbps is wasteful
         "ac3": 400,  # AC-3 at 640kbps can be trimmed
@@ -98,11 +122,36 @@ DEFAULT_CONFIG = {
     },
     # Stream stripping — drop non-English tracks during encode
     "strip_non_english_subs": True,  # subtitle streams (keeps English, und, forced)
-    "strip_non_english_audio": True,  # audio streams (keeps stream 0 as original language + English/und)
+    "strip_non_english_audio": True,  # audio streams: master switch (False = keep all)
+    # Audio keep policy:
+    #   "original_language" — keep tracks matching TMDb original_language; strip
+    #                         foreign dubs (incl. English dubs of foreign-origin
+    #                         films). Falls back to "english_und" when no TMDb
+    #                         data is available. NEVER strips `und` tracks
+    #                         whisper hasn't resolved (conservative).
+    #   "english_und"       — legacy: keep stream 0 + any English/und track.
+    "audio_keep_policy": "original_language",
+    # When policy is "original_language", set this True to ALSO keep English
+    # tracks alongside the original language (e.g. for dual-language watching).
+    # Default False matches the "strip non-original including English" policy.
+    "audio_keep_english_with_original": False,
     # Behaviour
     "overwrite_existing": False,
     "replace_original": True,  # Replace original on NAS after verify
     "verify_duration_tolerance_secs": 2.0,
+    # Mid-session queue refresh: re-read media_report.json on this cadence
+    # (seconds) and merge any new files into the live queues. Lets a Sonarr/
+    # Radarr drop-in jump to top of queue (smallest-first sort) without a
+    # pipeline restart. 30-min default — scanner runs aren't frequent enough
+    # to justify tighter polling, and mtime hasn't moved 99% of the time so
+    # the check is essentially free either way. Set to 0 to disable.
+    "queue_refresh_interval_secs": 1800.0,
+    # Gap filler drain-and-rescan: between passes, wait this many seconds
+    # before re-scanning the queue for new gap-fill work. The refresh worker
+    # can add files mid-session; this lets gap filler pick them up without
+    # a pipeline restart. Idle pause; busy pause is hardcoded short (5s)
+    # so consecutive batches drain back-to-back.
+    "gap_filler_rescan_interval_secs": 60.0,
 }
 
 # Containers that can cause NVENC failures — remux to .mkv before encoding

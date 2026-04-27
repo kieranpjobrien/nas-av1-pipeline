@@ -140,12 +140,217 @@ def _append_history_jsonl(path, entry: dict) -> None:
             pass
 
 
+def prepare_for_encode(
+    filepath: str,
+    item: dict,
+    config: dict,
+    state: PipelineState,
+    staging_dir: str,
+) -> dict | None:
+    """Run all non-GPU prep steps so the GPU worker can dive straight into encoding.
+
+    Performs steps 1-5 of the full pipeline:
+        1. Wait for fetch to complete (no-op if already fetched).
+        2. Clean filename.
+        3. Detect languages (whisper on CPU per WHISPER_FORCE_CPU=1).
+        4. Pre-encode qualification — may FLAG the file early.
+        5. External sub scan + container remux.
+
+    Returns a dict with the encode-time inputs the GPU worker needs:
+        {
+            'clean_name': str | None,
+            'actual_input': absolute path to fetched (and possibly remuxed) file,
+            'remuxed_path': absolute path of remuxed file or None,
+            'external_subs': list of english sidecar sub paths,
+            'output_path': absolute path the encode will write to,
+        }
+
+    Returns None if the file was either FLAGGED (foreign audio / und),
+    already-compliant (NOTHING_TO_DO → marked DONE), or otherwise not
+    suitable for encoding. State has already been updated to reflect the
+    outcome — the caller just needs to skip this file.
+
+    Designed to run in a SEPARATE prep worker thread so the GPU isn't
+    waiting on whisper / remux / language detection. The result is
+    persisted to state.extras under ``prep_data`` and ``prep_done=True``
+    so a subsequent ``full_gamut()`` call short-circuits past the prep.
+
+    Idempotent: re-running on a file with prep_done=True returns the
+    cached prep_data without redoing work.
+    """
+    filename = item["filename"]
+    library_type = item.get("library_type", "")
+
+    # Idempotence: if prep already ran, return the cached result.
+    existing = state.get_file(filepath)
+    if existing and existing.get("prep_done") and existing.get("prep_data"):
+        return existing["prep_data"]
+
+    try:
+        # === STEP 1: Wait for fetch ===
+        existing = existing or state.get_file(filepath)
+        status = existing.get("status") if existing else None
+        local_path = existing.get("local_path") if existing else None
+
+        if status == FileStatus.DONE.value:
+            logging.info(f"Already done: {filename} — skipping prep.")
+            return None
+
+        if not (status == FileStatus.PROCESSING.value and local_path and os.path.exists(local_path)):
+            logging.info(f"prep: waiting for fetch: {filename}")
+            waited = 0
+            while True:
+                existing = state.get_file(filepath)
+                status = existing.get("status") if existing else None
+                local_path = existing.get("local_path") if existing else None
+                if status == FileStatus.PROCESSING.value and local_path and os.path.exists(local_path):
+                    break
+                if status == FileStatus.ERROR.value:
+                    logging.error(f"prep: fetch failed: {filename}")
+                    return None
+                if status == FileStatus.DONE.value:
+                    return None
+                time.sleep(2)
+                waited += 2
+                if waited % 120 == 0 and status != FileStatus.FETCHING.value:
+                    logging.warning(
+                        f"prep: still waiting for fetch after {waited}s "
+                        f"(status={status}, not actively fetching): {filename}"
+                    )
+
+        # === STEP 2: Clean filename ===
+        try:
+            from pipeline.filename import clean_filename
+
+            clean_name = clean_filename(filepath, library_type)
+            if clean_name and clean_name != os.path.basename(filepath):
+                logging.info(f"  prep: clean name: {clean_name}")
+        except Exception as e:
+            logging.warning(f"  prep: filename cleaner failed on {filename}: {e}")
+            clean_name = None
+
+        # === STEP 3: Language detect (with whisper on CPU) ===
+        existing = state.get_file(filepath) or existing
+        detected_audio = existing.get("detected_audio") if existing else None
+        detected_subs = existing.get("detected_subs") if existing else None
+        if existing and existing.get("pre_processed"):
+            if detected_audio is not None:
+                item["audio_streams"] = detected_audio
+            if detected_subs is not None:
+                item["subtitle_streams"] = detected_subs
+        else:
+            state.set_file(filepath, FileStatus.PROCESSING, stage="language_detect")
+            try:
+                enriched = detect_all_languages(item, use_whisper=True)
+                if enriched:
+                    item.update(enriched)
+            except Exception as e:
+                logging.warning(f"  prep: language detection failed (non-fatal): {e}")
+
+        # === STEP 4: Qualify gate ===
+        existing = state.get_file(filepath) or existing
+        qualify_override = bool(existing and existing.get("qualify_override"))
+
+        if qualify_override:
+            logging.info(f"  prep: qualify pre-check SKIPPED (user override): {filename}")
+        else:
+            try:
+                from pipeline.qualify import QualifyOutcome, qualify_file
+
+                qresult = qualify_file(item, config, use_whisper=True)
+                if qresult.outcome == QualifyOutcome.FLAGGED_FOREIGN:
+                    logging.warning(f"  prep: FLAGGED_FOREIGN_AUDIO: {filename} — {qresult.rationale}")
+                    state.set_file(
+                        filepath,
+                        FileStatus.FLAGGED_FOREIGN_AUDIO,
+                        mode="full_gamut",
+                        stage="qualify",
+                        reason=qresult.rationale,
+                    )
+                    _cleanup(local_path, None, None)
+                    return None
+                if qresult.outcome == QualifyOutcome.FLAGGED_UND:
+                    logging.warning(f"  prep: FLAGGED_UNDETERMINED: {filename} — {qresult.rationale}")
+                    state.set_file(
+                        filepath,
+                        FileStatus.FLAGGED_UNDETERMINED,
+                        mode="full_gamut",
+                        stage="qualify",
+                        reason=qresult.rationale,
+                    )
+                    _cleanup(local_path, None, None)
+                    return None
+                if qresult.outcome == QualifyOutcome.NOTHING_TO_DO:
+                    logging.info(f"  prep: already compliant: {filename}")
+                    state.set_file(
+                        filepath, FileStatus.DONE, mode="full_gamut", reason="already compliant"
+                    )
+                    _cleanup(local_path, None, None)
+                    return None
+            except Exception as e:
+                logging.warning(f"  prep: qualify pre-check failed (non-fatal): {e}")
+
+        # === STEP 5a: External subs ===
+        cached_external = existing.get("external_subs") if existing else None
+        if existing and existing.get("pre_processed") and cached_external is not None:
+            external_subs = cached_external
+        else:
+            external_subs = _find_external_subs(filepath)
+
+        # === STEP 5b: Container remux ===
+        actual_input = local_path
+        remuxed_path = None
+        ext = Path(local_path).suffix.lower()
+        if ext in REMUX_EXTENSIONS:
+            logging.info(f"  prep: remuxing {ext} container to MKV...")
+            remuxed_path = _remux_to_mkv(local_path)
+            if remuxed_path:
+                actual_input = remuxed_path
+
+        # === Compute output path so the encode worker doesn't have to ===
+        encode_dir = os.path.join(staging_dir, "encoded")
+        os.makedirs(encode_dir, exist_ok=True)
+        out_stem = Path(clean_name).stem if clean_name else Path(filename).stem
+        safe_prefix = hashlib.md5(filepath.encode()).hexdigest()[:12]
+        output_path = os.path.join(encode_dir, f"{safe_prefix}_{out_stem}.mkv")
+
+        prep_data = {
+            "clean_name": clean_name,
+            "actual_input": actual_input,
+            "remuxed_path": remuxed_path,
+            "external_subs": external_subs or [],
+            "output_path": output_path,
+        }
+
+        # Persist so subsequent full_gamut / GPU worker picks it up.
+        state.set_file(
+            filepath,
+            FileStatus.PROCESSING,
+            stage="prepped",
+            prep_done=True,
+            prep_data=prep_data,
+            # Also write the mutated stream lists back so the encode
+            # builder sees the language-detected versions even if it
+            # rebuilds item from scratch.
+            detected_audio=item.get("audio_streams"),
+            detected_subs=item.get("subtitle_streams"),
+        )
+
+        return prep_data
+    except Exception as e:
+        logging.error(f"prepare_for_encode failed for {filename}: {e}")
+        state.set_file(filepath, FileStatus.ERROR, error=str(e), stage="prep")
+        return None
+
+
 def full_gamut(
     filepath: str,
     item: dict,
     config: dict,
     state: PipelineState,
     staging_dir: str,
+    *,
+    gpu_semaphore=None,
 ) -> bool:
     """Process a single file completely. Returns True on success.
 
@@ -163,11 +368,24 @@ def full_gamut(
     11. Update media report
     12. Trigger Plex scan
     13. Cleanup
+
+    When a separate prep worker has already produced ``prep_data`` (step 1-5
+    output cached in state extras), this function short-circuits past the
+    prep block and dives straight to the encode (step 6 onwards). That's
+    the optimisation: the GPU thread doesn't burn time on CPU prep.
     """
     filename = item["filename"]
     library_type = item.get("library_type", "")
 
     try:
+        # If a prep worker has already done steps 1-5, short-circuit past
+        # the entire prep block and go straight to encode. The GPU thread
+        # is precious — every second it spends on CPU prep is a second of
+        # NVENC idle.
+        existing_pre = state.get_file(filepath)
+        if existing_pre and existing_pre.get("prep_done") and existing_pre.get("prep_data"):
+            return _encode_only(filepath, item, config, state, staging_dir, gpu_semaphore)
+
         # === STEP 1: Fetch ===
         # Wait for network worker to fetch this file (it should be pre-fetching ahead).
         # Only fetch ourselves as a last resort if the file never appears.
@@ -242,7 +460,10 @@ def full_gamut(
         else:
             state.set_file(filepath, FileStatus.PROCESSING, stage="language_detect")
             try:
-                enriched = detect_all_languages(item, use_whisper=False)
+                # use_whisper=True runs the CPU faster-whisper ladder for any
+                # `und` audio tracks. WHISPER_FORCE_CPU=1 is set in pipeline
+                # startup so this never contends with NVENC.
+                enriched = detect_all_languages(item, use_whisper=True)
                 if enriched:
                     item.update(enriched)
                     logging.info("  Language detection complete")
@@ -252,11 +473,11 @@ def full_gamut(
         # === STEP 3b: Pre-encode qualification ===
         # Catches the foreign-audio class (Bluey-Swedish-dub, Amelie-English-dub-only,
         # Spirited-Away-English-dub-only) BEFORE we burn 5-15 min of GPU time
-        # producing a flagged-but-encoded AV1 file. Inline qualification runs
-        # WITHOUT whisper here — whisper requires a free GPU which conflicts
-        # with NVENC on the same chip (BSOD risk per rule 9a). Whisper data,
-        # if present, was populated earlier (offline `tools.qualify_audit` run
-        # or the fetch worker's enrichment pass) and qualify_file uses it.
+        # producing a flagged-but-encoded AV1 file. Whisper runs on CPU here
+        # via WHISPER_FORCE_CPU=1 (set in pipeline startup) so we can call
+        # qualify with use_whisper=True without contending with NVENC.
+        # Whisper results from the earlier detect step are cached, so this
+        # call is cheap when the previous step already resolved the und tracks.
         #
         # User-override bypass: if the user clicked "Encode anyway" on the
         # Flagged UI for this file, the state row carries qualify_override=True
@@ -270,7 +491,7 @@ def full_gamut(
             try:
                 from pipeline.qualify import QualifyOutcome, qualify_file
 
-                qresult = qualify_file(item, config, use_whisper=False)
+                qresult = qualify_file(item, config, use_whisper=True)
                 if qresult.outcome == QualifyOutcome.FLAGGED_FOREIGN:
                     logging.warning(
                         f"  FLAGGED_FOREIGN_AUDIO: {filename} — {qresult.rationale}"
@@ -374,8 +595,22 @@ def full_gamut(
         )
 
         # === STEP 6: Execute encode ===
+        # The GPU semaphore is held ONLY around _run_encode — the actual
+        # NVENC subprocess. Prep work above (filename clean, language
+        # detect, qualify, external subs, container remux, command build)
+        # and verify/upload below are all CPU/disk/network and would
+        # otherwise sit holding a slot the other GPU worker could use.
+        # That's where most of our GPU idle time was coming from.
         encode_info: dict = {}
-        success = _run_encode(cmd, actual_input, output_path, item, config, state, filepath, result_out=encode_info)
+        if gpu_semaphore is not None:
+            with gpu_semaphore:
+                success = _run_encode(
+                    cmd, actual_input, output_path, item, config, state, filepath, result_out=encode_info
+                )
+        else:
+            success = _run_encode(
+                cmd, actual_input, output_path, item, config, state, filepath, result_out=encode_info
+            )
         if not success:
             _cleanup(local_path, remuxed_path, output_path)
             return False
@@ -433,6 +668,143 @@ def full_gamut(
     except Exception as e:
         logging.error(f"Full gamut failed for {filename}: {e}")
         state.set_file(filepath, FileStatus.ERROR, error=str(e), stage="full_gamut")
+        return False
+
+
+def _encode_only(
+    filepath: str,
+    item: dict,
+    config: dict,
+    state: PipelineState,
+    staging_dir: str,
+    gpu_semaphore=None,
+) -> bool:
+    """Run encode (step 6) using already-cached prep_data. Returns True/False.
+
+    Called by ``full_gamut()`` when the prep worker has already produced
+    ``prep_data`` in state extras. Skips steps 1-5 entirely. Restores the
+    language-detected stream lists from the cached state so the ffmpeg
+    command builder sees the same streams the prep worker analysed.
+    """
+    filename = item["filename"]
+    library_type = item.get("library_type", "")
+
+    existing = state.get_file(filepath) or {}
+    prep_data = existing.get("prep_data") or {}
+    if not prep_data:
+        # Defensive: caller already checked, but if state was reset between
+        # the check and this call, fall back to inline prep.
+        logging.warning(f"_encode_only: prep_data missing for {filename}, falling back to inline prep")
+        prep_result = prepare_for_encode(filepath, item, config, state, staging_dir)
+        if prep_result is None:
+            return False
+        prep_data = prep_result
+
+    # Restore mutated stream lists from prep cache.
+    if existing.get("detected_audio") is not None:
+        item["audio_streams"] = existing["detected_audio"]
+    if existing.get("detected_subs") is not None:
+        item["subtitle_streams"] = existing["detected_subs"]
+
+    clean_name = prep_data.get("clean_name")
+    actual_input = prep_data.get("actual_input")
+    remuxed_path = prep_data.get("remuxed_path")
+    external_subs = prep_data.get("external_subs") or []
+    output_path = prep_data.get("output_path")
+    local_path = existing.get("local_path")
+
+    try:
+        # === STEP 5 (cmd build only — remux already happened in prep) ===
+        state.set_file(filepath, FileStatus.PROCESSING, stage="encoding")
+
+        # Filter external subs to one English non-HI sub.
+        eng_external = []
+        for s in external_subs:
+            fn_lower = os.path.basename(s).lower()
+            is_eng = ".en." in fn_lower or ".eng." in fn_lower
+            if is_eng and not is_hi_external(os.path.basename(s)):
+                eng_external.append(s)
+                break
+        if eng_external:
+            logging.info(f"  Muxing {len(eng_external)} external English subtitle(s) (cached)")
+
+        cmd = build_ffmpeg_cmd(
+            actual_input, output_path, item, config,
+            include_subs=True, external_subs=eng_external or None,
+        )
+
+        encode_start = time.time()
+        logging.info("  Encoding (post-prep): AV1 + EAC-3 audio + strip foreign tracks")
+        get_res_key(item)
+        params = resolve_encode_params(config, item)
+        logging.info(
+            f"  {library_type.upper()} | {item.get('resolution', '?')} | "
+            f"HDR: {item.get('hdr', False)} | CQ: {params.get('cq', '?')} | "
+            f"Preset: {params.get('preset', '?')}"
+        )
+
+        # === STEP 6: Execute encode under GPU semaphore ===
+        encode_info: dict = {}
+        if gpu_semaphore is not None:
+            with gpu_semaphore:
+                success = _run_encode(
+                    cmd, actual_input, output_path, item, config, state, filepath, result_out=encode_info
+                )
+        else:
+            success = _run_encode(
+                cmd, actual_input, output_path, item, config, state, filepath, result_out=encode_info
+            )
+        if not success:
+            _cleanup(local_path, remuxed_path, output_path)
+            return False
+
+        state.set_file(
+            filepath,
+            FileStatus.PROCESSING,
+            encode_retry_mode=encode_info.get("retry_mode"),
+            encode_attempts=encode_info.get("attempts"),
+            ffmpeg_stats={k: v for k, v in encode_info.items() if k.startswith("ffmpeg_")},
+            encode_params_used=dict(params),
+        )
+
+        encode_elapsed = time.time() - encode_start
+        output_size = os.path.getsize(output_path)
+        input_size = os.path.getsize(actual_input)
+        saved = input_size - output_size
+        ratio = (1 - output_size / input_size) * 100 if input_size > 0 else 0
+
+        logging.info(
+            f"  Encoded in {format_duration(encode_elapsed)}: "
+            f"{format_bytes(input_size)} -> {format_bytes(output_size)} "
+            f"({ratio:.1f}% reduction, {format_bytes(abs(saved))} {'saved' if saved > 0 else 'added'})"
+        )
+
+        _cleanup(local_path, remuxed_path)
+
+        final_name = clean_name if clean_name else Path(filename).stem + ".mkv"
+        if not final_name.endswith(".mkv"):
+            final_name = Path(final_name).stem + ".mkv"
+
+        state.set_file(
+            filepath,
+            FileStatus.UPLOADING,
+            stage="pending_upload",
+            output_path=output_path,
+            encode_time_secs=round(encode_elapsed, 1),
+            output_size_bytes=output_size,
+            input_size_bytes=input_size,
+            bytes_saved=saved,
+            compression_ratio=round(ratio, 1),
+            final_name=final_name,
+            library_type=library_type,
+            duration_seconds=item.get("duration_seconds", 0),
+        )
+
+        logging.info(f"  Encoded, ready for upload: {final_name}")
+        return True
+    except Exception as e:
+        logging.error(f"_encode_only failed for {filename}: {e}")
+        state.set_file(filepath, FileStatus.ERROR, error=str(e), stage="encode")
         return False
 
 
@@ -641,10 +1013,13 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
     # Beyond "the encode ran without crashing" we also insist every output file meets
     # the library's policy:
     #   - video codec = AV1
-    #   - every audio track in {eac3, opus, or explicitly-configured lossless passthrough}
+    #   - every audio track in {eac3, truehd, or explicitly-configured lossless passthrough}
     #   - every audio + sub language in KEEP_LANGS (no foreign audio/subs left over)
     #   - target filename has scene tags cleaned (checked post-replace below, since the
     #     rename-to-clean-name happens during replace)
+    # Opus was previously accepted but is now transcoded to EAC-3 — Sonos Arc cannot
+    # decode Opus passthrough so Plex transcoded it on every play; pre-transcoding
+    # once eliminates that cost.
     # If the encoder somehow leaves a non-conforming file we park it in ERROR rather
     # than commit it to the library. The command builder SHOULD prevent this; the check
     # is belt-and-braces for edge cases (e.g. strange stream configurations).
@@ -654,7 +1029,7 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
         out_video = output_probe.get("video") or {}
         out_audio = output_probe.get("audio") or []
         out_subs = output_probe.get("subs") or []
-        target_audio_codecs = {"eac3", "opus"}
+        target_audio_codecs = {"eac3", "truehd"}
         lossless_codecs = {c.lower() for c in config.get("lossless_audio_codecs") or []}
 
         violations: list[str] = []
