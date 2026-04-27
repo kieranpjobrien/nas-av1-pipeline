@@ -32,7 +32,7 @@ pm = ProcessManager()
 app.state.pm = pm
 
 # --- Include routers ---
-from server.routers import admin, files, flagged, library, pipeline, process, upgrades, ws  # noqa: E402
+from server.routers import admin, diagnostics, files, flagged, library, pipeline, process, upgrades, ws  # noqa: E402
 
 app.include_router(pipeline.router)
 app.include_router(process.router)
@@ -41,6 +41,7 @@ app.include_router(files.router)
 app.include_router(admin.router)
 app.include_router(upgrades.router)
 app.include_router(flagged.router)
+app.include_router(diagnostics.router)
 app.include_router(ws.router)
 
 # --- Static file serving (built frontend) ---

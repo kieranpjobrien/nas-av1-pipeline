@@ -6,6 +6,8 @@ import { Library } from "./dashboard/Library";
 import { Worklist } from "./dashboard/Worklist";
 import { UpgradesPage } from "./UpgradesPage";
 import { FlaggedPage } from "./FlaggedPage";
+import { AnomaliesPage } from "./AnomaliesPage";
+import { ControlPage } from "./ControlPage";
 import { Storage } from "./dashboard/Storage";
 import { Settings } from "./dashboard/Settings";
 import { Logs } from "./dashboard/Logs";
@@ -31,6 +33,7 @@ const VIEW_LABELS = {
   worklist: "Worklist",
   upgrades: "Upgrades",
   flagged: "Flagged",
+  anomalies: "Anomalies",
   queue: "Encode queue",
   workers: "Workers",
   errors: "Errors",
@@ -38,6 +41,7 @@ const VIEW_LABELS = {
   storage: "Storage",
   settings: "Settings",
   logs: "Logs",
+  controls: "Controls",
 };
 
 function HealthIndicator() {
@@ -139,7 +143,7 @@ function HealthIndicator() {
   );
 }
 
-function Sidebar({ view, setView, data, errorCount, workersActive, workersTotal, onClassic }) {
+function Sidebar({ view, setView, data, errorCount, workersActive, workersTotal }) {
   const total = data?.summary?.total_files;
   const needsEncode = data ? codecCount(data.codecs, "hevc") + codecCount(data.codecs, "h264") : null;
   const workersCount =
@@ -154,6 +158,7 @@ function Sidebar({ view, setView, data, errorCount, workersActive, workersTotal,
         { k: "worklist", l: "Worklist" },
         { k: "upgrades", l: "Upgrades" },
         { k: "flagged", l: "Flagged" },
+        { k: "anomalies", l: "Anomalies" },
       ],
     },
     {
@@ -170,8 +175,8 @@ function Sidebar({ view, setView, data, errorCount, workersActive, workersTotal,
       items: [
         { k: "storage", l: "Storage" },
         { k: "settings", l: "Settings" },
+        { k: "controls", l: "Controls" },
         { k: "logs", l: "Logs" },
-        { k: "_classic", l: "Classic view", external: true, onClick: onClassic },
       ],
     },
   ];
@@ -670,7 +675,7 @@ function LoadingState() {
   );
 }
 
-export function DashboardPage({ onClassic, onFileClick }) {
+export function DashboardPage({ onFileClick }) {
   const [view, setView] = useState(() => localStorage.getItem("nc.view") || "glance");
   const [report, setReport] = useState(null);
   const [error, setError] = useState(null);
@@ -682,7 +687,7 @@ export function DashboardPage({ onClassic, onFileClick }) {
       return DEFAULT_ROUTING;
     }
   });
-  const { pipeline } = useWebSocket(api.getPipeline, 3000);
+  const { pipeline, control } = useWebSocket(api.getPipeline, 3000);
   const { toasts, push, update, dismiss } = useToasts();
 
   useEffect(() => {
@@ -707,8 +712,7 @@ export function DashboardPage({ onClassic, onFileClick }) {
     //   2. Every 60s while the tab is visible (cheap, scales with library size)
     //   3. On window/tab focus change (so returning to the tab is always fresh)
     let cancelled = false;
-    const refresh = () => {
-      if (document.hidden) return; // don't poll hidden tabs
+    const fetchOnce = () => {
       api
         .getMediaReport()
         .then((r) => {
@@ -716,7 +720,12 @@ export function DashboardPage({ onClassic, onFileClick }) {
         })
         .catch((e) => !cancelled && setError(e.message));
     };
-    refresh();
+    const refresh = () => {
+      // Polling only — skip when the tab is hidden to save cycles.
+      if (document.hidden) return;
+      fetchOnce();
+    };
+    fetchOnce(); // initial fetch always runs, even on a hidden tab (preview iframes, embeds)
     const interval = setInterval(refresh, 60_000);
     const onVisibility = () => {
       if (!document.hidden) refresh();
@@ -1032,7 +1041,6 @@ export function DashboardPage({ onClassic, onFileClick }) {
           errorCount={liveErrorCount}
           workersActive={workers.active}
           workersTotal={workers.total}
-          onClassic={onClassic}
         />
         <main className="main">
           <TopBar
@@ -1086,8 +1094,10 @@ export function DashboardPage({ onClassic, onFileClick }) {
               <UpgradesPage onFileClick={onFileClick} />
             )}
             {view === "flagged" && <FlaggedPage onFileClick={onFileClick} />}
+            {view === "anomalies" && <AnomaliesPage onFileClick={onFileClick} />}
             {view === "storage" && <Storage data={data} />}
             {view === "settings" && <Settings />}
+            {view === "controls" && <ControlPage wsControl={control} />}
             {view === "logs" && <Logs />}
             {view === "queue" && (
               <Queue data={data} pipelineData={pipeline} onFileOpen={onFileClick} />

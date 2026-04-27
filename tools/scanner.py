@@ -749,6 +749,67 @@ def _scan_body(args) -> None:
     patch_report(_scanner_patch)
     output_path = args.output
 
+    # Reconcile pipeline state DB against the freshly-written report. Rows whose
+    # filepath is no longer in the report are stale — file was renamed, moved,
+    # or deleted. We split the cleanup by status:
+    #
+    #   pending / error      always drop. Phantom queue items poison the queue
+    #                        builder until restart and have no audit value.
+    #   done                 drop only if the scan was healthy (>= 1000 files
+    #                        reconciled) AND a per-run cap is respected. The
+    #                        encode_history table already preserves audit info,
+    #                        so the pipeline_files row is mostly a path index.
+    #                        The cap protects against a partial-scan accident
+    #                        wiping thousands of done rows in one go.
+    #   flagged_* / active   never touched. FLAGGED_* is the user's review
+    #                        queue (FLAGGED_CORRUPT, FLAGGED_FOREIGN_AUDIO,
+    #                        etc.) and ACTIVE rows belong to a running pipeline
+    #                        whose state we must not disrupt.
+    _DONE_DROP_CAP = 1000  # hard cap per scan — if more than this look stale, log and stop
+    _MIN_HEALTHY_SCAN = 1000  # require this many files in current_paths before any DONE drops
+
+    try:
+        import sqlite3 as _sqlite3
+
+        from paths import PIPELINE_STATE_DB
+        from tools.report_lock import read_report as _read_report
+
+        if os.path.exists(PIPELINE_STATE_DB):
+            current_paths = {r["filepath"] for r in results} | {
+                e.get("filepath", "") for e in (_read_report().get("files") or [])
+            }
+            _conn = _sqlite3.connect(PIPELINE_STATE_DB)
+            _cur = _conn.cursor()
+
+            _cur.execute("SELECT filepath FROM pipeline_files WHERE status IN ('pending', 'error')")
+            stale_pending = [fp for fp, in _cur.fetchall() if fp not in current_paths]
+            for fp in stale_pending:
+                _cur.execute("DELETE FROM pipeline_files WHERE filepath = ?", (fp,))
+
+            stale_done_count = 0
+            stale_done_capped = False
+            if len(current_paths) >= _MIN_HEALTHY_SCAN:
+                _cur.execute("SELECT filepath FROM pipeline_files WHERE status = 'done'")
+                stale_done = [fp for fp, in _cur.fetchall() if fp not in current_paths]
+                if len(stale_done) > _DONE_DROP_CAP:
+                    stale_done_capped = True
+                    stale_done = stale_done[:_DONE_DROP_CAP]
+                for fp in stale_done:
+                    _cur.execute("DELETE FROM pipeline_files WHERE filepath = ?", (fp,))
+                stale_done_count = len(stale_done)
+            _conn.commit()
+            _conn.close()
+
+            if stale_pending:
+                print(f"  Reconciled state DB: dropped {len(stale_pending)} stale pending/error rows")
+            if stale_done_count:
+                msg = f"  Reconciled state DB: dropped {stale_done_count} stale done rows (path missing on disk)"
+                if stale_done_capped:
+                    msg += f" — capped at {_DONE_DROP_CAP}; rerun scanner to clear the rest"
+                print(msg)
+    except Exception as _e:
+        print(f"  WARNING: state DB reconciliation skipped: {_e}")
+
     print(f"\n{'=' * 60}")
     print("Scan complete!")
     print(f"  Total files: {summary['total_files']}")

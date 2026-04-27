@@ -139,4 +139,6 @@ export const api = {
   radarrUpgrade: (req) => postJSON("/upgrades/radarr/upgrade", req),
   getSonarrProfiles: () => fetchJSON("/upgrades/sonarr/profiles"),
   sonarrUpgrade: (req) => postJSON("/upgrades/sonarr/upgrade", req),
+  // Diagnostics — size-vs-duration scatter for spotting corrupt/sample files
+  getSizeVsDuration: () => fetchJSON("/diagnostics/size-vs-duration"),
 };

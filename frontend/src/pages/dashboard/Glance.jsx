@@ -559,7 +559,7 @@ export function Glance({ data, pipelineData, throughputPerDay, workersActive, wo
               { k: "tmdb", label: "TMDb Metadata", pct: completion.pct_tmdb, done: completion.has_tmdb, colour: "#f59e0b" },
               { k: "langs", label: "Langs Known", pct: completion.pct_langs_known, done: completion.total - (completion.und_audio_files || 0) - (completion.und_sub_files || 0), colour: "#10b981" },
               { k: "filename", label: "Clean Filename", pct: completion.pct_filename, done: completion.has_clean_filename, colour: "#6366f1" },
-              { k: "english_filename", label: "English Filename", pct: completion.pct_english_filename, done: completion.has_english_filename, colour: "#ec4899" },
+              { k: "english_filename", label: "Folder Match", pct: completion.pct_english_filename, done: completion.has_english_filename, colour: "#ec4899" },
             ].map(({ k, label, pct, done, colour }) => {
               const total2 = completion.total || 0;
               const remaining = Math.max(0, total2 - (done || 0));

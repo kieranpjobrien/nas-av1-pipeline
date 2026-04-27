@@ -57,8 +57,13 @@ def rename_file(req: dict) -> dict:
 
 @router.post("/api/file/delete")
 def delete_file(req: DeleteFileRequest) -> dict:
-    """Delete a single file. Only allows paths within NAS media directories."""
-    from paths import NAS_MOVIES, NAS_SERIES
+    """Delete a single file. Only allows paths within NAS media directories.
+
+    Also drops the corresponding pipeline_state row (if any) so the queue
+    builder doesn't see a phantom path on the next pass, and invalidates the
+    media-report cache so subsequent reads don't return the deleted file.
+    """
+    from paths import NAS_MOVIES, NAS_SERIES, PIPELINE_STATE_DB
 
     norm = os.path.normpath(req.path)
     nas_movies = os.path.normpath(str(NAS_MOVIES))
@@ -72,9 +77,44 @@ def delete_file(req: DeleteFileRequest) -> dict:
 
     try:
         os.remove(norm)
-        return {"ok": True, "deleted": req.path}
     except OSError as e:
         raise HTTPException(500, f"Delete failed: {e}")
+
+    state_dropped = 0
+    try:
+        import sqlite3 as _sqlite3
+
+        if os.path.exists(PIPELINE_STATE_DB):
+            _conn = _sqlite3.connect(PIPELINE_STATE_DB)
+            _cur = _conn.cursor()
+            _cur.execute("DELETE FROM pipeline_files WHERE filepath = ?", (req.path,))
+            state_dropped = _cur.rowcount
+            _conn.commit()
+            _conn.close()
+    except Exception:
+        # Disk delete already succeeded; DB cleanup is best-effort. The next
+        # scanner run reconciles either way.
+        pass
+
+    # Drop the entry from media_report.json so chart / library views don't keep
+    # showing the deleted file until the next scanner run. Best-effort — the
+    # next scan reconciles regardless.
+    report_dropped = False
+    try:
+        from pipeline.report import remove_entry as _remove_entry
+
+        report_dropped = _remove_entry(req.path)
+    except Exception:
+        pass
+
+    invalidate_report_cache()
+
+    return {
+        "ok": True,
+        "deleted": req.path,
+        "state_rows_dropped": state_dropped,
+        "report_dropped": report_dropped,
+    }
 
 
 @router.get("/api/file/siblings")

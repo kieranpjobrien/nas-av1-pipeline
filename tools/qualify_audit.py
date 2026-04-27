@@ -86,10 +86,28 @@ def _select_done_files(
     state: PipelineState,
     library_type: str | None = None,
     limit: int = 0,
+    only_bad_reason: bool = False,
 ) -> list[str]:
-    """Return filepaths currently in DONE status, optionally filtered."""
+    """Return filepaths currently in DONE status, optionally filtered.
+
+    ``only_bad_reason`` narrows to rows whose reason field carries one of the
+    legacy "needs re-audit" markers (the 2026-04-25 audit-extraction-failure
+    incident). Used to bulk-clear the no_done_with_error_reason invariant
+    failures without paying CPU-whisper cost on the entire DONE set.
+    """
     conn = state._get_conn()
     sql = "SELECT filepath FROM pipeline_files WHERE LOWER(status) = 'done'"
+    if only_bad_reason:
+        sql += (
+            " AND ("
+            "LOWER(reason) LIKE '%fail%' OR "
+            "LOWER(reason) LIKE '%error%' OR "
+            "LOWER(reason) LIKE '%skip%' OR "
+            "LOWER(reason) LIKE '%defer%' OR "
+            "LOWER(reason) LIKE '%re-audit%' OR "
+            "LOWER(reason) LIKE '%reaudit%'"
+            ")"
+        )
     params: list[Any] = []
     rows = conn.execute(sql, params).fetchall()
     paths = [r[0] for r in rows]
@@ -172,7 +190,29 @@ def _requalify_one(
             )
         return "error_qualify_outcome"
 
-    # QUALIFIED / NOTHING_TO_DO — file is fine, leave DONE.
+    # QUALIFIED / NOTHING_TO_DO — file is fine. Stays DONE, but if the row is
+    # carrying a stale "needs re-audit" reason from an earlier failed pass
+    # (the 2026-04-25 audit-extraction-failure incident), clear it now —
+    # otherwise the no_done_with_error_reason invariant keeps failing on it
+    # forever even though re-audit just confirmed the file's fine.
+    existing = state.get_file(filepath) or {}
+    stale_reason = (existing.get("reason") or "").lower()
+    if stale_reason and any(
+        tok in stale_reason for tok in ("fail", "error", "skip", "defer", "re-audit", "reaudit")
+    ):
+        if not dry_run:
+            from pipeline.state import FileStatus as _FS
+
+            state.set_file(
+                filepath,
+                _FS.DONE,
+                mode="qualify_audit",
+                stage="requalify",
+                reason=None,
+            )
+        return "ok_cleared_stale_reason"
+
+    # File was already cleanly DONE, no stale reason — true no-op.
     return "ok"
 
 
@@ -193,8 +233,31 @@ def main(argv: list[str] | None = None) -> int:
         help="Restrict to one library type",
     )
     p.add_argument("--dry-run", action="store_true", help="Report-only; don't update DB")
+    p.add_argument(
+        "--only-bad-reason",
+        action="store_true",
+        help=(
+            "Restrict to DONE rows whose reason carries a legacy 'fail/skip/error/re-audit' "
+            "marker (the 2026-04-25 audit-extraction-failure cohort). Re-evaluates only those, "
+            "clearing the stale reason on success."
+        ),
+    )
+    p.add_argument(
+        "--allow-running-pipeline",
+        action="store_true",
+        help=(
+            "Skip the rule-9a guard (which refuses to run while pipeline is encoding). "
+            "Safe ONLY when whisper is CPU-bound — set WHISPER_FORCE_CPU=1. The guard "
+            "exists because GPU-whisper alongside NVENC caused a BSOD on 2026-04-21."
+        ),
+    )
     p.add_argument("--verbose", "-v", action="store_true", help="DEBUG logging")
     args = p.parse_args(argv)
+
+    # Force CPU whisper by default — qualify_audit is a long-running batch job
+    # and the user's pipeline owns the GPU. If the user explicitly wants GPU
+    # whisper, they can unset the var via `--allow-gpu` (not exposed yet).
+    os.environ.setdefault("WHISPER_FORCE_CPU", "1")
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
@@ -202,24 +265,28 @@ def main(argv: list[str] | None = None) -> int:
         stream=sys.stderr,
     )
 
-    # Refuse to run if encoder is active (whisper + NVENC = BSOD per rule 9a).
-    # This is also enforced at the whisper-load level but raising early saves
-    # time on a partial run.
-    try:
-        import urllib.request
+    # Refuse to run if encoder is active AND we're not forcing CPU whisper.
+    # GPU-whisper + NVENC on the same chip = BSOD per rule 9a (2026-04-21
+    # incident). With WHISPER_FORCE_CPU=1 set, whisper runs on CPU/int8 and
+    # cannot collide with the NVENC encoder, so co-running is safe.
+    cpu_forced = os.environ.get("WHISPER_FORCE_CPU", "").strip() in {"1", "true", "yes"}
+    if not (cpu_forced or args.allow_running_pipeline):
+        try:
+            import urllib.request
 
-        resp = urllib.request.urlopen(
-            "http://localhost:8002/api/process/pipeline/status", timeout=2
-        )
-        data = json.loads(resp.read())
-        if data.get("status") == "running":
-            logger.error(
-                "Pipeline is currently encoding — stop it before requalifying. "
-                "POST http://localhost:8002/api/process/pipeline/stop"
+            resp = urllib.request.urlopen(
+                "http://localhost:8002/api/process/pipeline/status", timeout=2
             )
-            return 2
-    except (ConnectionError, OSError, TimeoutError):
-        pass  # API unreachable -> assume nothing's running
+            data = json.loads(resp.read())
+            if data.get("status") == "running":
+                logger.error(
+                    "Pipeline is currently encoding — stop it, set WHISPER_FORCE_CPU=1, "
+                    "or pass --allow-running-pipeline. The guard is here because "
+                    "GPU-whisper + NVENC = BSOD (2026-04-21)."
+                )
+                return 2
+        except (ConnectionError, OSError, TimeoutError):
+            pass  # API unreachable -> assume nothing's running
 
     from pipeline.config import build_config
 
@@ -227,7 +294,12 @@ def main(argv: list[str] | None = None) -> int:
     state = PipelineState(str(_STATE_DB))
     try:
         report_by_path = _load_report()
-        paths = _select_done_files(state, library_type=args.library_type, limit=args.limit)
+        paths = _select_done_files(
+            state,
+            library_type=args.library_type,
+            limit=args.limit,
+            only_bad_reason=args.only_bad_reason,
+        )
         logger.info(
             f"Requalifying {len(paths)} files "
             f"(library_type={args.library_type or 'all'}, dry_run={args.dry_run})"

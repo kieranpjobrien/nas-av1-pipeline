@@ -7,10 +7,18 @@ import logging
 import os
 import sys
 
-from paths import MEDIA_REPORT, STAGING_DIR
-from pipeline.config import build_config
-from pipeline.control import PipelineControl
-from pipeline.state import PipelineState, is_terminal
+# Pipeline mode forces whisper to run on CPU. The GPU is owned by NVENC for
+# the live encode workers, and running whisper on the same chip caused a
+# BSOD on 2026-04-21 (rule 9a). CPU + faster-whisper int8 is fast enough
+# (~5-15s per file at tiny model) that it can run inline without bottlenecking
+# fetch or encode workers. Set BEFORE pipeline.language imports faster_whisper
+# so the flag is picked up at first model load.
+os.environ.setdefault("WHISPER_FORCE_CPU", "1")
+
+from paths import MEDIA_REPORT, STAGING_DIR  # noqa: E402
+from pipeline.config import build_config  # noqa: E402
+from pipeline.control import PipelineControl  # noqa: E402
+from pipeline.state import FileStatus, PipelineState, is_terminal  # noqa: E402
 
 
 def setup_logging(staging_dir: str):
@@ -26,6 +34,90 @@ def setup_logging(staging_dir: str):
     sys.stdout.reconfigure(line_buffering=True)
 
 
+def categorise_entry(
+    entry: dict,
+    config: dict,
+    state: PipelineState,
+    control: PipelineControl,
+) -> tuple[str, dict | None]:
+    """Decide which queue (if any) a media-report entry belongs to.
+
+    Returns ``(category, queue_item)``:
+      * ``("full_gamut", item_dict)`` — needs full re-encode
+      * ``("gap_filler", entry)`` — already AV1 but needs cleanup work
+      * ``("skip", None)`` — terminal state, control-skipped, or empty entry
+
+    Side effects: marks unprobeable entries (codec_raw missing) as
+    ``FLAGGED_CORRUPT`` in the state DB so they surface in the Flagged
+    pane instead of silently rotting in PENDING.
+
+    Used at startup by :func:`build_queues` AND mid-session by the
+    orchestrator's refresh worker so a Sonarr/Radarr drop-in becomes
+    next-up automatically without waiting for a pipeline restart.
+    """
+    from pipeline.gap_filler import analyse_gaps
+
+    filepath = entry.get("filepath", "")
+    video = entry.get("video", {})
+    codec_raw = video.get("codec_raw", "")
+
+    if not filepath:
+        return ("skip", None)
+
+    if control.should_skip(filepath):
+        return ("skip", None)
+
+    # Already terminal? Skip. DONE means encoded successfully; FLAGGED_*
+    # means qualify/audit deliberately parked the file. Earlier versions
+    # only skipped "done", so flagged rows landed back in the queue and
+    # got re-encoded with the wrong audio.
+    existing = state.get_file(filepath)
+    if existing and is_terminal(existing["status"]):
+        return ("skip", None)
+
+    # Unprobeable: ffprobe couldn't determine the video codec. Earlier
+    # versions silently skipped these files at queue-build time, so
+    # corrupt / truncated files sat in PENDING forever, never visible to
+    # the user. Flag them so the Flagged pane surfaces them.
+    if not codec_raw:
+        state.set_file(
+            filepath,
+            FileStatus.FLAGGED_CORRUPT,
+            stage="scan",
+            reason="ffprobe could not determine video codec",
+        )
+        return ("skip", None)
+
+    if codec_raw == "av1":
+        gaps = analyse_gaps(entry, config)
+        if gaps.needs_anything:
+            return ("gap_filler", entry)
+        return ("skip", None)
+
+    # Non-AV1 → full re-encode
+    res = video.get("resolution_class", "")
+    codec = video.get("codec", codec_raw)
+    bitrate = entry.get("overall_bitrate_kbps", 0) or 0
+
+    item = {
+        "filepath": filepath,
+        "filename": entry["filename"],
+        "file_size_bytes": entry.get("file_size_bytes", 0),
+        "file_size_gb": entry.get("file_size_gb", 0),
+        "duration_seconds": entry.get("duration_seconds", 0),
+        "video_codec": codec,
+        "resolution": res,
+        "bitrate_kbps": bitrate,
+        "hdr": video.get("hdr", False),
+        "bit_depth": video.get("bit_depth", 8),
+        "audio_streams": entry.get("audio_streams", []),
+        "subtitle_streams": entry.get("subtitle_streams", []),
+        "subtitle_count": entry.get("subtitle_count", 0),
+        "library_type": entry.get("library_type", ""),
+    }
+    return ("full_gamut", item)
+
+
 def build_queues(report_path: str, config: dict, state: PipelineState, control: PipelineControl):
     """Build separate queues for full_gamut and gap_filler from the media report."""
     with open(report_path, encoding="utf-8") as f:
@@ -37,56 +129,11 @@ def build_queues(report_path: str, config: dict, state: PipelineState, control: 
     gap_filler_queue = []
 
     for entry in report.get("files", []):
-        filepath = entry.get("filepath", "")
-        video = entry.get("video", {})
-        codec_raw = video.get("codec_raw", "")
-
-        if not filepath or not codec_raw:
-            continue
-
-        # Skip if control says so
-        if control.should_skip(filepath):
-            continue
-
-        # Already in a terminal state? Skip. DONE means encoded successfully;
-        # FLAGGED_* means the audit / qualify step deliberately parked the file
-        # for the user to action via the UI. Earlier versions only skipped
-        # "done", so flagged rows landed back in the queue and got re-encoded
-        # with the wrong audio. To force re-processing, delete the state DB
-        # row for the file.
-        existing = state.get_file(filepath)
-        if existing and is_terminal(existing["status"]):
-            continue
-
-        if codec_raw == "av1":
-            # Already AV1 — check if gap filling needed
-            gaps = analyse_gaps(entry, config)
-            if gaps.needs_anything:
-                gap_filler_queue.append(entry)
-        else:
-            # Needs full encode
-            res = video.get("resolution_class", "")
-            codec = video.get("codec", codec_raw)
-            bitrate = entry.get("overall_bitrate_kbps", 0) or 0
-
-            full_gamut_queue.append(
-                {
-                    "filepath": filepath,
-                    "filename": entry["filename"],
-                    "file_size_bytes": entry.get("file_size_bytes", 0),
-                    "file_size_gb": entry.get("file_size_gb", 0),
-                    "duration_seconds": entry.get("duration_seconds", 0),
-                    "video_codec": codec,
-                    "resolution": res,
-                    "bitrate_kbps": bitrate,
-                    "hdr": video.get("hdr", False),
-                    "bit_depth": video.get("bit_depth", 8),
-                    "audio_streams": entry.get("audio_streams", []),
-                    "subtitle_streams": entry.get("subtitle_streams", []),
-                    "subtitle_count": entry.get("subtitle_count", 0),
-                    "library_type": entry.get("library_type", ""),
-                }
-            )
+        category, item = categorise_entry(entry, config, state, control)
+        if category == "full_gamut":
+            full_gamut_queue.append(item)
+        elif category == "gap_filler":
+            gap_filler_queue.append(item)
 
     # Smallest-first: easiest quick wins run before the big remuxes.
     full_gamut_queue.sort(key=lambda x: x["file_size_bytes"])
