@@ -1141,6 +1141,44 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
     except Exception as e:
         logging.debug(f"  TMDb tagging failed: {e}")
 
+    # === Sidecar cleanup ===
+    # The encode embedded the chosen English sub into the MKV; any external
+    # .srt/.ass/.sub/.idx/.vtt next to the new file is now redundant. Delete
+    # them so the library only carries MKVs long-term. Bazarr is configured
+    # (Sub-Zero remove_HI mod + Custom PP delete-if-HI + must-not-contain
+    # regex on the language profile) to NOT re-grab HI variants, and the
+    # "Treat Embedded Subtitles as Downloaded" flag means it sees the muxed
+    # track and stops looking. Best-effort: failures here don't fail the
+    # encode itself.
+    try:
+        sidecar_dir = os.path.dirname(final_path)
+        stem = Path(final_path).stem.lower()
+        sub_exts = (".srt", ".ass", ".ssa", ".sub", ".idx", ".vtt")
+        deleted_subs: list[str] = []
+        for fn in os.listdir(sidecar_dir):
+            low = fn.lower()
+            if not low.endswith(sub_exts):
+                continue
+            # Match by stem prefix so `Movie.en.srt` and `Movie.en.hi.srt`
+            # both belong to `Movie.mkv`. Cheap startswith — false positives
+            # would have to share the exact stem AND a sub extension, which
+            # for distinct media files is essentially impossible.
+            if not low.startswith(stem):
+                continue
+            full = os.path.join(sidecar_dir, fn)
+            try:
+                os.remove(full)
+                deleted_subs.append(fn)
+            except OSError as e:
+                logging.debug(f"  sidecar cleanup failed for {fn}: {e}")
+        if deleted_subs:
+            logging.info(
+                f"  Sidecar cleanup: removed {len(deleted_subs)} external sub(s) "
+                f"({', '.join(deleted_subs[:3])}{'...' if len(deleted_subs) > 3 else ''})"
+            )
+    except OSError as e:
+        logging.debug(f"  Sidecar cleanup skipped (OSError): {e}")
+
     # === Update media report ===
     try:
         update_entry(final_path, library_type)
