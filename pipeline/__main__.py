@@ -2,10 +2,12 @@
 
 import argparse
 import copy
+import faulthandler
 import json
 import logging
 import os
 import sys
+from datetime import datetime
 
 # Pipeline mode forces whisper to run on CPU. The GPU is owned by NVENC for
 # the live encode workers, and running whisper on the same chip caused a
@@ -14,6 +16,30 @@ import sys
 # fetch or encode workers. Set BEFORE pipeline.language imports faster_whisper
 # so the flag is picked up at first model load.
 os.environ.setdefault("WHISPER_FORCE_CPU", "1")
+
+# Crash diagnostics — Python segfaulted at 0xc0000005 in python314.dll on
+# 2026-04-27 22:47 with no log line, no traceback, no clue. faulthandler
+# catches SIGSEGV / fatal errors and dumps a Python-level stack trace of
+# EVERY thread to its registered file before the interpreter dies.
+# That's how we'll know whether the segfault was in faster-whisper /
+# ctranslate2, an ffmpeg subprocess interaction, our own threading, or
+# CPython itself. The handler must be installed BEFORE any C extension
+# loads native code, hence wired in at the top of the entry module.
+_FAULT_LOG_PATH = os.path.join(
+    os.environ.get("AV1_STAGING") or r"F:\AV1_Staging",
+    "pipeline_faulthandler.log",
+)
+try:
+    os.makedirs(os.path.dirname(_FAULT_LOG_PATH), exist_ok=True)
+    _fault_log = open(_FAULT_LOG_PATH, "a", encoding="utf-8", buffering=1)
+    _fault_log.write(
+        f"\n--- pipeline start {datetime.now().isoformat(timespec='seconds')} (pid={os.getpid()}) ---\n"
+    )
+    _fault_log.flush()
+    faulthandler.enable(file=_fault_log, all_threads=True)
+except OSError:
+    # Disk full / permissions / weird drive layout — fall back to stderr.
+    faulthandler.enable(all_threads=True)
 
 from paths import MEDIA_REPORT, STAGING_DIR  # noqa: E402
 from pipeline.config import build_config  # noqa: E402
