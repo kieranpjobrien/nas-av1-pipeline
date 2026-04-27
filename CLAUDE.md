@@ -19,8 +19,9 @@ Personal AV1 re-encoding pipeline for a home NAS. Converts H.264/HEVC media to A
 - **Passthrough (never transcode)**:
   - EAC-3 (already target; EAC-3-JOC carries Atmos — preserved bit-exact)
   - **TrueHD** (primary Dolby Atmos carrier — Sonos Arc decodes it natively)
-  - Opus
-- **Transcode to EAC-3**: everything else (DTS, DTS-HD MA, FLAC, PCM, AC-3, AAC, MP3).
+- **Transcode to EAC-3**: everything else (DTS, DTS-HD MA, FLAC, PCM, AC-3, AAC, MP3, **Opus**).
+  Opus was previously passthrough but Sonos Arc has no native Opus decode — Plex
+  transcoded on every play. Pre-transcoding once removes that overhead.
 - Channel count + layout preserved through transcode (no `-ac N` flag).
 
 ---
@@ -76,6 +77,12 @@ as progress. Read and obey before doing anything else.
     Atmos carrier. Transcoding it to EAC-3 drops the object layer.
     User has a Sonos Arc which decodes TrueHD-Atmos natively.
     `_should_transcode_audio` returns False for codec == "truehd".
+
+9b. **One NVENC encode at a time.** RTX 4080 has dual NVENC physically,
+    but running two concurrent encodes caused system BSODs in production.
+    `gpu_concurrency` MUST stay at 1. Same severity class as 9a — single
+    encode is the safe envelope; the throughput of a second concurrent
+    encode isn't worth the crash risk.
 
 10. **No `-map 0:a?` (optional audio map).** Ever. Use `-map 0:a` hard
     or explicit `-map 0:a:N`. Optional maps silently drop audio.

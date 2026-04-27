@@ -60,6 +60,15 @@ class Orchestrator:
         # Shared dispatched set across all GPU workers — prevents two workers picking the same file.
         self._dispatched: set[str] = set()
         self._dispatched_lock = threading.Lock()
+        # Files currently being prepped by a prep worker. Prevents two prep
+        # workers grabbing the same file. Same role for prep as _dispatched
+        # has for GPU.
+        self._prepping: set[str] = set()
+        self._prepping_lock = threading.Lock()
+        # Files currently being uploaded by an upload worker. Same role for
+        # upload as _dispatched has for GPU.
+        self._uploading: set[str] = set()
+        self._uploading_lock = threading.Lock()
 
         signal.signal(signal.SIGTERM, self._handle_signal)
         signal.signal(signal.SIGINT, self._handle_signal)
@@ -373,6 +382,48 @@ class Orchestrator:
                 target=self._gap_filler_worker, args=(gap_filler_queue,), daemon=True, name="gap-filler"
             )
 
+        # Prep workers — run all CPU-bound prep work (filename clean,
+        # language detect with whisper, qualify gate, external sub scan,
+        # container remux) AHEAD of the GPU worker. Multiple instances run
+        # in parallel so a slow whisper escalation on one file doesn't
+        # starve the GPU pipeline. CPU-only, never touches NVENC, safe.
+        prep_concurrency = max(0, int(self.config.get("prep_concurrency", 2)))
+        for i in range(prep_concurrency):
+            name = f"prep-{i}"
+            threads[name] = threading.Thread(
+                target=self._prep_worker,
+                args=(full_gamut_queue, i),
+                daemon=True,
+                name=name,
+            )
+
+        # Upload workers — run finalize_upload (NAS upload, verify, atomic
+        # replace, mkvpropedit tags, Plex scan trigger) AFTER the GPU
+        # encode. Decouples the SMB upload from the GPU thread so the GPU
+        # dives straight into the next encode. Network-bound, CPU-light.
+        upload_concurrency = max(0, int(self.config.get("upload_concurrency", 1)))
+        for i in range(upload_concurrency):
+            name = f"upload-{i}" if upload_concurrency > 1 else "upload"
+            threads[name] = threading.Thread(
+                target=self._upload_worker,
+                args=(i,),
+                daemon=True,
+                name=name,
+            )
+
+        # Refresh worker — re-reads media_report.json on mtime change and
+        # merges any new files into the live queues. Lets Sonarr/Radarr
+        # drop-ins become next-up without waiting for a pipeline restart.
+        # Disabled when refresh_interval_secs <= 0 (e.g. unit tests).
+        refresh_interval = float(self.config.get("queue_refresh_interval_secs", 60.0))
+        if refresh_interval > 0:
+            threads["refresh"] = threading.Thread(
+                target=self._refresh_worker,
+                args=(full_gamut_queue, gap_filler_queue, refresh_interval),
+                daemon=True,
+                name="queue-refresh",
+            )
+
         for name, t in threads.items():
             t.start()
             logging.info(f"  Started {name}")
@@ -433,17 +484,39 @@ class Orchestrator:
                 f"{item['filename']} ({format_bytes(item.get('file_size_bytes', 0))})"
             )
 
-            # Encode under the GPU semaphore, then release it BEFORE uploading —
-            # upload is network-bound, so holding the GPU slot through it blocks
-            # the next encode for no reason.
-            with self._gpu_semaphore:
-                encode_ok = full_gamut(filepath, item, self.config, self.state, self.staging_dir)
+            # GPU semaphore is now threaded INTO full_gamut so it's held only
+            # around the actual NVENC encode subprocess (_run_encode). Prep
+            # steps (filename clean, language detect, qualify, external subs,
+            # container remux, command build) and verify run WITHOUT holding
+            # the slot — they're pure CPU/disk and previously parked the slot
+            # idle for ~30-90s per file. With 2 GPU workers the slot freed by
+            # one worker's prep can immediately be claimed by the other's
+            # encode, keeping the NVENC chips warm.
+            encode_ok = full_gamut(
+                filepath,
+                item,
+                self.config,
+                self.state,
+                self.staging_dir,
+                gpu_semaphore=self._gpu_semaphore,
+            )
 
             if encode_ok:
-                try:
-                    finalize_upload(filepath, self.state, self.config)
-                except Exception as e:
-                    logging.error(f"Upload failed for {os.path.basename(filepath)}: {e}")
+                # Upload + verify + replace + tags + Plex scan run on the
+                # dedicated upload worker. The GPU thread leaves the row at
+                # status=UPLOADING (set inside full_gamut) and moves on to
+                # the next encode immediately. This is what keeps NVENC at
+                # 100% — no more "GPU thread spends 30-60s pushing bytes
+                # back over SMB while NVENC sits idle".
+                #
+                # Fallback: if upload_concurrency is 0 (e.g. unit tests, or
+                # a deliberate config), run inline as before.
+                upload_inline = int(self.config.get("upload_concurrency", 1)) <= 0
+                if upload_inline:
+                    try:
+                        finalize_upload(filepath, self.state, self.config)
+                    except Exception as e:
+                        logging.error(f"Upload failed for {os.path.basename(filepath)}: {e}")
                     self.state.stats["errors"] = self.state.stats.get("errors", 0) + 1
                     self.state.save()
             else:
@@ -521,7 +594,13 @@ class Orchestrator:
                 continue
 
             # === Priority 2: Pre-fetch next queue items ===
-            for item in queue:
+            # Snapshot the queue under the dispatched lock so the refresh
+            # worker's mid-iteration mutations don't race. fetch_file is
+            # network-bound (slow) — we MUST iterate the snapshot, not the
+            # live queue, otherwise holding the lock would serialise fetches.
+            with self._dispatched_lock:
+                queue_snapshot = list(queue)
+            for item in queue_snapshot:
                 if self._shutdown.is_set():
                     break
                 fp = item["filepath"]
@@ -590,15 +669,34 @@ class Orchestrator:
     # =========================================================================
 
     def _gap_filler_worker(self, queue: list[dict]):
-        """Gap filler: one SSH-heavy worker + one local-quick worker.
+        """Gap filler with drain-and-rescan loop: runs one pass then re-scans.
+
+        Each pass: snapshot the queue, build heavy (SSH mkvmerge) + quick
+        (local rename/metadata/sub-delete) op queues from non-terminal
+        items, drain them, then sleep briefly before the next pass. New
+        files added by the refresh worker between passes get picked up
+        on the next iteration.
 
         Heavy (SSH): track stripping + sub muxing via remote mkvmerge on SERVER.
         Quick (local): rename, metadata, foreign sub delete — instant NAS ops.
-
-        Files can split between both queues (e.g. rename+strip both needed). The
-        two workers don't conflict: mkvmerge writes a tmp file, mkvpropedit/rename
-        operate on the original.
         """
+        rescan_interval = float(self.config.get("gap_filler_rescan_interval_secs", 60.0))
+        pass_num = 0
+
+        while not self._shutdown.is_set():
+            pass_num += 1
+            processed = self._gap_filler_pass(queue, pass_num)
+            if self._shutdown.is_set():
+                break
+            # Wait between passes. Idle pause is longer (no new work likely)
+            # than busy pause (refresh worker may have added more).
+            wait_secs = rescan_interval if processed == 0 else 5.0
+            self._shutdown.wait(timeout=wait_secs)
+
+        logging.info(f"Gap filler finished (drain-and-rescan, {pass_num} pass(es))")
+
+    def _gap_filler_pass(self, queue: list[dict], pass_num: int) -> int:
+        """One drain pass over the gap_filler queue. Returns items processed."""
         import queue as queue_mod
 
         from pipeline.gap_filler import (
@@ -614,8 +712,14 @@ class Orchestrator:
         heavy_count = [0]
         quick_count = [0]
 
-        # Build separate operation queues from all gap filler items
-        for item in queue:
+        # Build separate operation queues from all gap filler items.
+        # Snapshot under the lock so the refresh worker's appends don't race
+        # with this iteration. Gap_filler currently builds its op queues
+        # once at startup — files added by the refresher AFTER this point
+        # won't be picked up until a future "drain & rescan" feature.
+        with self._dispatched_lock:
+            queue_snapshot = list(queue)
+        for item in queue_snapshot:
             filepath = item["filepath"]
             existing = self.state.get_file(filepath)
             status = existing["status"] if existing else None
@@ -823,7 +927,10 @@ class Orchestrator:
         for t in threads:
             t.join()
 
-        logging.info("Gap filler finished")
+        total = heavy_count[0] + quick_count[0]
+        if total or pass_num == 1:
+            logging.info(f"Gap filler pass {pass_num}: {heavy_count[0]} heavy + {quick_count[0]} quick processed")
+        return total
 
     # =========================================================================
     # Helpers
@@ -870,10 +977,318 @@ class Orchestrator:
             return item
         return None
 
+    # =========================================================================
+    # Upload worker — runs after the GPU encode lands; ships bytes back to NAS
+    # =========================================================================
+
+    def _upload_worker(self, worker_id: int = 0):
+        """Pick UPLOADING rows and run finalize_upload on them.
+
+        finalize_upload handles SMB upload + duration verify + atomic
+        replace of the original on the NAS + mkvpropedit tag write +
+        Plex library scan trigger. Network-bound, CPU-light.
+
+        Decoupling this from the GPU worker is what keeps NVENC busy:
+        as soon as encode lands, the GPU thread sets status=UPLOADING and
+        moves to the next encode. This worker picks up the UPLOADING row
+        and ships bytes back over SMB while the GPU encodes the next one.
+
+        Coordinates via a simple ``_uploading`` set so multiple upload
+        workers (if configured) can't double-process the same file.
+        """
+        from pipeline.full_gamut import finalize_upload
+
+        tag = f"upload-{worker_id}"
+        logging.info(f"{tag} started")
+
+        while not self._shutdown.is_set():
+            picked = self._pick_for_upload()
+            if picked is None:
+                self._shutdown.wait(timeout=5)
+                continue
+
+            try:
+                finalize_upload(picked, self.state, self.config)
+            except Exception as e:
+                logging.error(f"{tag}: finalize_upload failed for "
+                              f"{os.path.basename(picked)}: {e}")
+                self.state.stats["errors"] = self.state.stats.get("errors", 0) + 1
+                self.state.save()
+            finally:
+                self._release_upload(picked)
+
+        logging.info(f"{tag} finished")
+
+    def _pick_for_upload(self) -> str | None:
+        """Find one filepath in UPLOADING status that isn't already being uploaded."""
+        try:
+            conn = self.state._get_conn()
+            rows = conn.execute(
+                "SELECT filepath FROM pipeline_files WHERE status = 'uploading'"
+            ).fetchall()
+        except Exception:
+            return None
+
+        for (fp,) in rows:
+            with self._uploading_lock:
+                if fp in self._uploading:
+                    continue
+                self._uploading.add(fp)
+                return fp
+        return None
+
+    def _release_upload(self, filepath: str) -> None:
+        with self._uploading_lock:
+            self._uploading.discard(filepath)
+
+    # =========================================================================
+    # Prep worker — CPU-bound stage between fetch and GPU encode
+    # =========================================================================
+
+    def _prep_worker(self, queue: list[dict], worker_id: int = 0):
+        """Run all CPU prep work (steps 1-5) ahead of the GPU encode.
+
+        Picks files where:
+          * fetch has landed (status=PROCESSING with local_path on disk)
+          * prep hasn't run yet (prep_done not set in extras)
+          * not currently being prepped by another prep worker (we use a
+            lightweight in-memory ``_prepping`` set to avoid duplication)
+
+        Calls :func:`pipeline.full_gamut.prepare_for_encode` which mutates
+        state on completion (FLAGGED_*, DONE-already-compliant, or
+        prep_done=True with prep_data extras). The GPU worker then picks
+        up only files with prep_done=True so it never waits on whisper /
+        remux / language detection.
+
+        Backpressure: if there are already N+ files prepped-and-not-yet-
+        encoded (configurable via ``prep_buffer_max``, default 3), pause
+        so we don't burn CPU producing more than the GPU can consume.
+        """
+        from pipeline.full_gamut import prepare_for_encode
+
+        tag = f"prep-{worker_id}"
+        logging.info(f"{tag} started")
+        prep_buffer_max = max(1, int(self.config.get("prep_buffer_max", 3)))
+
+        while not self._shutdown.is_set():
+            # Backpressure: count files already prepped-and-waiting on GPU.
+            # If at cap, sleep a bit; the GPU worker will drain.
+            prepped_count = self._count_prepped_waiting()
+            if prepped_count >= prep_buffer_max:
+                self._shutdown.wait(timeout=10)
+                continue
+
+            picked = self._pick_for_prep(queue)
+            if picked is None:
+                # Nothing to prep right now — wait briefly for fetch worker
+                # to land more files, then re-scan.
+                self._shutdown.wait(timeout=5)
+                continue
+
+            filepath = picked["filepath"]
+            try:
+                prep_data = prepare_for_encode(
+                    filepath, picked, self.config, self.state, self.staging_dir
+                )
+                if prep_data is None:
+                    logging.info(f"{tag}: prep parked {os.path.basename(filepath)} "
+                                 "(flagged / nothing-to-do / fetch failed)")
+                else:
+                    logging.info(f"{tag}: prep done for {os.path.basename(filepath)}")
+            except Exception as e:
+                logging.warning(f"{tag}: prep crashed on {os.path.basename(filepath)}: {e}")
+            finally:
+                self._release_prep(filepath)
+
+        logging.info(f"{tag} finished")
+
+    def _count_prepped_waiting(self) -> int:
+        """How many files are prepped (prep_done=True) but not yet encoded?
+
+        Cheap state DB scan. Used by prep workers for backpressure so we
+        don't waste CPU prepping ahead of what the GPU can consume.
+        """
+        try:
+            conn = self.state._get_conn()
+            row = conn.execute(
+                "SELECT COUNT(*) FROM pipeline_files WHERE status = 'processing' "
+                "AND extras LIKE '%\"prep_done\": true%' "
+                "AND extras NOT LIKE '%\"stage\": \"encoding\"%' "
+                "AND extras NOT LIKE '%\"stage\": \"pending_upload\"%'"
+            ).fetchone()
+            return int(row[0]) if row else 0
+        except Exception:
+            return 0
+
+    def _pick_for_prep(self, queue: list[dict]) -> dict | None:
+        """Pick the next queue item that's been fetched but not prepped.
+
+        Coordinates between prep workers via the ``_prepping`` set so two
+        workers can't grab the same file. Returns None if nothing's ready.
+        """
+        with self._dispatched_lock:
+            queue_snapshot = list(queue)
+
+        for item in queue_snapshot:
+            fp = item["filepath"]
+            with self._prepping_lock:
+                if fp in self._prepping:
+                    continue
+            existing = self.state.get_file(fp)
+            if not existing:
+                continue
+            status = existing.get("status")
+            if status != FileStatus.PROCESSING.value:
+                continue
+            if existing.get("prep_done"):
+                continue
+            local = existing.get("local_path")
+            if not (local and os.path.exists(local)):
+                continue
+            with self._prepping_lock:
+                if fp in self._prepping:
+                    continue
+                self._prepping.add(fp)
+            return item
+        return None
+
+    def _release_prep(self, filepath: str) -> None:
+        with self._prepping_lock:
+            self._prepping.discard(filepath)
+
+    # =========================================================================
+    # Queue refresh — picks up Sonarr/Radarr drop-ins mid-session
+    # =========================================================================
+
+    def _refresh_worker(
+        self,
+        full_gamut_queue: list[dict],
+        gap_filler_queue: list[dict],
+        interval_secs: float,
+    ) -> None:
+        """Periodically re-read media_report.json and merge new files.
+
+        Runs as a background thread. Polls the report's mtime every
+        ``interval_secs`` seconds; when it changes, calls
+        :meth:`_merge_new_files` to append unseen entries to the live
+        queues. Files that turn out to be already-known, terminal, or
+        in-flight are filtered out by ``categorise_entry`` + the
+        path-set check inside the merge.
+
+        Mutations happen under ``_dispatched_lock`` so iterating workers
+        (GPU pickers, gap_filler) don't race with appends.
+        """
+        from paths import MEDIA_REPORT
+
+        report_path = str(MEDIA_REPORT)
+        last_mtime = 0.0
+        try:
+            last_mtime = os.path.getmtime(report_path)
+        except OSError:
+            pass
+
+        logging.info(
+            f"Queue refresh worker started (poll every {interval_secs:.0f}s, "
+            f"watching {report_path})"
+        )
+        while not self._shutdown.is_set():
+            self._shutdown.wait(timeout=interval_secs)
+            if self._shutdown.is_set():
+                break
+
+            try:
+                mtime = os.path.getmtime(report_path)
+            except OSError:
+                continue
+            if mtime <= last_mtime:
+                continue
+            last_mtime = mtime
+
+            try:
+                added_full, added_gap = self._merge_new_files(
+                    full_gamut_queue, gap_filler_queue, report_path
+                )
+                if added_full or added_gap:
+                    logging.info(
+                        f"Queue refresh: +{added_full} full_gamut, "
+                        f"+{added_gap} gap_filler (now {len(full_gamut_queue)} / "
+                        f"{len(gap_filler_queue)})"
+                    )
+            except Exception as e:
+                logging.warning(f"Queue refresh failed (non-fatal): {e}")
+
+        logging.info("Queue refresh worker finished")
+
+    def _merge_new_files(
+        self,
+        full_gamut_queue: list[dict],
+        gap_filler_queue: list[dict],
+        report_path: str,
+    ) -> tuple[int, int]:
+        """Read the report and append any new entries to the live queues.
+
+        Returns ``(added_full, added_gap)`` counts. Idempotent: paths that
+        are already in either queue are skipped, as are paths whose state
+        DB row is terminal (DONE/FLAGGED_*) or actively in-flight.
+
+        Re-sorts both queues smallest-first after appending so the
+        fetch-worker / GPU-pickers walk them in the same order they
+        would after a fresh ``build_queues`` startup.
+        """
+        import json as _json
+
+        from pipeline.__main__ import categorise_entry
+        from pipeline.gap_filler import analyse_gaps
+
+        with open(report_path, encoding="utf-8") as f:
+            report = _json.load(f)
+
+        # Snapshot the current queue paths to avoid duplicate appends.
+        # Acquire the lock long enough to copy the path sets — workers
+        # may iterate concurrently but won't mutate, so this is safe.
+        with self._dispatched_lock:
+            known_full = {item.get("filepath") for item in full_gamut_queue}
+            known_gap = {item.get("filepath") for item in gap_filler_queue}
+
+        new_full: list[dict] = []
+        new_gap: list[dict] = []
+        for entry in report.get("files", []) or []:
+            fp = entry.get("filepath")
+            if not fp:
+                continue
+            if fp in known_full or fp in known_gap:
+                continue
+            category, item = categorise_entry(entry, self.config, self.state, self.control)
+            if category == "full_gamut":
+                new_full.append(item)
+            elif category == "gap_filler":
+                new_gap.append(item)
+
+        if not new_full and not new_gap:
+            return (0, 0)
+
+        with self._dispatched_lock:
+            full_gamut_queue.extend(new_full)
+            gap_filler_queue.extend(new_gap)
+            full_gamut_queue.sort(key=lambda x: x.get("file_size_bytes", 0))
+
+            def _gap_sort_key(e: dict) -> tuple[int, int]:
+                gaps = analyse_gaps(e, self.config)
+                return (1 if gaps.needs_fetch else 0, e.get("file_size_bytes", 0))
+
+            gap_filler_queue.sort(key=_gap_sort_key)
+
+        return (len(new_full), len(new_gap))
+
     def _all_done(self, queue: list[dict]) -> bool:
+        # Snapshot both the dispatched set AND the queue under the lock so
+        # the refresh worker's appends don't race with this iteration. Per-
+        # item state lookups can happen outside the lock (state.get_file
+        # has its own internal lock).
         with self._dispatched_lock:
             dispatched = set(self._dispatched)
-        for item in queue:
+            queue_snapshot = list(queue)
+        for item in queue_snapshot:
             fp = item["filepath"]
             existing = self.state.get_file(fp)
             status = existing["status"] if existing else None

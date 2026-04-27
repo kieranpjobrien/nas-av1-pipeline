@@ -153,19 +153,43 @@ def analyse_gaps(file_entry: dict, config: dict) -> GapAnalysis:
                 gaps.audio_transcode_indices.append(i)
             gaps.audio_keep_indices.append(i)
 
-    # Foreign audio check (keep track 0 + English/und).
+    # Foreign-audio strip planning. Mirrors ffmpeg._select_audio_streams so
+    # the gap_filler path produces the same result as the full encode path.
     # GATED by config["strip_non_english_audio"]. When stripping is on HOLD
-    # (e.g. awaiting whisper language verification), we do NOT plan any audio
-    # track removal here — the file is still fine for every other gap-fill
-    # action (metadata, filename clean, sub mux).
+    # we don't plan any audio track removal — the file is still fine for
+    # every other gap-fill action (metadata, filename clean, sub mux).
     if config.get("strip_non_english_audio", True) and len(audio_streams) > 1:
-        clean_audio_keep = [0]  # always keep original
-        for i, a in enumerate(audio_streams):
-            if i == 0:
-                continue
-            lang = (a.get("language") or a.get("detected_language") or "und").lower().strip()
-            if lang in KEEP_LANGS:
-                clean_audio_keep.append(i)
+        policy = config.get("audio_keep_policy", "original_language")
+        clean_audio_keep: list[int] | None = None
+
+        if policy == "original_language":
+            from pipeline.streams import (
+                parse_audio_stream,
+                select_audio_keep_indices_by_original_language,
+            )
+
+            tmdb = file_entry.get("tmdb") or {}
+            original_language = (tmdb.get("original_language") or "").strip().lower() or None
+            if original_language:
+                parsed = [parse_audio_stream(a, i) for i, a in enumerate(audio_streams)]
+                kept = select_audio_keep_indices_by_original_language(
+                    parsed,
+                    original_language,
+                    keep_english_too=bool(config.get("audio_keep_english_with_original", False)),
+                )
+                if kept is not None:
+                    clean_audio_keep = kept
+
+        if clean_audio_keep is None:
+            # Legacy "english_und" policy or no-TMDb fallback.
+            clean_audio_keep = [0]  # always keep stream 0
+            for i, a in enumerate(audio_streams):
+                if i == 0:
+                    continue
+                lang = (a.get("language") or a.get("detected_language") or "und").lower().strip()
+                if lang in KEEP_LANGS:
+                    clean_audio_keep.append(i)
+
         if len(clean_audio_keep) < len(audio_streams):
             gaps.needs_track_removal = True
             gaps.audio_keep_indices = clean_audio_keep

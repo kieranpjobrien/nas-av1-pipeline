@@ -21,10 +21,15 @@ from pipeline.state import PipelineState
 
 
 def _bare_orchestrator(tmp_path) -> Orchestrator:
-    """Build an Orchestrator wired up to temp state + control, no signals live."""
+    """Build an Orchestrator wired up to temp state + control, no signals live.
+
+    ``upload_concurrency=0`` keeps the legacy inline-upload behaviour so the
+    GPU-worker tests below can assert on the call order. Production (and the
+    new upload-worker tests in test_prep_worker.py) use ``upload_concurrency=1``.
+    """
     state = PipelineState(str(tmp_path / "state.db"))
     control = PipelineControl(str(tmp_path))
-    config = {"gpu_concurrency": 1, "fetch_concurrency": 1}
+    config = {"gpu_concurrency": 1, "fetch_concurrency": 1, "upload_concurrency": 0}
     # signal.signal doesn't work in pytest worker threads; patch it out.
     with patch("pipeline.orchestrator.signal") as fake_signal:
         fake_signal.SIGTERM = 0
@@ -54,7 +59,7 @@ class TestGpuWorkerInlineUpload:
         # Track call order: full_gamut first, finalize_upload second.
         calls: list[str] = []
 
-        def fake_full_gamut(fp, it, cfg, st, staging):
+        def fake_full_gamut(fp, it, cfg, st, staging, *, gpu_semaphore=None):
             calls.append("full_gamut")
             return True
 
@@ -140,10 +145,25 @@ class TestGapFillerSingleHeavyWorker:
         assert nas_mentions == [], "Simplified gap filler should not spawn NAS-specific workers"
 
     def test_heavy_worker_skipped_when_server_not_configured(self, tmp_path, monkeypatch, caplog):
-        """No SERVER_SSH_HOST -> no heavy worker thread, just the quick worker."""
+        """No SERVER_SSH_HOST -> no heavy worker thread, just the quick worker.
+
+        Updated for the drain-and-rescan loop: shutdown is fired AFTER one
+        pass runs so the "Heavy worker skipped" log emits. Without the
+        delay, the outer loop would exit before any pass ran.
+        """
+        import threading
+        import time
+
         orch = _bare_orchestrator(tmp_path)
-        orch._shutdown.set()
+        # Tight rescan interval so the post-pass wait doesn't slow the test.
+        orch.config["gap_filler_rescan_interval_secs"] = 0.05
         monkeypatch.setattr("pipeline.nas_worker.SERVER", {"host": "", "label": "SRV"})
+
+        def stop_soon():
+            time.sleep(0.2)
+            orch._shutdown.set()
+
+        threading.Thread(target=stop_soon, daemon=True).start()
 
         with caplog.at_level(logging.INFO):
             orch._gap_filler_worker([])
@@ -233,3 +253,64 @@ class TestConfigDefaults:
         import pipeline.config as cfg
 
         assert not hasattr(cfg, "QUALITY_PROFILES")
+
+
+class TestGpuSemaphoreScope:
+    """GPU semaphore is held ONLY around _run_encode — not the surrounding
+    prep/verify/upload steps. Used to be the entire full_gamut() body, which
+    parked the slot idle for ~30-90s of CPU prep per file.
+    """
+
+    def test_gpu_worker_does_not_outer_wrap_full_gamut_in_semaphore(self, tmp_path, monkeypatch):
+        """The _gpu_worker call site must NOT wrap full_gamut in `with semaphore:` —
+        otherwise prep work re-acquires the slot for free, defeating the narrowing.
+        Instead it passes the semaphore as a kwarg so full_gamut can scope it
+        precisely to _run_encode.
+        """
+        orch = _bare_orchestrator(tmp_path)
+
+        # Capture how the semaphore is observed inside full_gamut. If the outer
+        # caller already holds it, _value will be 0 on entry. If not, _value
+        # equals the configured concurrency.
+        seen_value_on_entry: list[int] = []
+        seen_kwarg: list[object] = []
+
+        def fake_full_gamut(fp, it, cfg, st, staging, *, gpu_semaphore=None):
+            # Inspect the semaphore as observed by full_gamut.
+            seen_value_on_entry.append(orch._gpu_semaphore._value)
+            seen_kwarg.append(gpu_semaphore)
+            return True
+
+        monkeypatch.setattr("pipeline.orchestrator.full_gamut", fake_full_gamut)
+        monkeypatch.setattr("pipeline.orchestrator.finalize_upload", lambda *a, **kw: True)
+
+        item = {
+            "filepath": str(tmp_path / "x.mkv"),
+            "filename": "x.mkv",
+            "file_size_bytes": 100,
+            "video": {},
+        }
+        (tmp_path / "x.mkv").write_bytes(b"x")
+        queue = [item]
+
+        import threading
+        import time
+
+        def stop_soon():
+            time.sleep(0.3)
+            orch._shutdown.set()
+
+        threading.Thread(target=stop_soon, daemon=True).start()
+        orch._gpu_worker(queue, [], worker_id=0)
+
+        # full_gamut must have been called.
+        assert seen_value_on_entry, "full_gamut wasn't called"
+        # Semaphore is NOT held when full_gamut is entered — the value equals
+        # gpu_concurrency (1 in this test fixture). Was 0 before the narrowing.
+        assert seen_value_on_entry[0] == orch._gpu_concurrency, (
+            f"semaphore was held by caller on full_gamut entry "
+            f"(_value={seen_value_on_entry[0]}, expected {orch._gpu_concurrency}); "
+            "the outer `with semaphore:` block in _gpu_worker must be removed"
+        )
+        # And full_gamut received the semaphore so it can wrap _run_encode itself.
+        assert seen_kwarg[0] is orch._gpu_semaphore
