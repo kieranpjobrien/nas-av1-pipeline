@@ -194,31 +194,21 @@ def analyse_gaps(file_entry: dict, config: dict) -> GapAnalysis:
             gaps.needs_track_removal = True
             gaps.audio_keep_indices = clean_audio_keep
 
-    # Subtitle selection: keep exactly 1 regular English sub + forced/foreign parts.
-    # Strip: HI subs, duplicate English subs, all non-English subs.
+    # Subtitle selection delegates to pipeline.streams.select_sub_keep_indices
+    # so gap_filler stays in lock-step with the encode-time policy:
+    #   - always keep forced/foreign-parts subs
+    #   - keep ONE English (prefer non-HI; fall back to HI if that's all we have)
+    #   - strip everything else
     #
     # GATED by config["strip_non_english_subs"]. When stripping is on HOLD
     # we keep every existing sub. `sub_keep_indices` stays empty; the
     # `_strip_tracks_on_nas` None path (``sub_keep_ids=None``) then signals
     # "keep all" to mkvmerge.
-    #
-    # Uses pipeline.streams.parse_sub_stream — HI detection is stricter than the
-    # inline version that lived here (also checks disposition flags and catches
-    # ``cc``/``closed.caption``), but the English-selection behaviour is identical.
     if config.get("strip_non_english_subs", True):
-        from pipeline.config import ENG_LANGS as _ENG_SUB_LANGS
+        from pipeline.streams import select_sub_keep_indices
 
-        sub_keep = []
-        found_regular_eng = False
-        for i, raw in enumerate(sub_streams):
-            sub = parse_sub_stream(raw, index=i)
-            lang = sub.language or (sub.detected_language or "und").lower().strip()
-            if sub.is_forced:
-                sub_keep.append(i)  # always keep forced/foreign parts subs
-            elif lang in _ENG_SUB_LANGS and not sub.is_hi and not found_regular_eng:
-                sub_keep.append(i)  # keep first regular English sub
-                found_regular_eng = True
-            # Everything else (HI, non-English, duplicate English, und) gets stripped
+        parsed_subs = [parse_sub_stream(raw, index=i) for i, raw in enumerate(sub_streams)]
+        sub_keep = select_sub_keep_indices(parsed_subs)
 
         if len(sub_keep) < len(sub_streams):
             gaps.needs_track_removal = True

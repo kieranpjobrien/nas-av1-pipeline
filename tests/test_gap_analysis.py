@@ -155,6 +155,26 @@ class TestSubtitleSelection:
         assert gaps.needs_track_removal is True
         assert gaps.sub_keep_indices == [0]
 
+    def test_hi_only_english_kept_as_fallback(self, default_config):
+        """When the ONLY English sub is HI/SDH, keep it rather than stripping
+        to zero English tracks. Regression test for 2026-04-28 change: under
+        the old rule a file whose only English sub was tagged SDH ended up
+        with no embedded English at all, so Bazarr's "Treat Embedded as
+        Downloaded" check failed and it kept re-grabbing HI sidecars.
+        """
+        entry = _make_entry(
+            audio_streams=[{"codec_raw": "eac3", "language": "eng"}],
+            subtitle_streams=[
+                {"language": "eng", "title": "SDH"},
+                {"language": "fra", "title": "French"},
+            ],
+            tmdb={"id": 1},
+        )
+        gaps = analyse_gaps(entry, default_config)
+        # SDH is now kept (no other English available); French is stripped
+        assert 0 in gaps.sub_keep_indices, "HI English must be kept as fallback"
+        assert 1 not in gaps.sub_keep_indices, "non-English sub still stripped"
+
 
 class TestAudioTranscode:
     """Audio codec transcoding detection."""

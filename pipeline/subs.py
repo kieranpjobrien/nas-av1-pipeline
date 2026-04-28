@@ -139,24 +139,42 @@ def scan_sidecars(video_path: str, exts: frozenset[str] = MUX_EXTS) -> list[Side
 def pick_english_sidecars(sidecars: list[SidecarSub]) -> tuple[list[SidecarSub], list[SidecarSub]]:
     """Split sidecars into (to_mux, to_delete).
 
-    Rule matches gap_filler's historic behaviour:
-      - First regular (non-HI) English sidecar encountered goes to ``to_mux``.
-      - HI sidecars, duplicate English sidecars, and foreign-language sidecars
-        all go to ``to_delete``.
+    Rule (2026-04-28 update):
+      - Pick exactly one English sidecar to mux. Prefer regular non-HI;
+        fall back to HI if that's all that's available.
+      - Everything else (foreign-language sidecars, duplicates, the
+        unchosen English variant) goes to ``to_delete``.
 
-    Sidecars are considered in the order given; callers wanting a deterministic
-    pick should sort first (mux_external_subs.py sorts by filename length to
-    prefer the shortest name as canonical).
+    Why the change: Bazarr's providers sometimes only have HI subs
+    available for older / niche titles. The previous "regular only"
+    rule left those files with no embedded sub at all, and Bazarr
+    kept re-grabbing the HI sidecar each scan. Accepting HI as a
+    fallback gives every encoded MKV one English track, which then
+    satisfies Bazarr's "Treat Embedded Subtitles as Downloaded" check.
+
+    Sidecars are considered in the order given; callers wanting a
+    deterministic pick should sort first.
     """
     to_mux: list[SidecarSub] = []
     to_delete: list[SidecarSub] = []
-    found_regular_eng = False
+
+    # First pass: take the first regular (non-HI) English sidecar.
+    chosen: SidecarSub | None = None
     for sub in sidecars:
-        is_eng = sub.language in ENG_LANGS
-        if is_eng and not sub.is_hi and not found_regular_eng:
+        if sub.language in ENG_LANGS and not sub.is_hi:
+            chosen = sub
+            break
+
+    # Fallback: no regular English — take the first HI English instead.
+    if chosen is None:
+        for sub in sidecars:
+            if sub.language in ENG_LANGS and sub.is_hi:
+                chosen = sub
+                break
+
+    for sub in sidecars:
+        if sub is chosen:
             to_mux.append(sub)
-            found_regular_eng = True
         else:
-            # HI, foreign, or duplicate English — all go to cleanup
             to_delete.append(sub)
     return to_mux, to_delete

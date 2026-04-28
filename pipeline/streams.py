@@ -468,27 +468,47 @@ def select_sub_keep_indices(
 ) -> list[int]:
     """Return subtitle stream indices to keep.
 
-    Policy:
+    Policy (2026-04-28 update):
       - ALWAYS keep forced / foreign-parts subs (any language).
-      - KEEP the first regular English non-HI sub.
-      - STRIP everything else (HI, non-English, duplicate English, und).
+      - KEEP one English track. Prefer regular non-HI; fall back to HI
+        if that's the only English available.
+      - STRIP everything else (non-English, the unchosen English
+        duplicate, und).
+
+    Why the change: matches the same fallback rule we now use for
+    external sidecars in ``pipeline.subs.pick_english_sidecars`` —
+    files with only an HI variant available used to ship with no
+    English track at all. Accepting HI as a fallback guarantees one
+    English sub on every MKV, which satisfies Bazarr's "Treat
+    Embedded Subtitles as Downloaded" check and stops re-grabs.
 
     ``eng_langs`` defaults to :data:`pipeline.config.ENG_LANGS`.
     """
     if eng_langs is None:
         eng_langs = ENG_LANGS
 
+    def _is_eng(s: SubStream) -> bool:
+        lang = (s.language or s.detected_language or "").lower().strip()
+        return lang in eng_langs
+
     keep: list[int] = []
-    found_regular_eng = False
+    # First pass: forced + first regular (non-HI) English.
+    chosen_eng_idx: int | None = None
     for s in streams:
         if s.is_forced:
             keep.append(s.index)
             continue
-        lang = s.language or (s.detected_language or "")
-        lang = lang.lower().strip()
-        if lang in eng_langs and not s.is_hi and not found_regular_eng:
+        if _is_eng(s) and not s.is_hi and chosen_eng_idx is None:
+            chosen_eng_idx = s.index
             keep.append(s.index)
-            found_regular_eng = True
-        # else: strip (HI, non-English, duplicate English, und)
+
+    # Fallback: no regular English picked — take the first HI English.
+    if chosen_eng_idx is None:
+        for s in streams:
+            if s.is_forced:
+                continue  # already kept
+            if _is_eng(s) and s.is_hi:
+                keep.append(s.index)
+                break
 
     return keep
