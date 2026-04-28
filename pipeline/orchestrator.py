@@ -957,31 +957,55 @@ class Orchestrator:
         from pipeline.nas_worker import SERVER
 
         threads = []
-        # Single SSH mux worker against SERVER. When SERVER is configured it's always
-        # the better path (native Docker, NFS-mounted media — much faster than Synology).
-        # If not configured, skip mux ops entirely rather than fall back to NAS SSH.
+        # Mux worker — backend is config-selectable:
+        #   "local"  (default 2026-04-29) — runs mkvmerge.exe locally against
+        #            UNC paths. Slower (SMB-bound) but doesn't load the NAS.
+        #   "remote" — SSH+Docker against SERVER. Faster, but stresses Synology.
         #
-        # Status side-effect: regardless of whether the worker runs, write a
-        # status file the dashboard / invariants can read. Previously the only
-        # signal was a single INFO log line that scrolled away after one screen,
-        # leaving 1,264 queued tasks invisible for hours. The 2026-04-29
-        # incident motivated promoting this to a WARNING (when there's queue)
-        # plus a persistent status file.
+        # Status side-effect: write a state file the dashboard / invariants
+        # can read regardless of which backend is in use, so the user always
+        # sees mux queue + worker availability.
+        backend = (self.config.get("gap_filler_mux_backend") or "local").lower()
+        backend_available = False
+        backend_host = None
+        if backend == "remote":
+            backend_available = bool(SERVER.get("host"))
+            backend_host = SERVER.get("host") or None
+        elif backend == "local":
+            from pipeline import local_mux as _local_mux
+            backend_available = _local_mux.is_available()
+            backend_host = "local" if backend_available else None
+
         self._write_heavy_worker_status(
-            configured=bool(SERVER.get("host")),
+            configured=backend_available,
             queued_count=mux_total,
-            host=SERVER.get("host") or None,
+            host=backend_host,
         )
-        if SERVER.get("host"):
-            threads.append(threading.Thread(target=mux_worker, args=("SRV", SERVER), daemon=True))
+
+        if backend_available:
+            threads.append(threading.Thread(
+                target=mux_worker,
+                # `machine` is only meaningful for the remote backend — local
+                # ignores it. Pass SERVER either way; the dispatcher in
+                # gap_filler._strip_tracks selects by backend.
+                args=("SRV" if backend == "remote" else "LOCAL", SERVER if backend == "remote" else {}),
+                daemon=True,
+            ))
         elif mux_total > 0:
-            logging.warning(
-                f"  Mux worker DISABLED — {mux_total} files queued for "
-                f"mkvmerge strip/mux work but SERVER_SSH_HOST is not set. "
-                f"Set it in .env (e.g. SERVER_SSH_HOST=nas) and restart the pipeline."
-            )
+            if backend == "remote":
+                logging.warning(
+                    f"  Mux worker DISABLED — {mux_total} files queued but "
+                    f"SERVER_SSH_HOST is not set. Set it in .env or switch "
+                    f"gap_filler_mux_backend to 'local'."
+                )
+            else:
+                logging.warning(
+                    f"  Mux worker DISABLED — {mux_total} files queued but "
+                    f"local mkvmerge.exe was not found. Install MKVToolNix "
+                    f"or switch gap_filler_mux_backend to 'remote'."
+                )
         else:
-            logging.info("  Mux worker skipped (SERVER_SSH_HOST not set, queue empty)")
+            logging.info(f"  Mux worker idle (backend={backend}, queue empty)")
         # Single local quick worker (rename/metadata/delete — instant ops).
         threads.append(threading.Thread(target=quick_worker, args=("QUICK",), daemon=True))
 

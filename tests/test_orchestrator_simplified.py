@@ -144,19 +144,21 @@ class TestGapFillerSingleHeavyWorker:
         nas_mentions = [r for r in caplog.records if "NAS workers" in r.getMessage()]
         assert nas_mentions == [], "Simplified gap filler should not spawn NAS-specific workers"
 
-    def test_heavy_worker_skipped_when_server_not_configured(self, tmp_path, monkeypatch, caplog):
-        """No SERVER_SSH_HOST -> no heavy worker thread, just the quick worker.
+    def test_heavy_worker_idle_when_server_not_configured(self, tmp_path, monkeypatch, caplog):
+        """Backend=remote + no SERVER_SSH_HOST + empty queue → "idle" log message.
 
-        Updated for the drain-and-rescan loop: shutdown is fired AFTER one
-        pass runs so the "Heavy worker skipped" log emits. Without the
-        delay, the outer loop would exit before any pass ran.
+        Updated 2026-04-29 for the dual-backend split. The default backend
+        is now "local" which works without SSH, so the only way to exercise
+        the no-worker path with an empty queue is to explicitly select
+        remote with no host.
         """
         import threading
         import time
 
         orch = _bare_orchestrator(tmp_path)
-        # Tight rescan interval so the post-pass wait doesn't slow the test.
         orch.config["gap_filler_rescan_interval_secs"] = 0.05
+        # Force the remote-no-host scenario explicitly (default is local now).
+        orch.config["gap_filler_mux_backend"] = "remote"
         monkeypatch.setattr("pipeline.nas_worker.SERVER", {"host": "", "label": "SRV"})
 
         def stop_soon():
@@ -169,8 +171,11 @@ class TestGapFillerSingleHeavyWorker:
             orch._gap_filler_worker([])
 
         msgs = [r.getMessage() for r in caplog.records]
-        # 2026-04-29 rename: heavy_worker -> mux_worker (audio transcode removed)
-        assert any("Mux worker skipped" in m for m in msgs)
+        # Empty queue + unavailable backend → "idle (backend=remote, queue empty)"
+        # Non-empty queue would be a WARNING with "DISABLED" — covered separately.
+        assert any("Mux worker idle" in m for m in msgs), (
+            f"expected 'Mux worker idle' in logs; got: {msgs}"
+        )
 
 
 class TestSkipListHonoured:

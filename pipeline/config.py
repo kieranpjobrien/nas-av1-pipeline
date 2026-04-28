@@ -152,6 +152,13 @@ DEFAULT_CONFIG = {
     # a pipeline restart. Idle pause; busy pause is hardcoded short (5s)
     # so consecutive batches drain back-to-back.
     "gap_filler_rescan_interval_secs": 60.0,
+    # Gap filler mux backend: "local" runs mkvmerge.exe on this machine
+    # against UNC paths (NAS-only does SMB I/O — no NAS CPU stress, no SSH
+    # required). "remote" SSHes to NAS and runs mkvmerge inside the
+    # mkvworker Docker container (faster, ~10s/file vs ~2-3min, but adds
+    # NAS load). User chose local 2026-04-29 after we hit OOM-kill cascades
+    # running concurrent SSH+Docker+mkvmerge on the Synology.
+    "gap_filler_mux_backend": "local",
 }
 
 # Containers that can cause NVENC failures — remux to .mkv before encoding
