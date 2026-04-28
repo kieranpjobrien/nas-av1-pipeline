@@ -20,6 +20,146 @@ function fmtAge(ms) {
   return `${Math.floor(h / 24)}d`;
 }
 
+function fmtEta(secs) {
+  if (secs == null || secs < 0) return null;
+  const h = Math.floor(secs / 3600);
+  const m = Math.floor((secs % 3600) / 60);
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m`;
+  return `${secs}s`;
+}
+
+function LangDetectProgress() {
+  const [state, setState] = useState(null);
+  useEffect(() => {
+    let cancelled = false;
+    const refresh = () => {
+      api
+        .getLangDetectStatus()
+        .then((s) => !cancelled && setState(s))
+        .catch(() => {});
+    };
+    refresh();
+    // Poll fast while running, slow when idle. Re-evaluating cadence on each
+    // render keeps the interval in step with the current state.
+    const id = setInterval(refresh, 2500);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, []);
+
+  if (!state || !state.running) return null;
+
+  const total = state.total || 0;
+  const processed = state.processed || 0;
+  const detected = state.detected || 0;
+  const failed = state.failed || 0;
+  const pct = total > 0 ? Math.min(100, (processed / total) * 100) : 0;
+  const recent = Array.isArray(state.recent) ? state.recent : [];
+
+  return (
+    <div className="encode-progress" style={{ marginTop: 16 }}>
+      <h3>
+        Whisper language detection
+        <span
+          className="mono"
+          style={{ color: "var(--ink-3)", fontSize: 11, fontWeight: 400, marginLeft: "auto" }}
+        >
+          {fmtNum(processed)} / {fmtNum(total)} files
+          {state.eta_secs != null && ` · ETA ${fmtEta(state.eta_secs)}`}
+          {state.rate_files_per_min != null && ` · ${state.rate_files_per_min.toFixed(1)} files/min`}
+        </span>
+      </h3>
+      <div
+        style={{
+          margin: "10px 0",
+          height: 8,
+          background: "var(--line)",
+          borderRadius: 4,
+          overflow: "hidden",
+        }}
+      >
+        <div
+          style={{
+            height: "100%",
+            width: `${pct}%`,
+            background: "#10b981",
+            transition: "width 0.4s ease",
+          }}
+        />
+      </div>
+      <div
+        style={{
+          display: "flex",
+          gap: 16,
+          fontSize: 12,
+          color: "var(--ink-2)",
+          marginBottom: recent.length ? 8 : 0,
+        }}
+      >
+        <span>
+          <span className="mono" style={{ color: "#10b981", fontWeight: 600 }}>
+            {fmtNum(detected)}
+          </span>{" "}
+          detected
+        </span>
+        {failed > 0 && (
+          <span>
+            <span className="mono" style={{ color: "var(--warn)", fontWeight: 600 }}>
+              {fmtNum(failed)}
+            </span>{" "}
+            unresolved
+          </span>
+        )}
+        <span style={{ marginLeft: "auto", fontSize: 11, color: "var(--ink-3)" }}>
+          {pct.toFixed(1)}%
+        </span>
+      </div>
+      {recent.length > 0 && (
+        <div
+          style={{
+            marginTop: 8,
+            paddingTop: 8,
+            borderTop: "1px solid var(--line)",
+            fontSize: 11,
+            color: "var(--ink-3)",
+          }}
+        >
+          <div style={{ marginBottom: 4, color: "var(--ink-2)" }}>Recent:</div>
+          {recent.slice(-5).reverse().map((r, i) => (
+            <div
+              key={i}
+              className="mono"
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                gap: 8,
+                padding: "2px 0",
+              }}
+            >
+              <span
+                style={{
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                  flex: 1,
+                  minWidth: 0,
+                }}
+              >
+                {r.file}
+              </span>
+              <span style={{ color: r.detected === "unresolved" ? "var(--warn)" : "#10b981" }}>
+                {r.detected}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ActiveRow({ f }) {
   return (
     <div className="active" style={f.stale ? { borderColor: "rgba(240,180,41,0.35)" } : undefined}>
@@ -529,6 +669,10 @@ export function Glance({ data, pipelineData, throughputPerDay, workersActive, wo
         </div>
       </div>
 
+      {/* Whisper batch progress — visible only while a language-detection
+          run is active. Polled at 2s while running so progress feels live. */}
+      <LangDetectProgress />
+
       {/* Standards compliance breakdown — the "what's left to do" view per standard.
           Same metrics as the classic Pipeline page, but with remaining counts front
           and centre rather than just completed percentages. */}
@@ -557,7 +701,7 @@ export function Glance({ data, pipelineData, throughputPerDay, workersActive, wo
               { k: "subs", label: "English Subs", pct: completion.pct_subs, done: completion.subs_done, colour: "#a78bfa" },
               { k: "foreign_subs", label: "No Foreign Subs", pct: completion.pct_no_foreign_subs, done: completion.no_foreign_subs, colour: "#c084fc" },
               { k: "tmdb", label: "TMDb Metadata", pct: completion.pct_tmdb, done: completion.has_tmdb, colour: "#f59e0b" },
-              { k: "langs", label: "Langs Known", pct: completion.pct_langs_known, done: completion.total - (completion.und_audio_files || 0) - (completion.und_sub_files || 0), colour: "#10b981" },
+              { k: "langs", label: "Langs Known", pct: completion.pct_langs_known, done: (completion.total || 0) - (completion.files_with_und || 0), colour: "#10b981" },
               { k: "filename", label: "Clean Filename", pct: completion.pct_filename, done: completion.has_clean_filename, colour: "#6366f1" },
               { k: "english_filename", label: "Folder Match", pct: completion.pct_english_filename, done: completion.has_english_filename, colour: "#ec4899" },
             ].map(({ k, label, pct, done, colour }) => {

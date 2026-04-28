@@ -250,6 +250,32 @@ def get_health(request: Request) -> dict:
     return _health_cache
 
 
+@router.get("/api/lang-detect/status")
+def get_lang_detect_status() -> dict:
+    """Return whisper batch progress state for the dashboard card.
+
+    Reads ``F:/AV1_Staging/lang_detect_state.json`` (written by
+    ``pipeline.language.write_progress_state`` after every file). When no
+    run is active or the file doesn't exist, returns ``{"running": false}``.
+
+    The dashboard polls this every few seconds while a batch is running.
+    Not cached server-side — the client controls polling frequency.
+    """
+    import json as _json
+    import os as _os
+
+    from paths import STAGING_DIR as _staging
+
+    state_path = _os.path.join(str(_staging), "lang_detect_state.json")
+    if not _os.path.exists(state_path):
+        return {"running": False}
+    try:
+        with open(state_path, encoding="utf-8") as f:
+            return _json.load(f)
+    except (OSError, ValueError):
+        return {"running": False}
+
+
 # --- Deep health / invariants ---
 
 _health_deep_cache: dict = {}

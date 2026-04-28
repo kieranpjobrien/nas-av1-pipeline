@@ -23,6 +23,7 @@ import queue
 import re
 import shutil
 import subprocess
+import time
 import sys
 import threading
 from collections import Counter
@@ -1767,6 +1768,44 @@ def _patch_entry_from_results(
             stats["failed"] = stats.get("failed", 0) + 1
 
 
+def _progress_state_path() -> str:
+    """Return the absolute path of the lang-detect progress state file."""
+    from paths import STAGING_DIR
+    return os.path.join(str(STAGING_DIR), "lang_detect_state.json")
+
+
+def write_progress_state(state: dict) -> None:
+    """Atomically write the lang-detect progress state file.
+
+    The dashboard's ``/api/lang-detect/status`` endpoint reads this file and
+    surfaces the contents as a card on Glance. Called at start, after every
+    completed file, and at end of the batch run. Atomic write so the dashboard
+    never reads a half-written file.
+    """
+    path = _progress_state_path()
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(state, f, indent=2, ensure_ascii=False)
+        os.replace(tmp, path)
+    except OSError as e:
+        logging.debug(f"  Failed to write lang_detect_state.json: {e}")
+
+
+def clear_progress_state() -> None:
+    """Mark the progress state as not-running (called on clean exit)."""
+    try:
+        path = _progress_state_path()
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                state = json.load(f)
+            state["running"] = False
+            state["finished_at"] = datetime.now().isoformat(timespec="seconds")
+            write_progress_state(state)
+    except (OSError, json.JSONDecodeError):
+        pass
+
+
 def _incremental_save(our_report: dict, processed_entries: list[dict]) -> None:
     """Merge language detection results into the on-disk report without stomping
     other changes (TMDb / scanner may run concurrently).
@@ -1928,6 +1967,24 @@ def _run_text_whisper_strategy(
 
     completed = [0]
 
+    # Initial progress state — surface to the dashboard immediately so the user
+    # sees the run kick off rather than waiting for the first file to complete.
+    started_at = datetime.now().isoformat(timespec="seconds")
+    start_monotonic = time.monotonic()
+    recent_files: list[dict] = []  # ring buffer of last 5
+    write_progress_state({
+        "running": True,
+        "started_at": started_at,
+        "total": actual_total,
+        "processed": 0,
+        "detected": 0,
+        "failed": 0,
+        "current_file": None,
+        "rate_files_per_min": 0.0,
+        "eta_secs": None,
+        "recent": [],
+    })
+
     def worker() -> None:
         while True:
             try:
@@ -1973,6 +2030,42 @@ def _run_text_whisper_strategy(
                     f"({stats.get('detected', 0)} detected, {stats.get('failed', 0)} unresolved)"
                 )
 
+            # Update the dashboard progress state. Held inside result_lock so
+            # the recent-files ring buffer + counters stay consistent under
+            # 4-thread concurrency.
+            with result_lock:
+                # Build recent-files entry from this file's detections
+                file_label = os.path.basename(filepath)[:80]
+                first_det = next(
+                    (
+                        f"{r[0]} ({r[1]:.2f})"
+                        for r in results.values()
+                        if r[0] and r[0] != "und" and r[1] >= min_confidence
+                    ),
+                    "unresolved",
+                )
+                recent_files.append({"file": file_label, "detected": first_det})
+                if len(recent_files) > 5:
+                    recent_files.pop(0)
+
+                elapsed = max(time.monotonic() - start_monotonic, 0.001)
+                rate = c / elapsed * 60.0
+                eta_secs = (
+                    (actual_total - c) / (rate / 60.0) if rate > 0 else None
+                )
+                write_progress_state({
+                    "running": True,
+                    "started_at": started_at,
+                    "total": actual_total,
+                    "processed": c,
+                    "detected": stats.get("detected", 0),
+                    "failed": stats.get("failed", 0),
+                    "current_file": file_label,
+                    "rate_files_per_min": round(rate, 2),
+                    "eta_secs": int(eta_secs) if eta_secs is not None else None,
+                    "recent": list(recent_files),
+                })
+
             with save_lock:
                 _incremental_save(report, [entry])
 
@@ -1983,6 +2076,9 @@ def _run_text_whisper_strategy(
         t.start()
     for t in threads:
         t.join()
+
+    # Mark complete on the dashboard.
+    clear_progress_state()
 
     logging.info(
         f"  Whisper complete: {stats.get('detected', 0)} detected, {stats.get('failed', 0)} unresolved"
@@ -2574,8 +2670,16 @@ def main() -> None:
     if use_whisper:
         from paths import PIPELINE_STATE_DB
 
+        # CPU-mode whisper does NOT contend with NVENC for VRAM, so the
+        # encode-in-progress guard is only relevant for GPU whisper. If the
+        # caller has set WHISPER_FORCE_CPU=1 (or its truthy equivalents),
+        # let whisper run alongside the encoder — this is the same model
+        # the pipeline uses internally during qualify (whisper on CPU,
+        # encode on GPU, no contention).
+        force_cpu = os.environ.get("WHISPER_FORCE_CPU", "").strip().lower() in {"1", "true", "yes"}
+
         db_path = str(PIPELINE_STATE_DB)
-        if os.path.exists(db_path):
+        if os.path.exists(db_path) and not force_cpu:
             try:
                 import sqlite3
 
@@ -2588,7 +2692,7 @@ def main() -> None:
                 if encoding:
                     logging.error(f"Pipeline is actively encoding {encoding} file(s) on GPU.")
                     logging.error(
-                        "Whisper would compete for VRAM. Stop the pipeline first, or run without --whisper."
+                        "Whisper would compete for VRAM. Stop the pipeline first, run with WHISPER_FORCE_CPU=1, or run without --whisper."
                     )
                     sys.exit(1)
             except Exception:
