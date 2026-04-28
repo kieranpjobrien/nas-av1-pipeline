@@ -3,9 +3,11 @@
 Covers the substring matcher in pipeline.subs_exclusion AND the integration
 with server.routers.library._compliance_for_entry — a file matched by a
 pattern must:
-  * stop adding ``subs_english_count_wrong`` to violations
-  * still flag ``subs_foreign_present`` / ``subs_hi_present`` (those represent
-    active garbage to clean up regardless of the no-subs-needed policy)
+  * stop adding ``subs_english_missing`` to violations
+  * still flag ``subs_foreign_present`` (active garbage to clean up
+    regardless of the no-subs-needed policy)
+HI English is now acceptable per the 2026-04-28 policy update — see
+the integration tests for how that interacts with the exclusion list.
 """
 
 from __future__ import annotations
@@ -102,7 +104,7 @@ def test_excluded_title_with_no_subs_passes_compliance(patterns_file):
     entry = _av1_entry(r"\\NAS\Series\Puffin Rock\E01.mkv")
     c = _compliance_for_entry(entry)
     assert c["subs_ok"] is True
-    assert "subs_english_count_wrong" not in c["violations"]
+    assert "subs_english_missing" not in c["violations"]
 
 
 def test_non_excluded_title_with_no_subs_still_flagged(patterns_file):
@@ -110,7 +112,7 @@ def test_non_excluded_title_with_no_subs_still_flagged(patterns_file):
     entry = _av1_entry(r"\\NAS\Series\The Office\E01.mkv")
     c = _compliance_for_entry(entry)
     assert c["subs_ok"] is False
-    assert "subs_english_count_wrong" in c["violations"]
+    assert "subs_english_missing" in c["violations"]
 
 
 def test_excluded_title_with_foreign_sub_still_flagged(patterns_file):
@@ -135,3 +137,31 @@ def test_excluded_title_with_english_sub_compliant(patterns_file):
     )
     c = _compliance_for_entry(entry)
     assert c["subs_ok"] is True
+
+
+def test_hi_only_english_now_counts_as_compliant():
+    """File with only an HI English sub is compliant under the 2026-04-28 rule.
+
+    Previously the dashboard required exactly 1 regular English with zero HI,
+    so files where the only English option was HI ended up tagged "missing
+    English" forever. Now the encode-time policy keeps HI English when no
+    regular variant is available, and the dashboard agrees.
+    """
+    entry = _av1_entry(
+        r"\\NAS\Series\Some Show\E01.mkv",
+        subtitle_streams=[{"language": "eng", "title": "SDH"}],
+    )
+    c = _compliance_for_entry(entry)
+    assert c["subs_ok"] is True
+    assert "subs_english_missing" not in c["violations"]
+
+
+def test_no_english_at_all_still_flagged():
+    """File with zero English subs (HI or regular) is still missing."""
+    entry = _av1_entry(
+        r"\\NAS\Series\Some Show\E01.mkv",
+        subtitle_streams=[{"language": "fre", "title": "French"}],
+    )
+    c = _compliance_for_entry(entry)
+    assert c["subs_ok"] is False
+    assert "subs_english_missing" in c["violations"]

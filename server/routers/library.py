@@ -103,6 +103,20 @@ def _compliance_for_entry(entry: dict, keep_langs: set[str] | None = None) -> di
     audio_ok = audio_codec_ok and audio_lang_ok
 
     # Subtitles (internal + external)
+    #
+    # 2026-04-28 update: we now accept HI English as compliant. Previously
+    # the rule was "exactly 1 regular English + zero HI". That mismatched
+    # the encode-time policy (pipeline.streams.select_sub_keep_indices now
+    # falls back to HI English when no regular English exists), so files
+    # with only an HI track ended up tagged "missing English" forever even
+    # though they had English coverage on disk.
+    #
+    # New rule:
+    #   has_english_sub = at least 1 English track (regular OR HI)
+    #   subs_ok        = has_english_sub AND no foreign subs
+    #
+    # HI-only files are no longer a violation. Foreign-sub presence still
+    # is — those are active garbage to clean up.
     sub_streams = entry.get("subtitle_streams") or []
     ext_subs = entry.get("external_subtitles") or []
 
@@ -114,32 +128,33 @@ def _compliance_for_entry(entry: dict, keep_langs: set[str] | None = None) -> di
     )
     regular_eng_count = regular_eng_internal + regular_eng_external
 
-    hi_sub_count = sum(1 for s in sub_streams if is_hi_internal(s)) + sum(
-        1 for s in ext_subs if is_hi_external(s.get("filename") or "")
+    hi_eng_internal = sum(
+        1 for s in sub_streams if _eng(s.get("language") or s.get("detected_language")) and is_hi_internal(s)
     )
+    hi_eng_external = sum(
+        1 for s in ext_subs if _eng(s.get("language")) and is_hi_external(s.get("filename") or "")
+    )
+    hi_eng_count = hi_eng_internal + hi_eng_external
 
     non_keep_internal = sum(1 for s in sub_streams if _stream_lang(s) not in keep_langs)
     non_keep_external = sum(1 for s in ext_subs if _norm_lang(s.get("language") or "und") not in keep_langs)
     no_foreign_subs = (non_keep_internal + non_keep_external) == 0
 
-    has_english_sub = regular_eng_count == 1
+    has_english_sub = (regular_eng_count + hi_eng_count) >= 1
 
     # Per-title opt-out: silent films, wordless docs, kids' shows the user
     # explicitly doesn't want subs for. Match against the user-maintained
-    # subs_optional.json control file. When matched, treat the sub check as
-    # passing — but the foreign-sub / HI-sub presence checks still apply
-    # because those represent active garbage that should still be cleaned up.
+    # subs_optional.json control file. When matched, the no-English check
+    # is suppressed; foreign-sub presence is still flagged so legitimate
+    # cleanup work isn't hidden.
     if is_subs_optional(entry.get("filepath", "")):
-        subs_ok = no_foreign_subs and hi_sub_count == 0
-        # Don't add subs_english_count_wrong to violations — by design.
+        subs_ok = no_foreign_subs
     else:
-        subs_ok = has_english_sub and no_foreign_subs and hi_sub_count == 0
+        subs_ok = has_english_sub and no_foreign_subs
         if not has_english_sub:
-            violations.append("subs_english_count_wrong")
+            violations.append("subs_english_missing")
     if not no_foreign_subs:
         violations.append("subs_foreign_present")
-    if hi_sub_count > 0:
-        violations.append("subs_hi_present")
 
     has_tmdb = bool(entry.get("tmdb"))
     if not has_tmdb:
