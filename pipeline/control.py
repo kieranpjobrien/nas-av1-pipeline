@@ -29,6 +29,12 @@ class PipelineControl:
         "skip.json": {
             "paths": [],
         },
+        # Titles that don't need (or can't have) English subs — silent films,
+        # wordless docs, kids' shows the user has opted out. See
+        # pipeline/subs_exclusion.py for the matching logic.
+        "subs_optional.json": {
+            "patterns": [],
+        },
     }
 
     def __init__(self, staging_dir: str):

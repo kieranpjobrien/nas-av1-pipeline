@@ -467,9 +467,18 @@ def _has_english_subs(file_info: dict) -> bool:
 
 
 def write_missing_subs_csv(report: dict, csv_path: str) -> int:
-    """Filter report for files missing subtitles or English subs. Returns count."""
+    """Filter report for files missing subtitles or English subs. Returns count.
+
+    Skips files whose path matches an entry in the user-maintained
+    ``subs_optional.json`` exclusion list (silent films, kids' shows the user
+    has opted out of subs for, etc.) — see :mod:`pipeline.subs_exclusion`.
+    """
+    from pipeline.subs_exclusion import is_subs_optional
+
     rows = []
     for f in report.get("files", []):
+        if is_subs_optional(f.get("filepath", "")):
+            continue
         sub_count = f.get("subtitle_count", 0)
         if sub_count == 0:
             reason = "no_subs"

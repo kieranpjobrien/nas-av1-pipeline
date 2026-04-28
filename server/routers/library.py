@@ -13,6 +13,7 @@ from fastapi import APIRouter, HTTPException
 from paths import MEDIA_REPORT
 from pipeline.config import ENG_LANGS, KEEP_LANGS
 from pipeline.streams import is_hi_external, is_hi_internal, tmdb_keeper_langs
+from pipeline.subs_exclusion import is_subs_optional
 from server.helpers import read_report_cached
 
 router = APIRouter()
@@ -122,10 +123,19 @@ def _compliance_for_entry(entry: dict, keep_langs: set[str] | None = None) -> di
     no_foreign_subs = (non_keep_internal + non_keep_external) == 0
 
     has_english_sub = regular_eng_count == 1
-    subs_ok = has_english_sub and no_foreign_subs and hi_sub_count == 0
 
-    if not has_english_sub:
-        violations.append("subs_english_count_wrong")
+    # Per-title opt-out: silent films, wordless docs, kids' shows the user
+    # explicitly doesn't want subs for. Match against the user-maintained
+    # subs_optional.json control file. When matched, treat the sub check as
+    # passing — but the foreign-sub / HI-sub presence checks still apply
+    # because those represent active garbage that should still be cleaned up.
+    if is_subs_optional(entry.get("filepath", "")):
+        subs_ok = no_foreign_subs and hi_sub_count == 0
+        # Don't add subs_english_count_wrong to violations — by design.
+    else:
+        subs_ok = has_english_sub and no_foreign_subs and hi_sub_count == 0
+        if not has_english_sub:
+            violations.append("subs_english_count_wrong")
     if not no_foreign_subs:
         violations.append("subs_foreign_present")
     if hi_sub_count > 0:
