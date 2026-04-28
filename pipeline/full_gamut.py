@@ -1180,8 +1180,19 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
         logging.debug(f"  Sidecar cleanup skipped (OSError): {e}")
 
     # === Update media report ===
+    # Pass through the whisper-enriched stream lists from state so the
+    # detected_language fields produced during the encode actually persist
+    # to media_report.json. Without this, every re-probe drops the
+    # detection and Langs Known never moves up. (2026-04-29 fix)
+    enriched: dict = {}
+    detected_audio = entry.get("detected_audio")
+    detected_subs = entry.get("detected_subs")
+    if detected_audio is not None:
+        enriched["audio_streams"] = detected_audio
+    if detected_subs is not None:
+        enriched["subtitle_streams"] = detected_subs
     try:
-        update_entry(final_path, library_type)
+        update_entry(final_path, library_type, enriched_streams=enriched or None)
     except Exception as e:
         logging.debug(f"  Report update failed: {e}")
 

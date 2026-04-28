@@ -48,11 +48,29 @@ def build_file_entry(filepath: str, probe_data: dict, library_type: str) -> dict
     return extract_info(filepath, probe_data, library_type)
 
 
-def update_entry(filepath: str, library_type: str = "") -> bool:
+def update_entry(
+    filepath: str,
+    library_type: str = "",
+    enriched_streams: dict | None = None,
+) -> bool:
     """Re-probe a file and update its entry in media_report.json atomically.
 
     Called after pipeline processing completes. Thread-safe via lock.
-    Preserves TMDb and language detection data from the old entry.
+    Preserves TMDb data and language detection data from the old entry.
+
+    Args:
+        filepath: absolute path to the file to re-probe.
+        library_type: ``"movie"`` / ``"series"`` (passed to :func:`build_file_entry`).
+        enriched_streams: optional dict ``{"audio_streams": [...], "subtitle_streams": [...]}``
+            carrying ``detected_language`` / ``detection_confidence`` /
+            ``detection_method`` / ``whisper_attempted`` annotations from a
+            whisper run performed during processing. When provided, these
+            fields are merged onto the re-probed streams BEFORE the
+            old-report fall-through, so a fresh whisper detection actually
+            persists to ``media_report.json``. Without this, the re-probe
+            wipes the in-memory detection (which only lived on the worker's
+            ``item`` dict) and the cycle repeats next encode — root cause
+            of the 2026-04-29 "Langs Known stuck at 65.3%" finding.
 
     Returns True on success, False if probe or I/O fails.
     """
@@ -62,6 +80,29 @@ def update_entry(filepath: str, library_type: str = "") -> bool:
         return False
 
     new_entry = build_file_entry(filepath, probe_data, library_type)
+
+    # Apply caller-supplied enrichment first (whisper output from THIS run).
+    # We index by position rather than codec-match because re-probing produces
+    # streams in the same physical order ffprobe sees them; the worker that
+    # ran whisper indexed by the same ordering.
+    if enriched_streams:
+        for stream_key in ("audio_streams", "subtitle_streams"):
+            enriched = enriched_streams.get(stream_key) or []
+            new_streams = new_entry.get(stream_key) or []
+            for j, e_s in enumerate(enriched):
+                if j >= len(new_streams):
+                    break
+                if not isinstance(e_s, dict):
+                    continue
+                for field in (
+                    "detected_language",
+                    "detection_confidence",
+                    "detection_method",
+                    "whisper_attempted",
+                ):
+                    val = e_s.get(field)
+                    if val and not new_streams[j].get(field):
+                        new_streams[j][field] = val
 
     with _update_lock:
         from tools.report_lock import patch_report
@@ -77,7 +118,9 @@ def update_entry(filepath: str, library_type: str = "") -> bool:
                     # Preserve TMDb data
                     if old.get("tmdb") and not new_entry.get("tmdb"):
                         new_entry["tmdb"] = old["tmdb"]
-                    # Preserve language detection data
+                    # Preserve language detection data from the old report,
+                    # but ONLY where the new entry doesn't already have it.
+                    # Order: enrichment from this run > old report > nothing.
                     for stream_key in ("audio_streams", "subtitle_streams"):
                         for j, s in enumerate(new_entry.get(stream_key, [])):
                             if j < len(old.get(stream_key, [])):
