@@ -198,6 +198,11 @@ def analyse_gaps(file_entry: dict, config: dict) -> GapAnalysis:
     #   - keep ONE English (prefer non-HI; fall back to HI if that's all we have)
     #   - strip everything else
     #
+    # The selector now returns None when ANY sub track has unresolved language
+    # (inviolate rule 2026-04-29 — never strip what we can't identify). In that
+    # case we DON'T set needs_track_removal; instead the file is flagged for
+    # language detection below and stays untouched until whisper resolves it.
+    #
     # GATED by config["strip_non_english_subs"]. When stripping is on HOLD
     # we keep every existing sub. `sub_keep_indices` stays empty; the
     # `_strip_tracks_on_nas` None path (``sub_keep_ids=None``) then signals
@@ -208,9 +213,16 @@ def analyse_gaps(file_entry: dict, config: dict) -> GapAnalysis:
         parsed_subs = [parse_sub_stream(raw, index=i) for i, raw in enumerate(sub_streams)]
         sub_keep = select_sub_keep_indices(parsed_subs)
 
-        if len(sub_keep) < len(sub_streams):
-            gaps.needs_track_removal = True
-        gaps.sub_keep_indices = sub_keep
+        if sub_keep is not None:
+            # Either nothing to strip (keep == streams) OR the keep-set is the
+            # plan. Record the plan in either case so callers can introspect.
+            gaps.sub_keep_indices = sub_keep
+            if len(sub_keep) < len(sub_streams):
+                gaps.needs_track_removal = True
+        # else: sub_keep is None — file has unresolved sub languages. Defer
+        # entirely. needs_track_removal stays False; gaps.sub_keep_indices
+        # stays empty (caller's None-path through _strip_tracks_on_nas treats
+        # empty as "keep all" if needs_track_removal isn't set).
 
     # TMDb metadata check
     if not file_entry.get("tmdb"):

@@ -453,8 +453,14 @@ class TestOriginalLanguageAudioKeep:
         # Legacy rule: stream 0 + English/und. French stream 0 stays, English stays, Spanish goes.
         assert kept == [0, 1]
 
-    def test_und_track_not_stripped_conservatively(self) -> None:
-        """Tracks with `und` language whisper hasn't resolved must NOT be stripped."""
+    def test_und_track_defers_entire_strip_decision(self) -> None:
+        """Inviolate rule (2026-04-29): one unresolved track defers all strip.
+
+        Previously the policy was "keep und tracks but still strip known-foreign
+        tracks alongside them" — a half-measure. The new policy: if ANY track
+        is unresolved, no strip happens on the file at all. The user wants
+        whisper to identify everything first, then strip with full knowledge.
+        """
         from pipeline.ffmpeg import _select_audio_streams
 
         item = {
@@ -467,8 +473,10 @@ class TestOriginalLanguageAudioKeep:
             ],
         }
         kept = _select_audio_streams(item, self._config())
-        # Spanish (original) + und (conservative keep). German stripped.
-        assert kept == [0, 1]
+        # None signals "keep all" — even the German dub survives until whisper
+        # resolves the und track. Then the next pass can strip the German with
+        # certainty.
+        assert kept is None
 
     def test_keep_english_too_flag(self) -> None:
         """When keep_english_with_original=True, English is kept alongside the original."""

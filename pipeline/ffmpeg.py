@@ -143,6 +143,24 @@ def _select_audio_streams(item: dict, config: dict) -> list[int] | None:
     if len(audio_streams) <= 2:
         return None  # not worth stripping 1-2 tracks
 
+    # Inviolate rule (2026-04-29): never strip an audio track without first
+    # knowing its language. The fallback policy KEPT und tracks by accident
+    # (KEEP_LANGS includes "und"), but make it explicit + log when we defer
+    # so the user can see when language detection is the bottleneck.
+    from pipeline.streams import all_languages_known
+
+    if not all_languages_known(audio_streams):
+        unresolved = sum(
+            1 for a in audio_streams
+            if (a.get("language") or "").lower().strip() in {"", "und", "unk"}
+            and (a.get("detected_language") or "").lower().strip() in {"", "und", "unk"}
+        )
+        logging.info(
+            f"  Audio strip deferred — {unresolved}/{len(audio_streams)} track(s) "
+            f"have unresolved language. Keeping all audio."
+        )
+        return None
+
     keep = {0}  # always keep first stream (original language)
     for i, audio in enumerate(audio_streams):
         lang = (audio.get("language") or "").lower().strip()
@@ -178,6 +196,25 @@ def _map_subtitle_streams(cmd: list[str], item: dict, config: dict) -> None:
         cmd.extend(["-map", "0:s?"])  # no metadata — let ffmpeg figure it out
         return
 
+    # Inviolate rule (2026-04-29): never strip a sub track without first
+    # knowing its language. If ANY track is `und`/empty with no whisper
+    # detection, defer entirely and map all subs.
+    from pipeline.streams import all_languages_known
+
+    parsed_subs = [parse_sub_stream(raw, index=i) for i, raw in enumerate(raw_subs)]
+    if not all_languages_known(parsed_subs):
+        unresolved = sum(
+            1 for s in parsed_subs
+            if not (s.language and s.language.lower() not in {"", "und", "unk"})
+            and not (s.detected_language and s.detected_language.lower() not in {"", "und", "unk"})
+        )
+        logging.info(
+            f"  Sub strip deferred — {unresolved}/{len(parsed_subs)} track(s) "
+            f"have unresolved language. Mapping all subs as-is."
+        )
+        cmd.extend(["-map", "0:s?"])
+        return
+
     # Keep exactly 1 regular English sub + forced. Strip HI, duplicates, foreign.
     #
     # Per-index maps use the ``?`` (optional) suffix because subtitle streams
@@ -198,8 +235,7 @@ def _map_subtitle_streams(cmd: list[str], item: dict, config: dict) -> None:
 
     mapped = 0
     found_regular_eng = False
-    for i, raw in enumerate(raw_subs):
-        sub = parse_sub_stream(raw, index=i)
+    for i, sub in enumerate(parsed_subs):
         if sub.is_forced:
             cmd.extend(["-map", f"0:s:{i}?"])
             mapped += 1

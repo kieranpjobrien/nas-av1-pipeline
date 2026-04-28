@@ -383,6 +383,45 @@ _ORIG_LANG_BUCKETS: dict[str, frozenset[str]] = {
 _UND_TOKENS: frozenset[str] = frozenset({"", "und", "unk", "undetermined"})
 
 
+def _stream_lang_resolved(stream) -> bool:
+    """Return True if a stream's language is known (tagged or whisper-detected).
+
+    Used by the strip-eligibility predicates below to enforce the inviolate
+    rule (2026-04-29): never strip a track whose language we haven't actually
+    identified. A stream is considered resolved when EITHER:
+      * ``language`` is set to a non-und value, OR
+      * ``detected_language`` is set to a non-und value
+
+    Accepts both AudioStream/SubStream dataclasses and raw ffprobe dicts —
+    callers in gap_filler use dicts; the internal selectors use dataclasses.
+    """
+    if stream is None:
+        return False
+    # Dataclass attribute access
+    lang = getattr(stream, "language", None)
+    detected = getattr(stream, "detected_language", None)
+    if lang is None and detected is None and isinstance(stream, dict):
+        lang = stream.get("language")
+        detected = stream.get("detected_language")
+    lang = (lang or "").lower().strip()
+    detected = (detected or "").lower().strip()
+    if lang and lang not in _UND_TOKENS:
+        return True
+    if detected and detected not in _UND_TOKENS:
+        return True
+    return False
+
+
+def all_languages_known(streams) -> bool:
+    """Return True only when every stream in ``streams`` has a resolved language.
+
+    A False return means at least one track is `und`/empty with no whisper
+    detection — the strip code MUST defer in that case (inviolate rule).
+    Empty input returns True (nothing to be uncertain about).
+    """
+    return all(_stream_lang_resolved(s) for s in (streams or []))
+
+
 def _lang_in_bucket(lang: str, target: str) -> bool:
     """True if ``lang`` belongs to the same equivalence bucket as ``target``.
 
@@ -434,6 +473,15 @@ def select_audio_keep_indices_by_original_language(
     if not original_language:
         return None  # no TMDb signal — defer to legacy rule
 
+    # Inviolate rule (2026-04-29): "find the language of everything before
+    # stripping it." If ANY track is unresolved (no tag, no whisper detection),
+    # defer the entire strip decision for this file. The previous behaviour
+    # KEPT und tracks but still stripped known-foreign tracks alongside —
+    # under the new rule, even known-foreign tracks survive until every
+    # track has been identified, so the user can review the file holistically.
+    if not all_languages_known(streams):
+        return None
+
     keep: set[int] = set()
     for s in streams:
         # detected_language (whisper) takes precedence over the MKV tag
@@ -441,11 +489,6 @@ def select_audio_keep_indices_by_original_language(
         detected = (s.detected_language or "").lower().strip()
         tagged = (s.language or "").lower().strip()
         effective = detected or tagged
-
-        if effective in _UND_TOKENS:
-            # Unknown language — never strip what we can't identify.
-            keep.add(s.index)
-            continue
 
         if _lang_in_bucket(effective, original_language):
             keep.add(s.index)
@@ -465,27 +508,34 @@ def select_audio_keep_indices_by_original_language(
 def select_sub_keep_indices(
     streams: list[SubStream],
     eng_langs: set[str] | None = None,
-) -> list[int]:
+) -> list[int] | None:
     """Return subtitle stream indices to keep.
 
-    Policy (2026-04-28 update):
+    Returns ``None`` when the file is NOT eligible for sub strip — caller
+    must keep all tracks. Returns a list of indices to keep otherwise.
+
+    Eligibility (inviolate rule, 2026-04-29): every subtitle track must
+    have a resolved language (`language` or `detected_language` set to a
+    non-und value). If ANY track is unresolved, return None and the caller
+    keeps all subs until language detection runs. The user-facing rule is
+    "never strip a track without first knowing its language" — this
+    predicate enforces it at the strip-decision layer.
+
+    Pick policy (when eligible):
       - ALWAYS keep forced / foreign-parts subs (any language).
       - KEEP one English track. Prefer regular non-HI; fall back to HI
         if that's the only English available.
-      - STRIP everything else (non-English, the unchosen English
-        duplicate, und).
-
-    Why the change: matches the same fallback rule we now use for
-    external sidecars in ``pipeline.subs.pick_english_sidecars`` —
-    files with only an HI variant available used to ship with no
-    English track at all. Accepting HI as a fallback guarantees one
-    English sub on every MKV, which satisfies Bazarr's "Treat
-    Embedded Subtitles as Downloaded" check and stops re-grabs.
+      - STRIP everything else (non-English, the unchosen English duplicate).
 
     ``eng_langs`` defaults to :data:`pipeline.config.ENG_LANGS`.
     """
     if eng_langs is None:
         eng_langs = ENG_LANGS
+
+    # Inviolate-rule guard: refuse to strip when any track is unresolved.
+    # Empty input is fine (nothing to strip, all-known is vacuously true).
+    if streams and not all_languages_known(streams):
+        return None
 
     def _is_eng(s: SubStream) -> bool:
         lang = (s.language or s.detected_language or "").lower().strip()
