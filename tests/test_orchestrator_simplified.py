@@ -169,7 +169,8 @@ class TestGapFillerSingleHeavyWorker:
             orch._gap_filler_worker([])
 
         msgs = [r.getMessage() for r in caplog.records]
-        assert any("Heavy worker skipped" in m for m in msgs)
+        # 2026-04-29 rename: heavy_worker -> mux_worker (audio transcode removed)
+        assert any("Mux worker skipped" in m for m in msgs)
 
 
 class TestSkipListHonoured:

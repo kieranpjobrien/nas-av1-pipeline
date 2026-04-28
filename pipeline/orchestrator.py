@@ -739,10 +739,20 @@ class Orchestrator:
             gap_fill,
         )
 
-        heavy_queue: queue_mod.Queue = queue_mod.Queue()
+        # Two queues with independent gates:
+        #   mux_queue   — track strip + external sub mux (mkvmerge over SSH)
+        #   quick_queue — rename, mkvpropedit metadata, foreign sub delete (local, instant)
+        #
+        # Audio transcode is deliberately NOT a gap_filler responsibility —
+        # it requires fetching whole files over SMB and running ffmpeg locally,
+        # which is bandwidth-heavy and not what the user wants happening
+        # autonomously. Files needing audio transcode are flagged for
+        # diagnostic purposes but skipped here; they belong in the encode
+        # pipeline (full_gamut) on explicit user request.
+        mux_queue: queue_mod.Queue = queue_mod.Queue()
         quick_queue: queue_mod.Queue = queue_mod.Queue()
         stats_lock = threading.Lock()
-        heavy_count = [0]
+        mux_count = [0]
         quick_count = [0]
 
         # Build separate operation queues from all gap filler items.
@@ -769,25 +779,30 @@ class Orchestrator:
             if gaps.needs_filename_clean or gaps.needs_metadata or gaps.needs_foreign_sub_cleanup:
                 quick_queue.put((item, gaps))
 
-            # Heavy ops: track strip, sub mux, audio transcode
-            if gaps.needs_track_removal or gaps.needs_sub_mux or gaps.needs_audio_transcode:
-                heavy_queue.put((item, gaps))
+            # Mux ops: track strip + external sub mux. Audio-transcode is NOT
+            # a gap_filler responsibility — those files are skipped here and
+            # left for the user to re-encode through full_gamut if desired.
+            if gaps.needs_track_removal or gaps.needs_sub_mux:
+                mux_queue.put((item, gaps))
 
-        heavy_total = heavy_queue.qsize()
+        mux_total = mux_queue.qsize()
         quick_total = quick_queue.qsize()
-        logging.info(f"Gap filler: {heavy_total} heavy (mkvmerge) + {quick_total} quick (rename/meta/delete)")
+        logging.info(
+            f"Gap filler: {mux_total} mux (mkvmerge SSH) + {quick_total} quick (rename/meta/delete)"
+        )
 
         # Single circuit breaker for the SSH path. threshold=5, cooldown=300s matches
         # the overnight-2026-04-23 forensic — 5 consecutive SSH+docker failures is the
         # point where "transient" is no longer a credible explanation and we back off.
-        breaker = CircuitBreaker(threshold=5, cooldown_secs=300, name="heavy_worker.SRV")
+        breaker = CircuitBreaker(threshold=5, cooldown_secs=300, name="gap_filler.mux.SRV")
 
-        def heavy_worker(name: str, machine: dict):
+        def mux_worker(name: str, machine: dict):
+            """SSH-gated worker: track strip + external sub mux via remote mkvmerge.
+
+            Audio transcode is NOT handled here — gap_filler doesn't transcode
+            audio. Files queued have only mux gaps (track_removal or sub_mux).
+            """
             while not self._shutdown.is_set():
-                # Back off if the breaker is OPEN. wait_if_open raises CircuitBreakerOpen
-                # if shutdown fires while we're waiting — catch that and exit cleanly.
-                # Otherwise we block (polling) until the breaker ages into HALF_OPEN and
-                # a trial is allowed through.
                 try:
                     breaker.wait_if_open(shutdown=self._shutdown)
                 except CircuitBreakerOpen:
@@ -795,23 +810,23 @@ class Orchestrator:
                     break
 
                 try:
-                    item, gaps = heavy_queue.get(timeout=2)
+                    item, gaps = mux_queue.get(timeout=2)
                 except queue_mod.Empty:
                     break
 
                 filepath = item["filepath"]
                 with stats_lock:
-                    heavy_count[0] += 1
-                    p = heavy_count[0]
+                    mux_count[0] += 1
+                    p = mux_count[0]
 
                 # Re-scan for external subs (deferred from queue building)
                 _scan_external_subs(filepath, gaps)
 
-                if not (gaps.needs_track_removal or gaps.needs_sub_mux or gaps.needs_audio_transcode):
-                    heavy_queue.task_done()
+                if not (gaps.needs_track_removal or gaps.needs_sub_mux):
+                    mux_queue.task_done()
                     continue
 
-                logging.info(f"[{name} {p}/{heavy_total}] {gaps.describe()} | {item['filename']}")
+                logging.info(f"[{name} {p}/{mux_total}] {gaps.describe()} | {item['filename']}")
                 gaps._remote_machine = machine
                 was_open_before = breaker.is_open()
                 success = False
@@ -821,9 +836,6 @@ class Orchestrator:
                     logging.error(f"[{name}] gap_fill raised on {item['filename']}: {e}")
                     success = False
 
-                # Cross-check state: if the file landed in ERROR, treat as failure
-                # regardless of the return value. Belt-and-braces — the discipline
-                # contract forbids trusting return codes without state verification.
                 entry = self.state.get_file(filepath)
                 if entry and (entry.get("status") or "").lower() == "error":
                     success = False
@@ -837,7 +849,7 @@ class Orchestrator:
                         f"worker will pause for 300s"
                     )
 
-                heavy_queue.task_done()
+                mux_queue.task_done()
 
         def quick_worker(name: str):
             while not self._shutdown.is_set():
@@ -945,31 +957,31 @@ class Orchestrator:
         from pipeline.nas_worker import SERVER
 
         threads = []
-        # Single SSH heavy worker against SERVER. When SERVER is configured it's always
+        # Single SSH mux worker against SERVER. When SERVER is configured it's always
         # the better path (native Docker, NFS-mounted media — much faster than Synology).
-        # If not configured, skip heavy ops entirely rather than fall back to NAS SSH.
+        # If not configured, skip mux ops entirely rather than fall back to NAS SSH.
         #
         # Status side-effect: regardless of whether the worker runs, write a
         # status file the dashboard / invariants can read. Previously the only
         # signal was a single INFO log line that scrolled away after one screen,
-        # leaving 1,264 queued heavy tasks invisible for hours. The 2026-04-29
+        # leaving 1,264 queued tasks invisible for hours. The 2026-04-29
         # incident motivated promoting this to a WARNING (when there's queue)
         # plus a persistent status file.
         self._write_heavy_worker_status(
             configured=bool(SERVER.get("host")),
-            queued_count=heavy_total,
+            queued_count=mux_total,
             host=SERVER.get("host") or None,
         )
         if SERVER.get("host"):
-            threads.append(threading.Thread(target=heavy_worker, args=("SRV", SERVER), daemon=True))
-        elif heavy_total > 0:
+            threads.append(threading.Thread(target=mux_worker, args=("SRV", SERVER), daemon=True))
+        elif mux_total > 0:
             logging.warning(
-                f"  Heavy worker DISABLED — {heavy_total} files queued for "
-                f"mkvmerge/strip/mux work but SERVER_SSH_HOST is not set. "
+                f"  Mux worker DISABLED — {mux_total} files queued for "
+                f"mkvmerge strip/mux work but SERVER_SSH_HOST is not set. "
                 f"Set it in .env (e.g. SERVER_SSH_HOST=nas) and restart the pipeline."
             )
         else:
-            logging.info("  Heavy worker skipped (SERVER_SSH_HOST not set, queue empty)")
+            logging.info("  Mux worker skipped (SERVER_SSH_HOST not set, queue empty)")
         # Single local quick worker (rename/metadata/delete — instant ops).
         threads.append(threading.Thread(target=quick_worker, args=("QUICK",), daemon=True))
 
@@ -978,9 +990,9 @@ class Orchestrator:
         for t in threads:
             t.join()
 
-        total = heavy_count[0] + quick_count[0]
+        total = mux_count[0] + quick_count[0]
         if total or pass_num == 1:
-            logging.info(f"Gap filler pass {pass_num}: {heavy_count[0]} heavy + {quick_count[0]} quick processed")
+            logging.info(f"Gap filler pass {pass_num}: {mux_count[0]} mux + {quick_count[0]} quick processed")
         return total
 
     # =========================================================================

@@ -17,12 +17,10 @@ import time
 from dataclasses import dataclass, field
 from typing import Optional
 
-from paths import STAGING_DIR
 from pipeline.config import KEEP_LANGS
 from pipeline.ffmpeg import (
     _should_transcode_audio,
     format_bytes,
-    format_duration,
 )
 from pipeline.gap_fill_lock import GapFillLockTimeout, gap_fill_lock
 from pipeline.report import update_entry
@@ -372,8 +370,15 @@ def gap_fill(
         # we skip the strip and continue with local ops (filename clean, metadata, foreign
         # sub delete). Those are genuine wins that don't require SSH. Only the file that
         # needed strip stays partially untouched, not the rest of the queue.
+        #
+        # Audio transcode is NOT a gap_filler responsibility — those files
+        # require fetch+ffmpeg+upload (SMB-bound, slow, bandwidth-heavy) and
+        # the user has explicitly excluded them from autonomous gap-fill.
+        # If the file ALSO needs audio transcode, we still do the track strip
+        # (cheap, remote) and leave the audio for the user to handle via
+        # full_gamut on demand.
         track_strip_deferred = False
-        if (gaps.needs_track_removal or gaps.needs_sub_mux) and not gaps.needs_audio_transcode:
+        if gaps.needs_track_removal or gaps.needs_sub_mux:
             machine = getattr(gaps, "_remote_machine", None)
             strip_ok = False
             try:
@@ -407,12 +412,6 @@ def gap_fill(
                     logging.info(f"  Deleted foreign sub: {os.path.basename(sub_path)}")
                 except OSError:
                     pass
-
-        # Audio transcode (needs fetch + ffmpeg)
-        elif gaps.needs_audio_transcode:
-            success = _audio_transcode(filepath, file_entry, gaps, config, state)
-            if not success:
-                return False  # state already set by _audio_transcode
 
         # Filename clean (os.rename on NAS)
         if gaps.needs_filename_clean and gaps.clean_name:
@@ -687,203 +686,15 @@ def _strip_tracks_on_nas(filepath: str, gaps: GapAnalysis, machine: dict | None 
                 pass
 
 
-def _run_audio_transcode_with_retry(cmd: list[str], input_path: str, output_path: str):
-    """Run the audio-remux ffmpeg command with a DTS-passthrough fallback.
-
-    Returns (process, stderr) — caller checks process.returncode for success. If the first
-    attempt hits the "Non-monotonic DTS" error (common on DTS-HD MA → EAC-3), retry with
-    audio passthrough so the transcode sidesteps the buggy encode path.
-
-    Both communicate() calls are bounded by ``max(900, src_size_mb * 2)`` seconds so a hung
-    ffmpeg cannot block the worker forever. On timeout the process is killed, the raised
-    TimeoutExpired is caught, and the caller sees a non-zero returncode plus a stderr line
-    tagged with the timeout.
-    """
-    try:
-        src_size_mb = os.path.getsize(input_path) / (1024 * 1024)
-    except OSError:
-        src_size_mb = 1024.0  # assume 1 GiB if we can't measure
-    timeout_secs = max(900.0, src_size_mb * 2.0)
-
-    def _run_with_timeout(popen_cmd: list[str]):
-        proc = subprocess.Popen(
-            popen_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding="utf-8", errors="replace"
-        )
-        try:
-            _, err = proc.communicate(timeout=timeout_secs)
-            return proc, err
-        except subprocess.TimeoutExpired:
-            logging.error(
-                f"  Audio transcode exceeded timeout ({int(timeout_secs)}s) — killing ffmpeg"
-            )
-            try:
-                proc.kill()
-            except Exception:
-                pass
-            try:
-                _, err = proc.communicate(timeout=5.0)
-            except subprocess.TimeoutExpired:
-                err = ""
-            tagged = (err or "") + "\nAUDIO TRANSCODE TIMEOUT: killed after wall-clock deadline"
-            return proc, tagged.strip()
-
-    process, stderr = _run_with_timeout(cmd)
-    if process.returncode == 0:
-        return process, stderr
-
-    low = (stderr or "").lower()
-    if "non-monotonic dts" not in low and "non monotonic dts" not in low:
-        return process, stderr  # different failure — let caller handle
-
-    if os.path.exists(output_path):
-        try:
-            os.remove(output_path)
-        except OSError:
-            pass
-
-    # Import locally to avoid a circular import at module load.
-    from pipeline.full_gamut import _build_audio_copy_cmd
-
-    retry_cmd = _build_audio_copy_cmd(cmd)
-    logging.warning("  Audio transcode hit DTS timestamp bug — retrying with passthrough")
-    retry_proc, retry_stderr = _run_with_timeout(retry_cmd)
-    return retry_proc, retry_stderr
-
-
-def _audio_transcode(
-    filepath: str,
-    file_entry: dict,
-    gaps: GapAnalysis,
-    config: dict,
-    state: PipelineState,
-) -> bool:
-    """Transcode audio codecs to EAC-3. Requires fetch to local + upload back."""
-    import hashlib
-
-    from pipeline.ffmpeg import build_audio_remux_cmd
-
-    staging_dir = str(STAGING_DIR)
-    fetch_dir = os.path.join(staging_dir, "fetch")
-    encode_dir = os.path.join(staging_dir, "encoded")
-    os.makedirs(fetch_dir, exist_ok=True)
-    os.makedirs(encode_dir, exist_ok=True)
-
-    safe_name = hashlib.md5(filepath.encode()).hexdigest()[:12] + "_" + file_entry["filename"]
-    local_path = os.path.join(fetch_dir, safe_name)
-    output_path = os.path.join(encode_dir, safe_name)
-
-    try:
-        # Fetch
-        state.set_file(filepath, FileStatus.FETCHING, stage="fetch")
-        logging.info("  Fetching for audio transcode...")
-        shutil.copy2(filepath, local_path)
-
-        # Build remux command (copy video, transcode audio, strip foreign tracks)
-        cmd = build_audio_remux_cmd(local_path, output_path, file_entry, config, include_subs=True)
-
-        # Execute with the same DTS fallback as full_gamut._run_encode: if the EAC-3 output
-        # hits non-monotonic DTS from a DTS-HD MA source, retry once with audio passthrough.
-        state.set_file(filepath, FileStatus.PROCESSING, stage="audio_transcode")
-        start = time.time()
-        process, stderr = _run_audio_transcode_with_retry(cmd, local_path, output_path)
-        elapsed = time.time() - start
-
-        if process.returncode != 0:
-            logging.error(f"  Audio transcode failed (exit {process.returncode})")
-            for line in stderr.strip().split("\n")[-3:]:
-                logging.error(f"    ffmpeg: {line}")
-            state.set_file(
-                filepath, FileStatus.ERROR, error=f"ffmpeg exit {process.returncode}", stage="audio_transcode"
-            )
-            return False
-
-        if not os.path.exists(output_path):
-            state.set_file(filepath, FileStatus.ERROR, error="output not created", stage="audio_transcode")
-            return False
-
-        output_size = os.path.getsize(output_path)
-        input_size = os.path.getsize(local_path)
-        logging.info(
-            f"  Audio transcode in {format_duration(elapsed)}: "
-            f"{format_bytes(input_size)} -> {format_bytes(output_size)}"
-        )
-
-        # Post-transcode verify — mirrors _strip_tracks_on_nas:538-568.
-        # Refuse to replace unless the staging output has at least 1 video stream and
-        # the expected audio stream count. Catches the "ffmpeg rc=0 but produced a
-        # zero-audio or video-less file" failure mode (silent-damage path).
-        expected_audio = len(gaps.audio_keep_indices) or len(file_entry.get("audio_streams", [])) or 1
-        try:
-            probe_cmd = ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_streams", output_path]
-            pr = subprocess.run(probe_cmd, capture_output=True, text=True, timeout=60)
-            if pr.returncode != 0:
-                logging.error(f"  Post-transcode ffprobe failed (rc={pr.returncode})")
-                try:
-                    os.remove(output_path)
-                except OSError:
-                    pass
-                state.set_file(
-                    filepath,
-                    FileStatus.ERROR,
-                    error="post-transcode verify failed (ffprobe rc != 0)",
-                    stage="audio_transcode",
-                )
-                return False
-            import json as _json
-            probed = _json.loads(pr.stdout or "{}")
-            streams = probed.get("streams", []) or []
-            audio_n = sum(1 for s in streams if s.get("codec_type") == "audio")
-            video_n = sum(1 for s in streams if s.get("codec_type") == "video")
-            if video_n < 1 or audio_n < expected_audio:
-                logging.error(
-                    f"  Post-transcode verify: expected >=1 video and >={expected_audio} audio, "
-                    f"got {video_n}v {audio_n}a — aborting replace"
-                )
-                try:
-                    os.remove(output_path)
-                except OSError:
-                    pass
-                state.set_file(
-                    filepath,
-                    FileStatus.ERROR,
-                    error=f"post-transcode verify failed (v={video_n} a={audio_n} expected_audio={expected_audio})",
-                    stage="audio_transcode",
-                )
-                return False
-        except (subprocess.TimeoutExpired, FileNotFoundError, Exception) as ve:
-            logging.error(f"  Post-transcode verify errored: {ve} — aborting replace to be safe")
-            try:
-                os.remove(output_path)
-            except OSError:
-                pass
-            state.set_file(
-                filepath,
-                FileStatus.ERROR,
-                error=f"post-transcode verify errored: {ve}",
-                stage="audio_transcode",
-            )
-            return False
-
-        # Upload back to NAS (replace original)
-        state.set_file(filepath, FileStatus.UPLOADING, stage="upload")
-        tmp_path = filepath + ".audiotrans_tmp.mkv"
-        shutil.copy2(output_path, tmp_path)
-        os.replace(tmp_path, filepath)
-        logging.info(f"  Uploaded and replaced  [verify: {video_n}v {audio_n}a]")
-
-        return True
-
-    except Exception as e:
-        logging.error(f"  Audio transcode failed: {e}")
-        state.set_file(filepath, FileStatus.ERROR, error=str(e), stage="audio_transcode")
-        return False
-    finally:
-        for p in (local_path, output_path):
-            if os.path.exists(p):
-                try:
-                    os.remove(p)
-                except OSError:
-                    pass
+# NOTE: gap_filler does NOT transcode audio. Files with non-EAC-3 audio
+# (DTS / FLAC / AAC / MP3 / Opus / etc.) get flagged via
+# ``GapAnalysis.needs_audio_transcode`` for diagnostic purposes only —
+# acting on it would require fetching the entire file over SMB, running
+# ffmpeg locally, and uploading back, which is bandwidth-heavy and not
+# something the user wants happening autonomously. The encode pipeline
+# (full_gamut) handles audio transcode at encode time; gap_filler stays
+# in its lane: track strip + sub mux only. Removed 2026-04-29 to align
+# with that boundary.
 
 
 def _rename_file(filepath: str, clean_name: str) -> Optional[str]:

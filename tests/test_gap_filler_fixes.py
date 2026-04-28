@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 import pytest
 
-from pipeline.gap_filler import GapAnalysis, _audio_transcode, gap_fill
+from pipeline.gap_filler import GapAnalysis, gap_fill
 from pipeline.state import FileStatus, PipelineState
 from pipeline.transfer import fetch_file
 
@@ -81,82 +81,13 @@ class TestTrackStripFailure:
         assert saved.get("stage") == "track_strip"
 
 
-class TestAudioTranscodeVerify:
-    """FIX 2: _audio_transcode must ffprobe the staging output before replacing."""
-
-    def test_audio_transcode_verifies_before_replace(self, tmp_state_db, tmp_path, min_config):
-        """When ffprobe finds zero audio streams, os.replace must NOT be called."""
-        filepath = str(tmp_path / "dest.mkv")
-        with open(filepath, "wb") as f:
-            f.write(b"original")
-        original_bytes = open(filepath, "rb").read()
-
-        state = PipelineState(tmp_state_db)
-        entry = {
-            "filepath": filepath,
-            "filename": "dest.mkv",
-            "library_type": "movie",
-            "audio_streams": [{"codec_raw": "truehd", "language": "eng"}],
-            "subtitle_streams": [],
-            "tmdb": {"id": 1},
-        }
-        gaps = GapAnalysis(
-            needs_audio_transcode=True,
-            audio_keep_indices=[0],
-            audio_transcode_indices=[0],
-        )
-        gaps._external_scan_done = True
-
-        class _FakeProc:
-            returncode = 0
-
-        # Build the ffmpeg command builder to a no-op and simulate an output file exists
-        # but has zero audio streams in its ffprobe JSON.
-        def _fake_ffmpeg_cmd(*a, **kw):
-            return ["ffmpeg", "-fake"]
-
-        def _fake_run_with_retry(cmd, in_path, out_path):
-            # Pretend ffmpeg succeeded and wrote a staging file.
-            with open(out_path, "wb") as fh:
-                fh.write(b"staged output")
-            return _FakeProc(), ""
-
-        def _fake_probe(probe_cmd, capture_output, text, timeout):
-            """Return stdout JSON showing VIDEO but ZERO AUDIO — the damage-path we guard against."""
-
-            class _Res:
-                returncode = 0
-                stdout = '{"streams": [{"codec_type": "video"}]}'
-
-            return _Res()
-
-        replace_calls = []
-
-        def _fake_replace(src, dst):
-            replace_calls.append((src, dst))
-
-        with patch("pipeline.ffmpeg.build_audio_remux_cmd", side_effect=_fake_ffmpeg_cmd), \
-             patch("pipeline.gap_filler._run_audio_transcode_with_retry", side_effect=_fake_run_with_retry), \
-             patch("pipeline.gap_filler.shutil.copy2") as m_copy, \
-             patch("pipeline.gap_filler.subprocess.run", side_effect=_fake_probe), \
-             patch("pipeline.gap_filler.os.replace", side_effect=_fake_replace):
-            ok = _audio_transcode(filepath, entry, gaps, min_config, state)
-
-        # Original file should NOT have been clobbered via os.replace
-        assert ok is False, "_audio_transcode should return False on zero-audio output"
-        assert replace_calls == [], f"os.replace must not be invoked on verify failure, got {replace_calls!r}"
-        # shutil.copy2 to the NAS staging tmp must also not run (replace+copy both suppressed)
-        assert not any(
-            ("audiotrans_tmp" in str(c.args[1])) for c in m_copy.call_args_list if len(c.args) >= 2
-        ), "copy to NAS tmp path must not run when verify fails"
-        # Original file contents preserved
-        assert open(filepath, "rb").read() == original_bytes
-
-        saved = state.get_file(filepath)
-        state.close()
-        assert saved is not None
-        assert saved["status"] == FileStatus.ERROR.value
-        assert saved.get("stage") == "audio_transcode"
+# NOTE (2026-04-29): TestAudioTranscodeVerify was removed when ``_audio_transcode``
+# was deleted from gap_filler. Audio transcode is no longer a gap_filler
+# responsibility — files needing audio remux are flagged for diagnostic
+# purposes via GapAnalysis.needs_audio_transcode but never acted on. The
+# encode pipeline (full_gamut) handles audio transcode at encode time, and
+# its zero-audio-output guards live in tests/test_ffmpeg_builder.py + the
+# ``no_audioless_av1`` invariant.
 
 
 class TestFetchMissingSource:
