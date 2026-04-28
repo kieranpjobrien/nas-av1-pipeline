@@ -88,6 +88,39 @@ class Orchestrator:
         logging.info(f"Received signal {signum}, shutting down...")
         self._shutdown.set()
 
+    def _write_heavy_worker_status(
+        self,
+        configured: bool,
+        queued_count: int,
+        host: str | None,
+    ) -> None:
+        """Write the heavy gap_filler worker status to a file the dashboard can read.
+
+        Surfaces the "SERVER_SSH_HOST not set + heavy queue not empty" failure
+        mode that previously only appeared as a single INFO log line per pass
+        (so 1,264 queued tasks could sit invisible for hours overnight). The
+        dashboard /api/health endpoint and tools/invariants.py both consume
+        this file.
+        """
+        import json as _json
+        from datetime import datetime, timezone
+
+        status = {
+            "configured": configured,
+            "queued_count": queued_count,
+            "host": host,
+            "last_check": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "blocked": (not configured) and queued_count > 0,
+        }
+        try:
+            path = os.path.join(self.staging_dir, "heavy_worker_state.json")
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                _json.dump(status, f, indent=2, ensure_ascii=False)
+            os.replace(tmp, path)
+        except OSError as e:
+            logging.warning(f"Failed to write heavy_worker_state.json: {e}")
+
     def _write_session_env(self) -> None:
         """Capture run-once environment (GPU, ffmpeg, git commit, config) to
         pipeline_env.json so each encode_history entry can reference a small
@@ -915,10 +948,28 @@ class Orchestrator:
         # Single SSH heavy worker against SERVER. When SERVER is configured it's always
         # the better path (native Docker, NFS-mounted media — much faster than Synology).
         # If not configured, skip heavy ops entirely rather than fall back to NAS SSH.
+        #
+        # Status side-effect: regardless of whether the worker runs, write a
+        # status file the dashboard / invariants can read. Previously the only
+        # signal was a single INFO log line that scrolled away after one screen,
+        # leaving 1,264 queued heavy tasks invisible for hours. The 2026-04-29
+        # incident motivated promoting this to a WARNING (when there's queue)
+        # plus a persistent status file.
+        self._write_heavy_worker_status(
+            configured=bool(SERVER.get("host")),
+            queued_count=heavy_total,
+            host=SERVER.get("host") or None,
+        )
         if SERVER.get("host"):
             threads.append(threading.Thread(target=heavy_worker, args=("SRV", SERVER), daemon=True))
+        elif heavy_total > 0:
+            logging.warning(
+                f"  Heavy worker DISABLED — {heavy_total} files queued for "
+                f"mkvmerge/strip/mux work but SERVER_SSH_HOST is not set. "
+                f"Set it in .env (e.g. SERVER_SSH_HOST=nas) and restart the pipeline."
+            )
         else:
-            logging.info("  Heavy worker skipped (SERVER_SSH_HOST not set)")
+            logging.info("  Heavy worker skipped (SERVER_SSH_HOST not set, queue empty)")
         # Single local quick worker (rename/metadata/delete — instant ops).
         threads.append(threading.Thread(target=quick_worker, args=("QUICK",), daemon=True))
 

@@ -206,6 +206,28 @@ def get_health(request: Request) -> dict:
     nas_ssh = os.environ.get("NAS_SSH_HOST", "")
     server_ssh = os.environ.get("SERVER_SSH_HOST", "")
 
+    # Heavy gap_filler worker status — written by orchestrator on every pass.
+    # The 2026-04-29 incident motivated surfacing this on /api/health so a
+    # disabled worker with a non-empty queue shows up as RED in the dashboard.
+    heavy_worker = {"available": False, "blocked": False, "queued_count": 0, "host": None}
+    try:
+        import json as _json
+        from paths import STAGING_DIR as _staging
+        state_path = os.path.join(str(_staging), "heavy_worker_state.json")
+        if os.path.exists(state_path):
+            with open(state_path, encoding="utf-8") as f:
+                hw_state = _json.load(f)
+            heavy_worker = {
+                "available": True,
+                "configured": bool(hw_state.get("configured")),
+                "blocked": bool(hw_state.get("blocked")),
+                "queued_count": int(hw_state.get("queued_count") or 0),
+                "host": hw_state.get("host"),
+                "last_check": hw_state.get("last_check"),
+            }
+    except (OSError, ValueError, KeyError):
+        pass
+
     _health_cache = {
         "nas_movies_reachable": nas_movies_ok,
         "nas_series_reachable": nas_series_ok,
@@ -222,6 +244,7 @@ def get_health(request: Request) -> dict:
         "server_ssh_configured": bool(server_ssh),
         "nas_ssh_host": nas_ssh or None,
         "server_ssh_host": server_ssh or None,
+        "heavy_worker": heavy_worker,
     }
     _health_cache_time = now
     return _health_cache

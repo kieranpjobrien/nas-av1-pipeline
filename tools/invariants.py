@@ -778,6 +778,66 @@ def check_no_done_with_foreign_audio(report: Optional[dict] = None) -> Invariant
 
 
 # --------------------------------------------------------------------------
+# HIGH - heavy gap_filler worker disabled with non-empty queue
+# --------------------------------------------------------------------------
+
+
+def check_heavy_worker_running() -> InvariantResult:
+    """Heavy gap_filler worker must be running whenever the heavy queue is non-empty.
+
+    The 2026-04-29 incident: the heavy worker was silently skipped for
+    ~14 hours because ``SERVER_SSH_HOST`` was unset post-machine-rebuild,
+    leaving 1,264 files queued for mkvmerge strip/mux work that never ran.
+    The pipeline's only signal was a single INFO log line per gap_filler
+    pass, which scrolled off-screen and was invisible on the dashboard.
+
+    The orchestrator now writes ``heavy_worker_state.json`` at the start
+    of every pass with: configured (bool), queued_count (int), blocked
+    (= not configured AND queue > 0). This invariant fails HIGH whenever
+    blocked is True.
+    """
+    name = "heavy_worker_running"
+    severity: Severity = "HIGH"
+    state_path = Path(STAGING_DIR) / "heavy_worker_state.json"
+    if not state_path.exists():
+        return InvariantResult(
+            name,
+            severity,
+            True,
+            "heavy_worker_state.json not present (pipeline hasn't run a gap_filler pass yet) - skipped",
+        )
+    try:
+        with state_path.open(encoding="utf-8") as f:
+            state = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        return InvariantResult(
+            name,
+            severity,
+            True,
+            f"heavy_worker_state.json unreadable ({type(e).__name__}) - skipped",
+        )
+    blocked = bool(state.get("blocked"))
+    queued = int(state.get("queued_count") or 0)
+    configured = bool(state.get("configured"))
+    if blocked:
+        return InvariantResult(
+            name,
+            severity,
+            False,
+            f"heavy worker DISABLED with {queued} files queued — set SERVER_SSH_HOST in .env",
+            violations=[f"queued={queued}, configured={configured}"],
+            details=state,
+        )
+    return InvariantResult(
+        name,
+        severity,
+        True,
+        f"heavy worker {'enabled' if configured else 'idle (queue empty)'}: {queued} queued",
+        details=state,
+    )
+
+
+# --------------------------------------------------------------------------
 # Orchestration
 # --------------------------------------------------------------------------
 
@@ -795,6 +855,7 @@ def _invariant_runners(skip_ssh: bool) -> list[Callable[[], InvariantResult]]:
         check_report_db_consistency,
         check_report_file_exists_on_disk,
         check_no_banned_ffmpeg_flags_in_log,
+        check_heavy_worker_running,
     ]
 
 
