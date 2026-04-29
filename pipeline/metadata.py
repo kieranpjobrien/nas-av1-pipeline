@@ -63,7 +63,18 @@ def _api_get(path: str, params: dict[str, str] | None = None) -> dict | list | N
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
             return json.loads(resp.read().decode())
-    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, TimeoutError) as exc:
+    except (
+        urllib.error.URLError,
+        urllib.error.HTTPError,
+        json.JSONDecodeError,
+        TimeoutError,
+        # ConnectionResetError + ssl.SSLError + other socket-level errors are
+        # OSError subclasses raised by resp.read() when the SSL connection drops
+        # mid-response. The 2026-04-30 enrichment crashed at file 1495 here;
+        # without OSError the worker died, the executor died, the whole tool
+        # exited at 17% complete. TMDb-side resets are routine — skip and move on.
+        OSError,
+    ) as exc:
         print(f"  TMDb API error for {path}: {exc}", file=sys.stderr)
         return None
 
