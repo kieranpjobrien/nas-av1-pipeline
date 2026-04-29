@@ -361,16 +361,45 @@ class PipelineState:
         flipped FLAGGED_* back to PENDING on every pipeline restart and let
         the encode loop re-process audit-flagged files with the wrong audio.
 
+        Also clears stale ``prep_data`` and ``prep_done`` from the extras JSON
+        column. Without this, restart after orchestrator-startup cleanup of
+        ``F:/AV1_Staging/fetch/`` would leave rows with prep_data pointing at
+        deleted local files — the next encode pickup blindly trusts the
+        cached path and ffmpeg hits ENOENT (the 2026-04-29 Lost Thing /
+        Futurama / Star Wars Rebels stall pattern). A defensive guard in
+        ``full_gamut._encode_only`` catches it at runtime; this is the
+        preventative fix at reset time.
+
         Returns the number of rows reset.
         """
         with self._lock:
             preserve = ["pending"] + [s.value for s in TERMINAL_STATUSES]
             placeholders = ",".join("?" * len(preserve))
-            count = self._conn.execute(
-                f"UPDATE pipeline_files SET status = ?, stage = NULL, error = NULL "
-                f"WHERE status NOT IN ({placeholders})",
-                ["pending", *preserve],
-            ).rowcount
+
+            # Two-step: status reset + extras scrub. SQLite has no JSON_REMOVE
+            # on the version we're targeting reliably, so do extras in Python.
+            rows_to_reset = self._conn.execute(
+                f"SELECT filepath, extras FROM pipeline_files WHERE status NOT IN ({placeholders})",
+                preserve,
+            ).fetchall()
+
+            count = 0
+            for fp, extras_json in rows_to_reset:
+                try:
+                    extras = json.loads(extras_json or "{}")
+                except (json.JSONDecodeError, TypeError):
+                    extras = {}
+                # Drop the in-flight artefacts that don't survive a restart.
+                # local_path / output_path can be re-derived; prep_data is
+                # the dangerous one because it's an opaque cached blob.
+                for k in ("prep_data", "prep_done", "local_path", "output_path"):
+                    extras.pop(k, None)
+                self._conn.execute(
+                    "UPDATE pipeline_files SET status = ?, stage = NULL, error = NULL, "
+                    "local_path = NULL, output_path = NULL, extras = ? WHERE filepath = ?",
+                    ("pending", json.dumps(extras), fp),
+                )
+                count += 1
             self._conn.commit()
             return count
 

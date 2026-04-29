@@ -379,3 +379,76 @@ class TestResetNonTerminal:
         entry = state.get_file(fp)
         assert entry["status"] == "flagged_undetermined"
         state.close()
+
+
+class TestResetClearsStalePrepArtefacts:
+    """Reset_non_terminal must scrub the in-flight artefacts (prep_data,
+    prep_done, local_path, output_path) so a fresh pickup doesn't trust
+    cached paths that point at deleted files. Regression for the
+    2026-04-29 Lost Thing / Futurama / Star Wars Rebels stall pattern.
+    """
+
+    def test_reset_clears_prep_data(self, tmp_state_db):
+        state = PipelineState(tmp_state_db)
+        state.set_file(
+            "stale.mkv",
+            FileStatus.UPLOADING,
+            local_path=r"F:\AV1_Staging\fetch\abc_stale.mkv",
+            output_path=r"F:\AV1_Staging\encoded\abc_stale.mkv",
+            prep_done=True,
+            prep_data={"actual_input": r"F:\AV1_Staging\fetch\abc_stale.mkv.remux.mkv"},
+        )
+        # Sanity: cached fields are present pre-reset
+        pre = state.get_file("stale.mkv")
+        assert pre["prep_done"] is True
+        assert pre.get("prep_data") is not None
+
+        state.reset_non_terminal()
+
+        post = state.get_file("stale.mkv")
+        assert post["status"] == "pending"
+        # All in-flight artefacts scrubbed
+        assert post.get("prep_data") is None
+        assert post.get("prep_done") is None
+        assert post.get("local_path") is None
+        assert post.get("output_path") is None
+        state.close()
+
+    def test_reset_keeps_unrelated_extras(self, tmp_state_db):
+        """User-data / TMDb / detected_audio etc. survive the reset."""
+        state = PipelineState(tmp_state_db)
+        state.set_file(
+            "keep.mkv",
+            FileStatus.PROCESSING,
+            local_path=r"F:\fetch\keep.mkv",
+            prep_done=True,
+            prep_data={"actual_input": "x"},
+            qualify_override=True,  # user-set, must persist
+            detected_audio=[{"language": "eng", "detected_language": "en"}],
+        )
+        state.reset_non_terminal()
+        post = state.get_file("keep.mkv")
+        assert post["status"] == "pending"
+        assert post.get("prep_data") is None  # cleared
+        assert post.get("prep_done") is None  # cleared
+        assert post.get("qualify_override") is True  # kept
+        assert post.get("detected_audio") == [{"language": "eng", "detected_language": "en"}]  # kept
+        state.close()
+
+    def test_reset_skips_done_rows_completely(self, tmp_state_db):
+        """DONE rows must NOT have their extras touched (whisper detections etc.)."""
+        state = PipelineState(tmp_state_db)
+        state.set_file(
+            "done.mkv",
+            FileStatus.DONE,
+            local_path=r"F:\fetch\done.mkv",
+            prep_done=True,
+            prep_data={"actual_input": "x"},
+        )
+        state.reset_non_terminal()
+        post = state.get_file("done.mkv")
+        assert post["status"] == "done"
+        # Done rows are preserved in their entirety
+        assert post.get("prep_done") is True
+        assert post.get("prep_data") is not None
+        state.close()
