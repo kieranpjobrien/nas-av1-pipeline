@@ -92,6 +92,25 @@ as progress. Read and obey before doing anything else.
     not the log.** The metric reflects on-disk reality. If the metric
     is flat or dropping, work isn't happening, regardless of log output.
 
+12. **Never silently substitute an empty result for a corrupt one.**
+    A read failure (corrupt JSON, partial truncation, schema mismatch)
+    must NOT return an empty placeholder that the next write commits
+    back to disk. That's the cascade-of-loss pattern that wiped 8,679
+    file entries from media_report.json overnight 2026-04-29 — one bad
+    write, then every subsequent reader saw "empty" and every patch
+    cycle wrote that emptiness back. Recovery paths: try a rolling
+    backup first; if that's also bad, raise loud — never silently substitute.
+    Validate shape before writing (a dict with the expected keys) so
+    obviously-bad data never reaches disk. See `tools/report_lock.py`
+    for the canonical implementation.
+
+13. **Never run two writers on the same shared state file.** Scanner +
+    language detection + pipeline encoder all wrote to media_report.json
+    concurrently on 2026-04-29 — even with a file lock, the race window
+    around `os.replace` exposed corruption to the cascade in rule 12.
+    Either coordinate via a single writer or partition the writes by
+    file (one report-shard per worker class, merged offline).
+
 ## Required pre-flight before running anything that touches NAS
 
 1. `ssh nas "uptime; free -m"` — confirm load < 10 and memory > 500MB
