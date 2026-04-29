@@ -838,6 +838,94 @@ def check_heavy_worker_running() -> InvariantResult:
 
 
 # --------------------------------------------------------------------------
+# CRITICAL — media_report.json cascade-of-loss detector
+# --------------------------------------------------------------------------
+
+
+def check_media_report_not_collapsed() -> InvariantResult:
+    """media_report.json must contain at least as many files as state_db tracks.
+
+    The 2026-04-29 incident: media_report.json got wiped from 8,679 entries
+    to 1 by the cascade-of-loss bug in tools/report_lock.py (corrupt write
+    → next read returns empty skeleton → next patch writes empty back).
+    Permanent fix is in commit 443ba00 (rolling .last_good + fail-loud).
+    This invariant catches any recurrence early — before it cascades into
+    additional data loss.
+
+    Heuristic: state DB has roughly one row per file we've ever encountered
+    (DONE + PENDING + ERROR + FLAGGED). If media_report has fewer than 50%
+    of that count, something is very wrong. (Some drift is expected — files
+    deleted from disk, etc. — hence 50% rather than equality.)
+    """
+    name = "media_report_not_collapsed"
+    severity: Severity = "CRITICAL"
+
+    report = _load_media_report()
+    if report is None:
+        return InvariantResult(
+            name,
+            severity,
+            True,
+            "media_report.json not present - skipped",
+        )
+
+    n_report = len(report.get("files", []) or [])
+
+    # Count expected from state DB
+    conn = _open_state_db()
+    if conn is None:
+        return InvariantResult(
+            name,
+            severity,
+            True,
+            f"state DB not found — can't validate; report has {n_report} files",
+        )
+    try:
+        n_state = conn.execute("SELECT COUNT(*) FROM pipeline_files").fetchone()[0]
+    except sqlite3.Error as e:
+        conn.close()
+        return InvariantResult(
+            name,
+            severity,
+            True,
+            f"state DB unreadable ({e}); report has {n_report} files",
+        )
+    conn.close()
+
+    # If state DB is empty, can't compare. If report is also small, that's fresh-install territory.
+    if n_state < 100:
+        return InvariantResult(
+            name,
+            severity,
+            True,
+            f"state DB has only {n_state} rows — fresh install or test environment, skipped",
+        )
+
+    # The cascade-of-loss signature: media_report tiny vs state DB large.
+    # 50% is a generous floor — a real cascade typically takes the report
+    # to 1-50 files (we saw 1, then 39 during regen).
+    threshold = max(int(n_state * 0.5), 100)
+    if n_report < threshold:
+        return InvariantResult(
+            name,
+            severity,
+            False,
+            f"media_report.json has {n_report} files but state DB has {n_state} — "
+            f"strong cascade-of-loss signal (threshold: {threshold}). "
+            f"Check tools/report_lock.py and look for a recent corrupt write.",
+            violations=[f"report={n_report} state_db={n_state}"],
+            details={"report_files": n_report, "state_db_rows": n_state, "threshold": threshold},
+        )
+
+    return InvariantResult(
+        name,
+        severity,
+        True,
+        f"media_report.json size sane ({n_report} files vs {n_state} state rows)",
+    )
+
+
+# --------------------------------------------------------------------------
 # Orchestration
 # --------------------------------------------------------------------------
 
@@ -856,6 +944,7 @@ def _invariant_runners(skip_ssh: bool) -> list[Callable[[], InvariantResult]]:
         check_report_file_exists_on_disk,
         check_no_banned_ffmpeg_flags_in_log,
         check_heavy_worker_running,
+        check_media_report_not_collapsed,
     ]
 
 
