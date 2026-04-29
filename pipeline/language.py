@@ -2787,6 +2787,31 @@ def _run_apply(report: dict, min_confidence: float) -> None:
     else:
         logging.info("  mkvpropedit: not found — using ffmpeg (slower)")
 
+    # Pre-count files with detections so the progress feed has a real total.
+    # Without this the watchdog's stall detector (which watches the state
+    # file mtime) sees no activity for the entire apply phase and kills the
+    # process — that's how we lost the 2026-04-30 01:20 attempt.
+    apply_total = sum(
+        1 for entry in report.get("files", [])
+        if any(s.get("detected_language") for s in entry.get("subtitle_streams", []))
+        or any(a.get("detected_language") for a in entry.get("audio_streams", []))
+    )
+    apply_started = datetime.now().isoformat(timespec="seconds")
+    write_progress_state({
+        "running": True,
+        "started_at": apply_started,
+        "strategy": "apply",
+        "total": apply_total,
+        "processed": 0,
+        "detected": 0,
+        "failed": 0,
+        "current_file": None,
+        "rate_files_per_min": 0.0,
+        "eta_secs": None,
+        "recent": [],
+    })
+    apply_t0 = time.monotonic()
+
     total_applied = 0
     total_failed = 0
     file_count = 0
@@ -2835,6 +2860,29 @@ def _run_apply(report: dict, min_confidence: float) -> None:
                     streams[idx].pop("detected_language", None)
                     streams[idx].pop("detection_confidence", None)
                     streams[idx].pop("detection_method", None)
+
+        # Heartbeat the state file every 25 files so the watchdog's
+        # stall detector sees activity. Without this the apply phase
+        # is invisible to the watchdog and gets killed at the 600s
+        # threshold even though work is happening.
+        if file_count % 25 == 0:
+            elapsed = time.monotonic() - apply_t0
+            rate = (file_count / elapsed * 60.0) if elapsed > 0 else 0.0
+            remaining = max(0, apply_total - file_count)
+            eta = int(remaining / max(rate / 60.0, 1e-6)) if rate > 0 else None
+            write_progress_state({
+                "running": True,
+                "started_at": apply_started,
+                "strategy": "apply",
+                "total": apply_total,
+                "processed": file_count,
+                "detected": total_applied,
+                "failed": total_failed,
+                "current_file": Path(entry["filepath"]).name,
+                "rate_files_per_min": round(rate, 2),
+                "eta_secs": eta,
+                "recent": [],
+            })
 
     write_report(report)
     logging.info(f"Applied: {total_applied}  Failed: {total_failed}")
