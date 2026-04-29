@@ -671,6 +671,98 @@ def infer_audio_language(file_entry: dict, audio_idx: int) -> tuple[Optional[str
     return None, "insufficient context"
 
 
+def infer_subtitle_language(
+    file_entry: dict,
+    sub_idx: int,
+    detected_text_langs: dict[int, str] | None = None,
+) -> tuple[Optional[str], float, str]:
+    """Heuristic fallback chain for an undetermined subtitle track.
+
+    Used when the primary detection paths (text extraction + langdetect, or
+    Tesseract OCR on bitmap subs) couldn't resolve the language. Each layer
+    is more speculative than the last; we return the first one that hits.
+
+    Returns ``(language_code | None, confidence, reason)``.
+
+    Order, with confidences:
+
+      1. **Track title** — "English (SDH)", "Forced English", "[eng]" etc.
+         Highest confidence (0.95) — the muxer literally told us.
+      2. **Sibling sub majority** — all OTHER subs on this file with known
+         language agree. 0.85 confidence (above the default min so it
+         actually persists).
+      3. **Sole-audio inference** — file has exactly one audio track and
+         that track's language is known. Subs of unspecified-language
+         tracks are usually the audio language for single-audio files.
+         0.80 confidence.
+      4. **TMDb original_language** — soft prior. Used only when nothing
+         stronger fired and the file has a TMDb match. 0.70 confidence.
+
+    None of these involve actually reading the sub content — they're
+    metadata-only inferences. Run AFTER the content-based extractors fail.
+    """
+    subs = file_entry.get("subtitle_streams") or []
+    if sub_idx >= len(subs):
+        return None, 0.0, "out of range"
+    track = subs[sub_idx]
+    title = (track.get("title") or "").lower()
+
+    # 1. Track title — most reliable signal when present
+    for hint, code in _TITLE_HINTS.items():
+        if hint in title:
+            return code, 0.95, f"track title contains '{hint}'"
+
+    # 2. Sibling sub majority — combine pre-tagged + freshly-detected
+    known: dict[int, str] = {}
+    for i, s in enumerate(subs):
+        if i == sub_idx:
+            continue
+        lang = (s.get("language") or "und").lower().strip()
+        if lang not in UND_LANGS:
+            known[i] = lang
+        elif s.get("detected_language"):
+            det = s["detected_language"].lower().strip()
+            if det not in UND_LANGS:
+                known[i] = det
+    if detected_text_langs:
+        for i, lang in detected_text_langs.items():
+            if i != sub_idx and lang not in UND_LANGS:
+                known[i] = lang
+    if known:
+        unique = set(known.values())
+        if len(unique) == 1:
+            lang = next(iter(unique))
+            return lang, 0.85, f"all {len(known)} sibling subs are '{lang}'"
+
+    # 3. Sole-audio inference
+    audio_streams = file_entry.get("audio_streams") or []
+    if len(audio_streams) == 1:
+        a0 = audio_streams[0]
+        # ``"und"`` is truthy so we can't use a `language or detected_language` chain —
+        # fall through explicitly when the tag is und/empty.
+        a_lang = (a0.get("language") or "").lower().strip()
+        if not a_lang or a_lang in UND_LANGS:
+            a_lang = (a0.get("detected_language") or "").lower().strip()
+        if a_lang and a_lang not in UND_LANGS:
+            # Map ISO 639-2 (eng) → ISO 639-1 (en) for consistency with title hint
+            iso1_map = {"eng": "en", "fra": "fr", "fre": "fr", "deu": "de", "ger": "de",
+                        "spa": "es", "ita": "it", "jpn": "ja", "kor": "ko", "chi": "zh",
+                        "zho": "zh", "por": "pt", "rus": "ru", "ara": "ar", "hin": "hi",
+                        "swe": "sv", "nor": "no", "dan": "da", "fin": "fi", "nld": "nl",
+                        "dut": "nl", "pol": "pl", "ces": "cs", "cze": "cs", "tur": "tr",
+                        "ell": "el", "gre": "el", "heb": "he", "tha": "th", "vie": "vi"}
+            lang_short = iso1_map.get(a_lang, a_lang)
+            return lang_short, 0.80, f"sole audio track is '{a_lang}'"
+
+    # 4. TMDb original_language as final soft prior
+    tmdb = file_entry.get("tmdb") or {}
+    orig = (tmdb.get("original_language") or "").lower().strip()
+    if orig and orig not in UND_LANGS:
+        return orig, 0.70, f"TMDb original_language='{orig}'"
+
+    return None, 0.0, "no metadata signal available"
+
+
 def _infer_pgs_from_siblings(
     file_entry: dict,
     detected_text_langs: dict[int, str],
@@ -1422,18 +1514,40 @@ def process_file(
                     if detected and detected != "und" and confidence >= 0.5:
                         detected_text_langs[sub_all_idx] = detected
                 else:
-                    text_results.append(
-                        {
-                            "filepath": filepath,
-                            "track_type": "subtitle",
-                            "stream_index": sub_all_idx,
-                            "codec": codec,
-                            "detected_language": None,
-                            "confidence": 0.0,
-                            "method": "text_extraction_empty",
-                            "chars_sampled": 0,
-                        }
+                    # 2026-04-29: empty extraction is no longer the end of the
+                    # line. Try the metadata-only fallback chain (track title /
+                    # sibling subs / sole-audio / TMDb) before giving up. This
+                    # rescues short / forced / corrupt-extraction tracks.
+                    fb_lang, fb_conf, fb_reason = infer_subtitle_language(
+                        file_entry, sub_all_idx, detected_text_langs
                     )
+                    if fb_lang and fb_conf >= 0.5:
+                        text_results.append(
+                            {
+                                "filepath": filepath,
+                                "track_type": "subtitle",
+                                "stream_index": sub_all_idx,
+                                "codec": codec,
+                                "detected_language": fb_lang,
+                                "confidence": fb_conf,
+                                "method": f"metadata_fallback ({fb_reason})",
+                                "chars_sampled": 0,
+                            }
+                        )
+                        detected_text_langs[sub_all_idx] = fb_lang
+                    else:
+                        text_results.append(
+                            {
+                                "filepath": filepath,
+                                "track_type": "subtitle",
+                                "stream_index": sub_all_idx,
+                                "codec": codec,
+                                "detected_language": None,
+                                "confidence": 0.0,
+                                "method": "text_extraction_empty",
+                                "chars_sampled": 0,
+                            }
+                        )
 
         results.extend(text_results)
 
@@ -1478,6 +1592,29 @@ def process_file(
                         "reason": reason,
                     }
                 )
+                detected_text_langs[sub_all_idx] = inferred_lang
+                continue
+
+            # 2026-04-29: same metadata-only fallback chain as text subs.
+            # Track title / sole-audio / TMDb give us a real shot at
+            # bitmap subs Tesseract couldn't crack.
+            fb_lang, fb_conf, fb_reason = infer_subtitle_language(
+                file_entry, sub_all_idx, detected_text_langs
+            )
+            if fb_lang and fb_conf >= 0.5:
+                results.append(
+                    {
+                        "filepath": filepath,
+                        "track_type": "subtitle",
+                        "stream_index": sub_all_idx,
+                        "codec": codec,
+                        "detected_language": fb_lang,
+                        "confidence": fb_conf,
+                        "method": f"metadata_fallback ({fb_reason})",
+                        "chars_sampled": 0,
+                    }
+                )
+                detected_text_langs[sub_all_idx] = fb_lang
             else:
                 results.append(
                     {
