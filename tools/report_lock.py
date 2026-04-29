@@ -221,12 +221,35 @@ def _atomic_write_with_backup(path: Path, report: dict) -> None:
                 backup_tmp = str(backup) + ".tmp"
                 with open(backup_tmp, "w", encoding="utf-8") as bf:
                     json.dump(current, bf, indent=2, ensure_ascii=False)
-                os.replace(backup_tmp, backup)
+                _replace_with_retry(backup_tmp, str(backup))
             except OSError:
                 # Backup write failure is non-fatal — primary write proceeds
                 pass
 
-    os.replace(tmp, str(path))
+    _replace_with_retry(tmp, str(path))
+
+
+def _replace_with_retry(src: str, dst: str, attempts: int = 6, base_delay: float = 0.05) -> None:
+    """``os.replace`` with retry on Windows sharing violations.
+
+    The 2026-04-29 lang-detect pass produced ~3 ``[WinError 5] Access is
+    denied`` failures per 1000 writes — Defender scanning the file, the
+    dashboard cache re-reading right at swap time, or another reader briefly
+    holding a handle. Each failure dropped one file's detection update. Retry
+    with backoff handles all three classes (transient handle held elsewhere)
+    without pretending every error is transient: after exhausting attempts
+    we re-raise so genuine permission problems surface loud.
+    """
+    last_err: OSError | None = None
+    for i in range(attempts):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError as e:
+            last_err = e
+            time.sleep(base_delay * (2 ** i))
+    if last_err is not None:
+        raise last_err
 
 
 def read_report() -> dict:

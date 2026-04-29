@@ -153,3 +153,49 @@ def test_partial_truncation_validated_as_corrupt(tmp_report_paths):
     # the previous behaviour silently treated as empty)
     with pytest.raises(ReportCorruptError):
         read_report()
+
+
+def test_replace_retries_on_permission_error(tmp_report_paths, monkeypatch):
+    """Transient PermissionError on os.replace must be retried, not propagated.
+
+    Reproduces the WinError 5 sharing violations seen during the 2026-04-29
+    lang-detect run: Defender or another reader briefly holds a handle on
+    the destination, the first os.replace fails, but a retry succeeds.
+    """
+    from tools.report_lock import write_report
+    import os as _os
+    import tools.report_lock as _rl
+
+    real_replace = _os.replace
+    calls = {"n": 0}
+
+    def flaky_replace(src, dst):
+        calls["n"] += 1
+        # Fail the first 2 attempts, succeed on the third
+        if calls["n"] <= 2:
+            raise PermissionError(13, "Access is denied")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(_rl.os, "replace", flaky_replace)
+
+    # Should succeed despite the two transient denials
+    write_report({"files": [{"filepath": "/x.mkv"}]})
+    primary, _ = tmp_report_paths
+    assert primary.exists()
+    assert calls["n"] >= 3
+
+
+def test_replace_gives_up_and_raises_after_exhausting_retries(tmp_report_paths, monkeypatch):
+    """If every retry fails, the final PermissionError must propagate so the
+    caller can recover or surface the failure — never silently lose the write.
+    """
+    from tools.report_lock import write_report
+    import tools.report_lock as _rl
+
+    def always_denied(src, dst):
+        raise PermissionError(13, "Access is denied")
+
+    monkeypatch.setattr(_rl.os, "replace", always_denied)
+
+    with pytest.raises(PermissionError):
+        write_report({"files": [{"filepath": "/x.mkv"}]})
