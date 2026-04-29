@@ -1912,13 +1912,21 @@ def _run_text_strategy(
     workers: int,
     min_confidence: float,
     stats: dict,
+    report: dict | None = None,
 ) -> None:
     """ThreadPoolExecutor of process_file for text/OCR + sibling inference.
 
-    Writes progress to ``F:/AV1_Staging/lang_detect_state.json`` after every
-    file so the dashboard's whisper-progress card surfaces this pass too —
-    same surface, different strategy. Without this the text/OCR pass would
-    run silently to completion with no UI signal.
+    Writes progress + persists detections to disk after every file so the
+    dashboard reflects results live. Previously ``_incremental_save`` was
+    only called once at the very end of the run by the outer
+    ``enrich_report``, so the dashboard's pct_langs_known stayed flat for
+    the entire ~3-hour run and only jumped at the end. Per-file save makes
+    it move continuously.
+
+    ``report`` is the full media_report dict — same one ``enrich_report``
+    holds in memory. We need it because ``_incremental_save`` re-reads
+    ``media_report.json`` from disk and merges our in-memory entries into
+    it. Without ``report`` here the per-file save would be a no-op.
     """
     completed = 0
     total = len(to_process)
@@ -1934,6 +1942,7 @@ def _run_text_strategy(
     })
 
     progress_lock = threading.Lock()
+    save_lock = threading.Lock()
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {executor.submit(process_file, entry): entry for entry in to_process}
         for future in as_completed(futures):
@@ -1942,6 +1951,11 @@ def _run_text_strategy(
                 entry = futures[future]
                 results = future.result()
                 _patch_entry_from_results(entry, results, min_confidence, stats)
+                # Persist this file's detections immediately so the dashboard's
+                # Langs Known metric moves live, not in one big jump at the end.
+                if report is not None:
+                    with save_lock:
+                        _incremental_save(report, [entry])
                 # Build a recent-file row showing what got resolved on this entry.
                 file_label = (entry.get("filename") or "")[:80]
                 first_det = "(no change)"
@@ -2353,7 +2367,7 @@ def enrich_report(
             retry_unresolved=retry_unresolved,
         )
     else:
-        _run_text_strategy(to_process, workers, min_confidence, stats)
+        _run_text_strategy(to_process, workers, min_confidence, stats, report=report)
 
     logging.info(
         f"  Language detection complete: {stats['detected']} detected, {stats['failed']} unresolved"
