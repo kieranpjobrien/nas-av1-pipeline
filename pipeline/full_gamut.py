@@ -691,10 +691,35 @@ def _encode_only(
 
     existing = state.get_file(filepath) or {}
     prep_data = existing.get("prep_data") or {}
+
+    # Stale-prep guard (added 2026-04-29 after The Lost Thing incident):
+    # prep_data persists in state across pipeline restarts, but the local
+    # fetch + remux files in F:\AV1_Staging\fetch\ get cleaned on startup.
+    # If we trust stale prep_data without verifying disk presence, the
+    # encode fires immediately against a missing file → ffmpeg ENOENT,
+    # status row gets confused (the fetch worker's later state write can
+    # race-overwrite the ERROR back to PROCESSING).
+    if prep_data:
+        actual_input = prep_data.get("actual_input")
+        local_path = existing.get("local_path")
+        # The actual input is usually the .remux.mkv (for .avi/.m2ts/etc.)
+        # or the local fetch directly. If neither exists, prep_data is stale.
+        if actual_input and not os.path.exists(actual_input):
+            logging.warning(
+                f"_encode_only: cached prep_data points to missing input "
+                f"({os.path.basename(actual_input)}) — invalidating and re-prepping"
+            )
+            prep_data = {}
+        elif local_path and not os.path.exists(local_path):
+            logging.warning(
+                f"_encode_only: local fetch missing ({os.path.basename(local_path)}) — invalidating prep_data"
+            )
+            prep_data = {}
+
     if not prep_data:
-        # Defensive: caller already checked, but if state was reset between
-        # the check and this call, fall back to inline prep.
-        logging.warning(f"_encode_only: prep_data missing for {filename}, falling back to inline prep")
+        # Defensive: either caller's prep_done check missed it, or our stale
+        # guard above invalidated it. Fall back to inline prep.
+        logging.warning(f"_encode_only: prep_data missing/stale for {filename}, falling back to inline prep")
         prep_result = prepare_for_encode(filepath, item, config, state, staging_dir)
         if prep_result is None:
             return False

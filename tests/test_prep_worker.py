@@ -463,3 +463,104 @@ class TestGapFillerDrainAndRescan:
         )
         # passes are monotonically increasing pass numbers
         assert passes == list(range(1, len(passes) + 1))
+
+
+class TestEncodeOnlyStalePrepGuard:
+    """Regression for The Lost Thing 2026-04-29 incident.
+
+    Repro: the prep worker successfully prepped the file, cached prep_data
+    in state, encode + upload reached UPLOADING. Pipeline restarted before
+    DONE landed. On startup the orchestrator cleans F:/AV1_Staging/fetch/
+    of orphans. Reset_non_terminal flips UPLOADING → PENDING. The fresh
+    queue picks the file up, sees prep_done=True with cached prep_data
+    pointing at the now-deleted local file, fires _encode_only — ffmpeg
+    immediately fails with ENOENT.
+
+    The dashboard then displays the file as "encoding 12% stale 11h 50m"
+    because the encode-failed state-write got race-overwritten by the
+    fetch worker's later progress update.
+
+    Fix: _encode_only must verify the on-disk fetch+remux files still
+    exist before trusting cached prep_data. If gone, treat as
+    invalidated and fall back to inline prep.
+    """
+
+    def test_stale_prep_data_falls_back_to_inline_prep(self, tmp_path):
+        """When prep_data points at a missing local file, drop it + re-prep."""
+        from pipeline.full_gamut import _encode_only
+
+        orch = _orch(tmp_path)
+        nas_path = r"\\NAS\Movies\Stale.mkv"
+        # Local path is recorded in state but the file no longer exists on disk
+        # (orchestrator startup cleaned F:/AV1_Staging/fetch/).
+        ghost_local = str(tmp_path / "fetch" / "deadbeef_Stale.mkv")
+        ghost_remux = ghost_local + ".remux.mkv"
+        # Note: NEITHER ghost_local nor ghost_remux is created on disk.
+
+        cached_prep = {
+            "clean_name": "Stale.mkv",
+            "actual_input": ghost_remux,  # <-- the smoking gun: cached but missing
+            "remuxed_path": ghost_remux,
+            "external_subs": [],
+            "output_path": str(tmp_path / "encoded" / "out.mkv"),
+        }
+        orch.state.set_file(
+            nas_path,
+            FileStatus.PROCESSING,
+            local_path=ghost_local,
+            prep_done=True,
+            prep_data=cached_prep,
+        )
+
+        # Patch prepare_for_encode so the fallback path is observable but
+        # doesn't actually run heavy work. Returning None signals "couldn't
+        # prep" — that's enough to prove the guard kicked in and routed to
+        # the fallback rather than blindly using cached_prep.
+        from unittest.mock import patch as _patch
+        with _patch("pipeline.full_gamut.prepare_for_encode", return_value=None) as m:
+            item = {"filepath": nas_path, "filename": "Stale.mkv"}
+            ok = _encode_only(nas_path, item, {}, orch.state, str(tmp_path))
+
+        assert m.called, (
+            "_encode_only must fall back to prepare_for_encode when prep_data "
+            "points at a missing input file"
+        )
+        # prep_result=None → _encode_only returns False (the proper failure path,
+        # not a silent ENOENT-on-ffmpeg).
+        assert ok is False
+
+    def test_fresh_prep_data_skips_inline_prep(self, tmp_path):
+        """Sanity: when prep_data is valid (files exist), no fallback fires."""
+        from pipeline.full_gamut import _encode_only
+
+        orch = _orch(tmp_path)
+        nas_path, local_path = _file_in_disk_state(tmp_path, "Fresh.mkv")
+        # The remuxed_path also needs to exist (or actual_input == local_path).
+        cached_prep = {
+            "clean_name": "Fresh.mkv",
+            "actual_input": local_path,  # exists
+            "remuxed_path": None,
+            "external_subs": [],
+            "output_path": str(tmp_path / "encoded" / "out.mkv"),
+        }
+        orch.state.set_file(
+            nas_path,
+            FileStatus.PROCESSING,
+            local_path=local_path,
+            prep_done=True,
+            prep_data=cached_prep,
+        )
+
+        # _encode_only would call _run_encode after the prep check; mock it to
+        # fail fast so we don't actually invoke ffmpeg. The point of the test
+        # is the prep-guard branch, not the encode itself.
+        from unittest.mock import patch as _patch
+        with _patch("pipeline.full_gamut.prepare_for_encode") as m_prep, \
+             _patch("pipeline.full_gamut._run_encode", return_value=False):
+            item = {"filepath": nas_path, "filename": "Fresh.mkv"}
+            _encode_only(nas_path, item, {}, orch.state, str(tmp_path))
+
+        assert not m_prep.called, (
+            "When prep_data is valid (file exists), _encode_only must NOT "
+            "fall back to prepare_for_encode"
+        )
