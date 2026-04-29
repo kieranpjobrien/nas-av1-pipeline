@@ -751,22 +751,38 @@ def enrich_report(report: dict, workers: int = 4, force: bool = False) -> dict:
         print("All files already have TMDb metadata. Use --force to re-enrich.")
         return report
 
-    print(f"Enriching {len(to_process)} files with TMDb metadata ({workers} workers, per-file patch model)...")
+    print(f"Enriching {len(to_process)} files with TMDb metadata ({workers} workers, batched flush)...")
 
     completed = 0
     enriched = 0
     failed = 0
+    # Batched flush: per-file patch_report was crippling the dashboard during
+    # enrichment — each call rewrites the 16MB primary AND the .last_good backup,
+    # so the report file got bumped every ~1s and /api/library-completion's
+    # mtime cache was permanently invalidated. UI hung at 5+ second cache-miss
+    # computes. Buffer up to FLUSH_EVERY enrichments (or FLUSH_SECS wallclock)
+    # and apply them all in a single patch_report. Crash-safety is unchanged
+    # because patch_report still writes atomically — at worst we lose ≤49
+    # in-flight enrichments since the last flush.
+    FLUSH_EVERY = 50
+    FLUSH_SECS = 30.0
+    pending_buffer: list[tuple[str, dict]] = []
+    last_flush_ts = time.monotonic()
 
-    def _apply_tmdb(filepath: str, meta: dict) -> None:
-        """Patch exactly one file's tmdb field under lock. <50ms hold typically."""
+    def _flush_buffer() -> None:
+        if not pending_buffer:
+            return
+        # Index by filepath for O(N+M) merge instead of O(N*M)
+        updates = {fp: meta for fp, meta in pending_buffer}
 
         def _patch(r: dict) -> None:
             for e in r.get("files", []):
-                if e.get("filepath") == filepath:
-                    e["tmdb"] = meta
-                    return
+                fp = e.get("filepath")
+                if fp in updates:
+                    e["tmdb"] = updates[fp]
 
         patch_report(_patch)
+        pending_buffer.clear()
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {pool.submit(_enrich_one, entry, force): entry for entry in to_process}
@@ -775,26 +791,36 @@ def enrich_report(report: dict, workers: int = 4, force: bool = False) -> dict:
             filepath, meta = future.result()
 
             if meta:
-                try:
-                    _apply_tmdb(filepath, meta)
-                    # Also keep our in-memory copy consistent so the caller sees it
-                    for f in files:
-                        if f.get("filepath") == filepath:
-                            f["tmdb"] = meta
-                            break
-                    enriched += 1
-                except Exception as e:
-                    print(f"  Patch failed for {filepath}: {e}", flush=True)
-                    failed += 1
+                pending_buffer.append((filepath, meta))
+                # Also keep our in-memory copy consistent so the caller sees it
+                for f in files:
+                    if f.get("filepath") == filepath:
+                        f["tmdb"] = meta
+                        break
+                enriched += 1
             else:
                 if not futures[future].get("tmdb"):
                     failed += 1
+
+            now = time.monotonic()
+            if len(pending_buffer) >= FLUSH_EVERY or (now - last_flush_ts) >= FLUSH_SECS:
+                try:
+                    _flush_buffer()
+                    last_flush_ts = now
+                except Exception as e:
+                    print(f"  Buffer flush failed (will retry): {e}", flush=True)
 
             if completed % 50 == 0 or completed == len(to_process):
                 print(
                     f"  Progress: {completed}/{len(to_process)} — {enriched} enriched, {failed} unmatched",
                     flush=True,
                 )
+
+    # Final flush for whatever's left in the buffer
+    try:
+        _flush_buffer()
+    except Exception as e:
+        print(f"  Final flush failed: {e}", flush=True)
 
     print(
         f"\nTMDb enrichment complete: {enriched} enriched, {failed} unmatched out of {len(to_process)}",
