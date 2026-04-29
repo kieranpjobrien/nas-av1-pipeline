@@ -545,15 +545,33 @@ def extract_bitmap_subtitle_text(
         if not images:
             return None
 
+        # Tesseract page-segmentation modes:
+        #   psm 6  = single uniform block of text (works for normal subtitle layouts)
+        #   psm 11 = sparse text without orientation, finds text regardless of layout
+        #            (better for stylised subs, separated phrases, narrow columns)
+        #   psm 7  = single text line (fallback for very short forced subs that
+        #            psm 6 fails to find a "block" in)
+        # Try modes in order; first success wins per image. Early-exit once we
+        # have enough characters for langdetect — typically ~120 chars is plenty
+        # for confident detection, no point burning more OCR runtime.
+        EARLY_EXIT_CHARS = 120
+        psm_chain = ("6", "11", "7")
+        cumulative_chars = 0
         for img_name in images[:sample_frames]:
+            if cumulative_chars >= EARLY_EXIT_CHARS:
+                break
             img_path = os.path.join(tmp_dir, img_name)
-            try:
-                ocr_cmd = [tesseract, img_path, "stdout", "--oem", "3", "--psm", "6"]
-                result = subprocess.run(ocr_cmd, capture_output=True, text=True, timeout=30)
-                if result.returncode == 0 and result.stdout.strip():
-                    all_text.append(result.stdout.strip())
-            except (subprocess.TimeoutExpired, FileNotFoundError):
-                continue
+            for psm in psm_chain:
+                try:
+                    ocr_cmd = [tesseract, img_path, "stdout", "--oem", "3", "--psm", psm]
+                    result = subprocess.run(ocr_cmd, capture_output=True, text=True, timeout=30)
+                    if result.returncode == 0 and result.stdout.strip():
+                        text = result.stdout.strip()
+                        all_text.append(text)
+                        cumulative_chars += len(text)
+                        break  # got text from this image, stop trying PSM modes
+                except (subprocess.TimeoutExpired, FileNotFoundError):
+                    continue
 
         if not all_text:
             return None
