@@ -1913,21 +1913,75 @@ def _run_text_strategy(
     min_confidence: float,
     stats: dict,
 ) -> None:
-    """ThreadPoolExecutor of process_file for text/OCR + sibling inference."""
+    """ThreadPoolExecutor of process_file for text/OCR + sibling inference.
+
+    Writes progress to ``F:/AV1_Staging/lang_detect_state.json`` after every
+    file so the dashboard's whisper-progress card surfaces this pass too —
+    same surface, different strategy. Without this the text/OCR pass would
+    run silently to completion with no UI signal.
+    """
     completed = 0
     total = len(to_process)
+    started_at = datetime.now().isoformat(timespec="seconds")
+    start_monotonic = time.monotonic()
+    recent_files: list[dict] = []
+
+    write_progress_state({
+        "running": True, "started_at": started_at, "strategy": "text/OCR",
+        "total": total, "processed": 0, "detected": 0, "failed": 0,
+        "current_file": None, "rate_files_per_min": 0.0, "eta_secs": None,
+        "recent": [],
+    })
+
+    progress_lock = threading.Lock()
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {executor.submit(process_file, entry): entry for entry in to_process}
         for future in as_completed(futures):
             completed += 1
-            if completed % 50 == 0 or completed == total:
-                logging.info(f"  Language progress: {completed}/{total}")
             try:
                 entry = futures[future]
                 results = future.result()
                 _patch_entry_from_results(entry, results, min_confidence, stats)
+                # Build a recent-file row showing what got resolved on this entry.
+                file_label = (entry.get("filename") or "")[:80]
+                first_det = "(no change)"
+                for r in results or []:
+                    if r.get("detected_language") and r["detected_language"] != "und":
+                        first_det = f"{r['detected_language']} ({r.get('confidence', 0):.2f})"
+                        break
+                with progress_lock:
+                    recent_files.append({"file": file_label, "detected": first_det})
+                    if len(recent_files) > 5:
+                        recent_files.pop(0)
             except Exception as e:
                 logging.warning(f"  Language detection error: {e}")
+                with progress_lock:
+                    recent_files.append({
+                        "file": (futures[future].get("filename") or "")[:80],
+                        "detected": "error",
+                    })
+                    if len(recent_files) > 5:
+                        recent_files.pop(0)
+
+            if completed % 50 == 0 or completed == total:
+                logging.info(f"  Language progress: {completed}/{total}")
+
+            with progress_lock:
+                elapsed = max(time.monotonic() - start_monotonic, 0.001)
+                rate = completed / elapsed * 60.0
+                eta_secs = (total - completed) / (rate / 60.0) if rate > 0 else None
+                write_progress_state({
+                    "running": True, "started_at": started_at, "strategy": "text/OCR",
+                    "total": total, "processed": completed,
+                    "detected": stats.get("detected", 0),
+                    "failed": stats.get("failed", 0),
+                    "current_file": (futures[future].get("filename") or "")[:80],
+                    "rate_files_per_min": round(rate, 2),
+                    "eta_secs": int(eta_secs) if eta_secs is not None else None,
+                    "recent": list(recent_files),
+                })
+
+    clear_progress_state()
 
 
 def _run_text_whisper_strategy(
