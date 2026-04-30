@@ -2160,12 +2160,30 @@ def _run_text_whisper_strategy(
     stats: dict,
     report: dict,
     retry_unresolved: bool = False,
+    workers: int = 4,
 ) -> None:
-    """4-thread per-file whisper pool running detect_audio_language_deep per track.
+    """N-thread per-file whisper pool running detect_audio_language_deep per track.
 
     Replaces the previous 4-phase _escalating_whisper_detect (which duplicated
     detect_audio_language_deep). Saves the report after every file.
+
+    The 2026-04-30 BSOD: this used to hardcode 4 threads, ignoring --workers.
+    On GPU (cuda/float16 on the RTX 4080) four concurrent CUDA contexts
+    crashed the NVIDIA driver — bugcheck 0x135, access violation in kernel
+    — same symptom class as discipline rule 9b's two-concurrent-NVENC ban.
+    Now respects ``workers`` and forces serial when GPU mode is in use.
     """
+    # GPU safety: multi-thread CUDA contexts BSOD this machine. If WHISPER_FORCE_CPU
+    # isn't set, we're running on GPU — force a single worker no matter what the
+    # caller asked for. Logged loudly so the override isn't silent.
+    cpu_forced = os.environ.get("WHISPER_FORCE_CPU", "").strip() in ("1", "true", "True", "TRUE", "yes")
+    if not cpu_forced and workers > 1:
+        logging.info(
+            f"  GPU mode detected (WHISPER_FORCE_CPU not set) — clamping whisper workers "
+            f"from {workers} to 1 to avoid concurrent-CUDA BSOD (rule 9b class)"
+        )
+        workers = 1
+    workers = max(1, workers)
     work_queue: queue.Queue = queue.Queue()
     result_lock = threading.Lock()
     save_lock = threading.Lock()
@@ -2294,7 +2312,7 @@ def _run_text_whisper_strategy(
 
             work_queue.task_done()
 
-    threads = [threading.Thread(target=worker, daemon=True, name=f"whisper-{i}") for i in range(4)]
+    threads = [threading.Thread(target=worker, daemon=True, name=f"whisper-{i}") for i in range(workers)]
     for t in threads:
         t.start()
     for t in threads:
@@ -2516,10 +2534,11 @@ def enrich_report(
         logging.info("  Whisper: DEEP mode (3 extractor threads + GPU inference)")
         _run_deep_strategy(to_process, whisper_all, min_confidence, stats)
     elif use_whisper:
-        logging.info("  Whisper: parallel mode (per-file worker pool)")
+        logging.info(f"  Whisper: parallel mode (per-file worker pool, workers={workers})")
         _run_text_whisper_strategy(
             to_process, whisper_all, min_confidence, stats, report,
             retry_unresolved=retry_unresolved,
+            workers=workers,
         )
     else:
         _run_text_strategy(to_process, workers, min_confidence, stats, report=report)
