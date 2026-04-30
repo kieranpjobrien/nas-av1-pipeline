@@ -347,20 +347,75 @@ class Orchestrator:
                     f"pipeline tmp files not tracked in state"
                 )
 
-        # Clean orphaned fetch/encoded files from previous runs. Retry once on transient
-        # Windows file locks — the common case is the old pipeline's ffmpeg still holding
-        # the handle for a moment after the subprocess exits. Left orphans waste disk and
-        # can mislead the fetch-buffer accounting.
+        # Clean orphaned fetch/encoded files from previous runs.
+        #
+        # 2026-04-30 incident: this used to blindly delete every file in
+        # ``encoded/`` and ``fetch/`` on startup. The upload worker had died
+        # mid-day on a JSON corruption error; 66 fully-encoded files were
+        # sitting in ``encoded/`` waiting to be uploaded with the matching
+        # state row at status='uploading'. The next pipeline restart wiped
+        # all 66 — ~11 hours of GPU encode work — because the cleanup didn't
+        # check whether the state DB still referenced those paths.
+        #
+        # New rule: a file is only "orphaned" if NO live state row points
+        # at it. We collect every ``local_path`` from rows in non-terminal
+        # status (processing, uploading, fetching, pending with prep_data)
+        # and skip files matching those paths. Anything left is safe to
+        # remove — it really was abandoned by a previous crashed run.
         import time as _time
+        import json as _json
+
+        live_paths: set[str] = set()
+        try:
+            for _fp, row in self.state.get_all_files().items():
+                status = (row.get("status") or "").lower()
+                # Terminal statuses don't have in-flight files in encoded/fetch
+                if status in ("done", "skipped", "error", "flagged_undetermined"):
+                    continue
+                # _row_to_dict already merged extras into row, so prep_data /
+                # local_path / output_path / actual_input live at the top level.
+                for k in ("local_path", "output_path", "actual_input"):
+                    p = row.get(k)
+                    if p:
+                        live_paths.add(os.path.normcase(os.path.abspath(p)))
+                pd = row.get("prep_data")
+                if isinstance(pd, dict):
+                    for k in ("local_path", "output_path", "actual_input"):
+                        p = pd.get(k)
+                        if p:
+                            live_paths.add(os.path.normcase(os.path.abspath(p)))
+        except Exception as e:
+            logging.warning(
+                f"  Could not enumerate live state rows for safe cleanup ({e!r}); "
+                f"falling back to age-based: only files >24h old will be removed"
+            )
+            live_paths = set()
+
+        now = _time.time()
+        AGE_FALLBACK_SECS = 24 * 3600  # if state lookup failed, only kill very old files
 
         for subdir in ("fetch", "encoded"):
             d = os.path.join(self.staging_dir, subdir)
             if not os.path.isdir(d):
                 continue
             cleaned = 0
+            preserved = 0
             still_locked = []
             for f in os.listdir(d):
                 path = os.path.join(d, f)
+                norm = os.path.normcase(os.path.abspath(path))
+                # Hard skip: live state row points at this file
+                if norm in live_paths:
+                    preserved += 1
+                    continue
+                # Soft skip when we couldn't enumerate state: only delete >24h
+                if not live_paths:
+                    try:
+                        if (now - os.path.getmtime(path)) < AGE_FALLBACK_SECS:
+                            preserved += 1
+                            continue
+                    except OSError:
+                        pass
                 try:
                     os.remove(path)
                     cleaned += 1
@@ -376,8 +431,11 @@ class Orchestrator:
                         still_locked.remove(f)
                     except OSError:
                         pass
-            if cleaned:
-                logging.info(f"  Cleaned {cleaned} orphaned files from {subdir}/")
+            if cleaned or preserved:
+                logging.info(
+                    f"  {subdir}/: cleaned {cleaned} orphaned, preserved {preserved} "
+                    f"referenced by live state"
+                )
             if still_locked:
                 logging.warning(
                     f"  {len(still_locked)} file(s) in {subdir}/ still locked after retry — "
