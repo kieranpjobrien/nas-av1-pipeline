@@ -84,6 +84,17 @@ as progress. Read and obey before doing anything else.
     encode is the safe envelope; the throughput of a second concurrent
     encode isn't worth the crash risk.
 
+9c. **One CUDA inference at a time on this GPU.** Same RTX 4080, same
+    crash class. The 2026-04-30 18:27 BSOD (bugcheck 0x135, access
+    violation in nvlddmkm) was triggered by 4 concurrent whisper worker
+    threads each holding a CUDA context. CPU whisper survives the same
+    code because the GIL serialises the inference calls in practice;
+    GPU whisper hits real parallelism and overruns the driver. When
+    `WHISPER_FORCE_CPU` is unset (GPU mode), `_run_text_whisper_strategy`
+    must clamp `workers` to 1 — and any future GPU-inference path must
+    follow the same rule. Multiple concurrent CUDA contexts on this
+    machine = scheduled BSOD. Single context is the only safe envelope.
+
 10. **No `-map 0:a?` (optional audio map).** Ever. Use `-map 0:a` hard
     or explicit `-map 0:a:N`. Optional maps silently drop audio.
     Pre-commit hook blocks this pattern.
