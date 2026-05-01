@@ -163,12 +163,28 @@ DEFAULT_CONFIG = {
     # Files at or above this size get staged to local SSD before mkvmerge
     # rather than running with both INPUT and OUTPUT on UNC. The 2026-05-01
     # House of the Dragon S01E06 incident (9.17 GB, 5+h ETA at 520 KB/s)
-    # showed UNC-in-place mkvmerge degrades catastrophically when the
-    # encoder's fetch/upload workers are also using SMB. Sequential bulk
-    # copy to local SSD finishes in minutes; mkvmerge then runs against
-    # local I/O with no SMB contention. Threshold 2 GB by default — small
-    # files don't benefit from the staging overhead.
-    "gap_filler_local_stage_threshold_bytes": 2 * 1024**3,
+    # and the 2026-05-01 21:25 House S01E17 incident (1.7 GB, hung at
+    # 140 MB written for 16+ minutes) both showed UNC-in-place mkvmerge
+    # degrades unpredictably even on smaller files when SMB is contended
+    # or the file's track structure makes mkvmerge do heavy seeking.
+    #
+    # Sequential bulk copy to local SSD finishes in seconds-to-minutes
+    # depending on file size; mkvmerge then runs against local I/O with no
+    # SMB contention. The cost of staging a small file (a few hundred MB
+    # in 1-3 seconds) is negligible compared to the variance we see on the
+    # UNC path. Threshold dropped from 2 GB → 256 MB so the staging path
+    # is the default for almost everything. Files <256 MB still go direct
+    # — they're typically small enough that even a stalled UNC mkvmerge
+    # finishes in reasonable time.
+    "gap_filler_local_stage_threshold_bytes": 256 * 1024**2,
+
+    # Per-mkvmerge progress watchdog: if the .gapfill_tmp.mkv file's size
+    # doesn't grow for this many seconds, kill the mkvmerge process. The
+    # 2026-05-01 House S01E17 case had mkvmerge writing 140 MB then
+    # producing zero bytes for 16 minutes before we manually killed it.
+    # Without a watchdog the same case stalls forever and blocks the
+    # single-flight gap_filler queue. 90s default.
+    "gap_filler_mkvmerge_stall_secs": 90,
 }
 
 # Containers that can cause NVENC failures — remux to .mkv before encoding

@@ -65,21 +65,81 @@ def test_local_strip_and_mux_rejects_empty_sub_keep_without_no_subs():
         )
 
 
+def test_progress_stall_watchdog_kills_frozen_mkvmerge(tmp_path):
+    """The 2026-05-01 House S01E17 case: mkvmerge wrote 140 MB then froze
+    for 16+ min, blocking the gap_filler queue. The progress watchdog
+    must detect the stall (output file size not advancing) and kill the
+    process. Without this watchdog the queue stays jammed forever.
+    """
+    if not local_mux.is_available():
+        pytest.skip("mkvmerge not available locally")
+
+    out = tmp_path / "frozen.mkv"
+    out.write_bytes(b"x" * 100)  # simulate "wrote 100 bytes then froze"
+
+    poll_calls = {"n": 0}
+
+    class FrozenProc:
+        returncode: int | None = None
+        killed = False
+
+        def communicate(self, timeout=None):
+            poll_calls["n"] += 1
+            # Once kill() has been called the post-kill communicate() should
+            # return cleanly with whatever output was buffered.
+            if self.killed:
+                return ("", "stalled")
+            raise __import__("subprocess").TimeoutExpired(cmd=["mkvmerge"], timeout=timeout or 5)
+
+        def kill(self):
+            self.returncode = -9
+            self.killed = True
+
+    proc = FrozenProc()
+
+    # Speed up the test: tiny stall threshold, fake monotonic that jumps fast
+    times = iter([0, 1, 2, 3, 100, 101, 102])  # last values exceed any reasonable threshold
+
+    with patch("pipeline.local_mux.subprocess.Popen", return_value=proc), \
+         patch("pipeline.local_mux.time.monotonic", side_effect=lambda: next(times)):
+        result = local_mux.local_strip_and_mux(
+            str(tmp_path / "in.mkv"), str(out),
+            audio_keep_ids=[0],
+            sub_keep_ids=None,
+            timeout=999,
+            progress_stall_secs=5,
+        )
+
+    # The kill was triggered (returncode reflects forced kill)
+    assert proc.returncode == -9
+    # And we got at least 2 poll cycles before kill
+    assert poll_calls["n"] >= 2
+
+
 def test_local_strip_and_mux_allows_empty_sub_when_no_subs_set():
     """no_subs=True is the explicit "drop all subs" signal — empty sub_keep_ids
     is fine when paired with it. Don't actually run mkvmerge — just confirm
-    the safety gate doesn't fire."""
+    the safety gate doesn't fire and the right CLI flags are passed."""
     if not local_mux.is_available():
         pytest.skip("mkvmerge not available locally")
-    with patch("pipeline.local_mux.subprocess.run") as m:
-        m.return_value = type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    # 2026-05-01: switched the underlying call from subprocess.run to
+    # subprocess.Popen + a progress-stall watchdog (test_progress_watchdog
+    # below). Mock Popen and short-circuit communicate() to return cleanly.
+    fake_proc = type("P", (), {})()
+    fake_proc.returncode = 0
+    fake_proc.communicate = lambda timeout=None: ("", "")
+    fake_proc.kill = lambda: None
+
+    with patch("pipeline.local_mux.subprocess.Popen") as m:
+        m.return_value = fake_proc
         local_mux.local_strip_and_mux(
             "in.mkv", "out.mkv",
             audio_keep_ids=[0, 1],
             sub_keep_ids=[],
             no_subs=True,
         )
-        # Should have called subprocess.run exactly once with --no-subtitles
+        # Should have called Popen exactly once with --no-subtitles
         assert m.call_count == 1
         cmd = m.call_args[0][0]
         assert "--no-subtitles" in cmd

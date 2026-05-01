@@ -733,6 +733,7 @@ def _strip_tracks_locally(filepath: str, gaps: GapAnalysis) -> bool:
     # Single-flight lock — same rationale as remote (don't pile up concurrent
     # SMB writes to the NAS from multiple workers).
     shutdown_event = getattr(gaps, "_shutdown_event", None)
+    progress_stall_secs = int(config.get("gap_filler_mkvmerge_stall_secs", 90))
     try:
         with gap_fill_lock(role="gap_filler", timeout=600.0, shutdown=shutdown_event):
             result = local_mux.local_strip_and_mux(
@@ -743,6 +744,7 @@ def _strip_tracks_locally(filepath: str, gaps: GapAnalysis) -> bool:
                 no_subs=no_subs,
                 external_sub_paths=external_sub_args,
                 timeout=timeout,
+                progress_stall_secs=progress_stall_secs,
             )
     except GapFillLockTimeout as e:
         logging.error(f"  gap_fill_lock timed out / aborted: {e}")

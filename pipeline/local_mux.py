@@ -96,6 +96,7 @@ def local_strip_and_mux(
     no_subs: bool = False,
     external_sub_paths: list[tuple[str, str]] | None = None,
     timeout: int = 900,
+    progress_stall_secs: int = 90,
 ) -> subprocess.CompletedProcess:
     """Run mkvmerge locally to produce a stripped/muxed output file.
 
@@ -153,9 +154,47 @@ def local_strip_and_mux(
         for sub_path, lang in external_sub_paths:
             args.extend(["--language", f"0:{lang}", sub_path])
 
-    return subprocess.run(
-        args, capture_output=True, text=True, timeout=timeout, encoding="utf-8", errors="replace"
+    # Progress watchdog: kill mkvmerge if the output file hasn't grown for
+    # ``progress_stall_secs``. 2026-05-01 House S01E17 case: mkvmerge wrote
+    # 140 MB then froze for 16+ minutes producing zero bytes — manual kill
+    # was the only way out. The wallclock ``timeout`` is a fallback for
+    # genuinely-slow-but-progressing runs; the stall watchdog targets the
+    # frozen-zero-progress class specifically.
+    proc = subprocess.Popen(
+        args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace"
     )
+    last_size = -1
+    last_progress_t = time.monotonic()
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            stdout, stderr = proc.communicate(timeout=5)
+            # process exited
+            return subprocess.CompletedProcess(args, proc.returncode, stdout=stdout, stderr=stderr)
+        except subprocess.TimeoutExpired:
+            now = time.monotonic()
+            if now > deadline:
+                logging.error(f"local_strip_and_mux: wallclock timeout {timeout}s exceeded; killing mkvmerge")
+                proc.kill()
+                stdout, stderr = proc.communicate(timeout=10)
+                return subprocess.CompletedProcess(args, proc.returncode or -1, stdout=stdout, stderr=stderr)
+            # Check output file size for progress
+            try:
+                cur_size = os.path.getsize(output_path)
+            except OSError:
+                cur_size = last_size
+            if cur_size != last_size:
+                last_size = cur_size
+                last_progress_t = now
+            elif now - last_progress_t >= progress_stall_secs:
+                logging.error(
+                    f"local_strip_and_mux: mkvmerge stalled — output stuck at "
+                    f"{cur_size / 1024**2:.0f} MB for {int(now - last_progress_t)}s "
+                    f"(threshold {progress_stall_secs}s); killing"
+                )
+                proc.kill()
+                stdout, stderr = proc.communicate(timeout=10)
+                return subprocess.CompletedProcess(args, proc.returncode or -1, stdout=stdout, stderr=stderr)
 
 
 def local_mkvpropedit(filepath: str, edit_args: list[str], timeout: int = 60) -> subprocess.CompletedProcess:

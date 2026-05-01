@@ -19,10 +19,22 @@ from __future__ import annotations
 from pipeline.config import build_config
 
 
-def test_threshold_default_is_2gb():
-    """A regression on the default would silently re-create the slow path."""
+def test_threshold_default_is_256mb():
+    """The default was 2 GB initially (2026-05-01) but got dropped to 256 MB
+    after the House S01E17 incident — a 1.7 GB file hung mkvmerge under the
+    old threshold because it fell below 2 GB and went the UNC route. A
+    regression upward would silently re-create that slow path."""
     cfg = build_config()
-    assert cfg["gap_filler_local_stage_threshold_bytes"] == 2 * 1024**3
+    assert cfg["gap_filler_local_stage_threshold_bytes"] == 256 * 1024**2
+
+
+def test_mkvmerge_stall_watchdog_default():
+    """Progress watchdog default threshold — too high and frozen mkvmerges
+    block the queue indefinitely (the original House S01E17 hang ran 16 min
+    before manual kill). 90s is generous for a stalled-but-not-yet-dead
+    process; raise the bar deliberately if you must."""
+    cfg = build_config()
+    assert cfg["gap_filler_mkvmerge_stall_secs"] == 90
 
 
 def test_threshold_overridable():
