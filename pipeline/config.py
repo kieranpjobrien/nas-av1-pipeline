@@ -159,6 +159,16 @@ DEFAULT_CONFIG = {
     # NAS load). User chose local 2026-04-29 after we hit OOM-kill cascades
     # running concurrent SSH+Docker+mkvmerge on the Synology.
     "gap_filler_mux_backend": "local",
+
+    # Files at or above this size get staged to local SSD before mkvmerge
+    # rather than running with both INPUT and OUTPUT on UNC. The 2026-05-01
+    # House of the Dragon S01E06 incident (9.17 GB, 5+h ETA at 520 KB/s)
+    # showed UNC-in-place mkvmerge degrades catastrophically when the
+    # encoder's fetch/upload workers are also using SMB. Sequential bulk
+    # copy to local SSD finishes in minutes; mkvmerge then runs against
+    # local I/O with no SMB contention. Threshold 2 GB by default — small
+    # files don't benefit from the staging overhead.
+    "gap_filler_local_stage_threshold_bytes": 2 * 1024**3,
 }
 
 # Containers that can cause NVENC failures — remux to .mkv before encoding

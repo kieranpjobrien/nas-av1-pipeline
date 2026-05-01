@@ -137,6 +137,9 @@ def _scan_external_subs(filepath: str, gaps: GapAnalysis) -> None:
 def analyse_gaps(file_entry: dict, config: dict) -> GapAnalysis:
     """Analyse what an already-AV1 file needs to be fully done."""
     gaps = GapAnalysis()
+    # Attach config so downstream workers (e.g. _strip_tracks_locally) can
+    # consult thresholds without changing every call signature.
+    gaps._config = config  # type: ignore[attr-defined]
     audio_streams = file_entry.get("audio_streams", [])
     sub_streams = file_entry.get("subtitle_streams", [])
 
@@ -672,13 +675,68 @@ def _strip_tracks_locally(filepath: str, gaps: GapAnalysis) -> bool:
         src_size = 1024 * 1024 * 1024
     timeout = max(900, int(src_size / (1024 * 1024)) * 3)
 
+    # Big-file optimisation: stage input to local SSD before mkvmerge.
+    #
+    # 2026-05-01 finding: mkvmerge running with both INPUT and OUTPUT on UNC
+    # paths runs at ~520 KB/s on big files (House of the Dragon S01E06,
+    # 9.17 GB → 5+ hour ETA). The slow path is the random/seeky read pattern
+    # mkvmerge does against an SMB source — when the encoder's fetch/upload
+    # workers are also using SMB, mkvmerge gets pushed down to a tiny share
+    # of the bandwidth.
+    #
+    # Sequential bulk-copy to local SSD is dramatically faster (3-minute
+    # 9 GB copy at gigabit vs hours of random SMB reads). After the copy,
+    # mkvmerge runs against local SSD I/O — no contention, no random-read
+    # penalty — and only the OUTPUT goes back over SMB.
+    #
+    # Threshold default 2 GB: below that, the in-place UNC path is fast
+    # enough that the staging overhead isn't worth it.
+    from paths import STAGING_DIR
+
+    config = getattr(gaps, "_config", None) or {}
+    threshold = int(config.get("gap_filler_local_stage_threshold_bytes", 2 * 1024**3))
+
+    staged_input: Optional[str] = None
+    mkv_input = filepath
+    if src_size >= threshold:
+        gap_stage_dir = os.path.join(str(STAGING_DIR), "gap_stage")
+        os.makedirs(gap_stage_dir, exist_ok=True)
+        # Disambiguating prefix in case two passes ever collide on the same name
+        staged_name = f"{int(time.time())}_{os.path.basename(filepath)}"
+        staged_input = os.path.join(gap_stage_dir, staged_name)
+        try:
+            copy_t0 = time.monotonic()
+            logging.info(
+                f"  Staging {src_size/1024**3:.1f} GB to local SSD "
+                f"(file > {threshold/1024**3:.1f} GB threshold)"
+            )
+            shutil.copy2(filepath, staged_input)
+            elapsed = time.monotonic() - copy_t0
+            logging.info(
+                f"  Staged in {elapsed:.0f}s "
+                f"({src_size / max(elapsed, 0.001) / 1024**2:.0f} MB/s)"
+            )
+            mkv_input = staged_input
+        except OSError as e:
+            logging.warning(
+                f"  Local staging failed ({e!r}); falling back to UNC-in-place "
+                f"(may be slow under SMB contention)"
+            )
+            if staged_input and os.path.exists(staged_input):
+                try:
+                    os.remove(staged_input)
+                except OSError:
+                    pass
+            staged_input = None
+            mkv_input = filepath
+
     # Single-flight lock — same rationale as remote (don't pile up concurrent
     # SMB writes to the NAS from multiple workers).
     shutdown_event = getattr(gaps, "_shutdown_event", None)
     try:
         with gap_fill_lock(role="gap_filler", timeout=600.0, shutdown=shutdown_event):
             result = local_mux.local_strip_and_mux(
-                filepath,
+                mkv_input,
                 tmp_unc,
                 audio_keep_ids=audio_keep_ids,
                 sub_keep_ids=sub_keep_ids,
@@ -688,7 +746,21 @@ def _strip_tracks_locally(filepath: str, gaps: GapAnalysis) -> bool:
             )
     except GapFillLockTimeout as e:
         logging.error(f"  gap_fill_lock timed out / aborted: {e}")
+        if staged_input and os.path.exists(staged_input):
+            try:
+                os.remove(staged_input)
+            except OSError:
+                pass
         return False
+
+    # Always remove the staged copy whether mkvmerge succeeded or not — the
+    # tmp_unc output (if any) is on the NAS, the local staging was just a
+    # speed optimisation. Leaving it would waste tens of GB on the SSD.
+    if staged_input and os.path.exists(staged_input):
+        try:
+            os.remove(staged_input)
+        except OSError as e:
+            logging.warning(f"  Failed to remove staged input {staged_input}: {e!r}")
 
     if result.returncode >= 2:
         err_lines = [
