@@ -680,6 +680,14 @@ export function DashboardPage({ onFileClick }) {
   const [report, setReport] = useState(null);
   const [error, setError] = useState(null);
   const [rescan, setRescan] = useState(null);
+  // Drill-in filter set by Glance compliance cards. Library reads this on
+  // mount and forces a matching filter (e.g. drillKey="video" → only show
+  // non-AV1 files). Cleared when the user navigates away or toggles it off.
+  const [drillKey, setDrillKey] = useState(null);
+  const navigateWithDrill = (nextView, key = null) => {
+    setDrillKey(key);
+    setView(nextView);
+  };
   const [routing, setRouting] = useState(() => {
     try {
       return { ...DEFAULT_ROUTING, ...JSON.parse(localStorage.getItem("nc.routing") || "{}") };
@@ -1082,10 +1090,17 @@ export function DashboardPage({ onFileClick }) {
                 workersActive={workers.active}
                 workersTotal={workers.total}
                 onNavigate={setView}
+                onDrillTo={navigateWithDrill}
               />
             )}
             {view === "library" && (
-              <Library data={data} pipelineData={pipeline} onFileOpen={onFileClick} />
+              <Library
+                data={data}
+                pipelineData={pipeline}
+                onFileOpen={onFileClick}
+                drillKey={drillKey}
+                onClearDrill={() => setDrillKey(null)}
+              />
             )}
             {view === "worklist" && (
               <Worklist data={data} pipelineData={pipeline} onNavigate={setView} />

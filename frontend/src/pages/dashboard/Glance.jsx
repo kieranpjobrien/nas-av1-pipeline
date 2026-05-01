@@ -206,7 +206,7 @@ function ActiveRow({ f }) {
   );
 }
 
-export function Glance({ data, pipelineData, throughputPerDay, workersActive, workersTotal, onNavigate }) {
+export function Glance({ data, pipelineData, throughputPerDay, workersActive, workersTotal, onNavigate, onDrillTo }) {
   const [historySummary, setHistorySummary] = useState(null);
   const [completion, setCompletion] = useState(null);
   const [healthDeep, setHealthDeep] = useState(null);
@@ -707,16 +707,46 @@ export function Glance({ data, pipelineData, throughputPerDay, workersActive, wo
             ].map(({ k, label, pct, done, colour }) => {
               const total2 = completion.total || 0;
               const remaining = Math.max(0, total2 - (done || 0));
+              const clickable = remaining > 0 && !!onDrillTo;
               return (
                 <div
                   key={k}
+                  role={clickable ? "button" : undefined}
+                  tabIndex={clickable ? 0 : undefined}
+                  onClick={clickable ? () => onDrillTo("library", k) : undefined}
+                  onKeyDown={
+                    clickable
+                      ? (e) => {
+                          if (e.key === "Enter" || e.key === " ") onDrillTo("library", k);
+                        }
+                      : undefined
+                  }
+                  title={clickable ? `Click to see the ${remaining} files still failing this rule` : "All files compliant"}
                   style={{
                     padding: 12,
                     borderRadius: 8,
                     background: "var(--surface)",
                     border: "1px solid var(--line)",
                     textAlign: "center",
+                    cursor: clickable ? "pointer" : "default",
+                    transition: "border-color 120ms, background 120ms",
                   }}
+                  onMouseEnter={
+                    clickable
+                      ? (e) => {
+                          e.currentTarget.style.borderColor = colour;
+                          e.currentTarget.style.background = "var(--surface-hover, var(--bg-1))";
+                        }
+                      : undefined
+                  }
+                  onMouseLeave={
+                    clickable
+                      ? (e) => {
+                          e.currentTarget.style.borderColor = "var(--line)";
+                          e.currentTarget.style.background = "var(--surface)";
+                        }
+                      : undefined
+                  }
                 >
                   <div
                     className="mono"

@@ -59,7 +59,74 @@ const foreignSubsOnly = (f) => {
 
 const statusIsErrored = (pf) => ["error", "errored", "failed"].includes((pf?.status || "").toLowerCase());
 
-export function Library({ data, pipelineData, onFileOpen }) {
+// Drill-in: when Glance's compliance card is clicked it routes here with a
+// drillKey identifying which standards-compliance bucket to filter on.
+// Each function below returns true when the file FAILS that rule (i.e. it's
+// in the "to-go" bucket the dashboard surfaces). Mirrors the server-side
+// _compliance_for_entry logic in server/routers/library.py so the frontend
+// list matches the count shown on the card the user just clicked.
+const KEEP_LANGS_SET = new Set(["en", "eng", "english", "und", ""]);
+const isEng = (s) => {
+  const l = (s || "").toLowerCase().trim();
+  return l === "en" || l === "eng" || l === "english";
+};
+const drillFailures = {
+  // Non-AV1 video
+  video: (f) => (f.codec || "").toLowerCase() !== "av1",
+  // Any audio stream not EAC-3 OR foreign-language audio (stricter audio_ok rule)
+  audio: (f) => {
+    const audio = f.audio || [];
+    if (audio.length === 0) return true; // zero-audio is non-compliant
+    if (audio.some((a) => !["eac3", "e-ac-3"].includes((a.codec_raw || a.codec || "").toLowerCase())))
+      return true;
+    return false;
+  },
+  // English subs missing
+  subs: (f) => {
+    const subs = f.subs || [];
+    const ext = f.externalSubs || [];
+    return !(subs.some((s) => isEng(s.lang)) || ext.some((s) => isEng(s.language)));
+  },
+  // Foreign subs present (internal or external)
+  foreign_subs: (f) => {
+    const subs = f.subs || [];
+    const ext = f.externalSubs || [];
+    return (
+      subs.some((s) => !KEEP_LANGS_SET.has((s.lang || "und").toLowerCase())) ||
+      ext.some((s) => !KEEP_LANGS_SET.has((s.language || "und").toLowerCase()))
+    );
+  },
+  // Missing TMDb
+  tmdb: (f) => !f.tmdb || !f.tmdb.tmdb_id,
+  // Any und audio or sub stream
+  langs: (f) => {
+    const audUnd = (f.audio || []).some((a) => {
+      const l = (a.lang || a.language || "und").toLowerCase();
+      return l === "und" || l === "unk" || l === "";
+    });
+    const subUnd = (f.subs || []).some((s) => {
+      const l = (s.lang || s.language || "und").toLowerCase();
+      return l === "und" || l === "unk" || l === "";
+    });
+    return audUnd || subUnd;
+  },
+  // Filename mismatches title (server flag)
+  filename: (f) => f.filename_matches_folder === false,
+  // Folder doesn't match (English filename rule, same flag in current API)
+  english_filename: (f) => f.filename_matches_folder === false,
+};
+const drillLabel = {
+  video: "Non-AV1 video",
+  audio: "Non-EAC-3 audio",
+  subs: "Missing English sub",
+  foreign_subs: "Has foreign subs",
+  tmdb: "No TMDb metadata",
+  langs: "Has und tracks",
+  filename: "Filename mismatch",
+  english_filename: "Folder mismatch",
+};
+
+export function Library({ data, pipelineData, onFileOpen, drillKey, onClearDrill }) {
   const all = data.files || data.topTargets;
   const [selIdx, setSelIdx] = useState(0);
   const [query, setQuery] = useState("");
@@ -79,8 +146,11 @@ export function Library({ data, pipelineData, onFileOpen }) {
   const [panel, setPanel] = useState(null);
   const pipelineFiles = pipelineData?.files || {};
 
+  const drillFn = drillKey && drillFailures[drillKey];
   const rows = useMemo(() => {
     const filtered = all.filter((f) => {
+      // Drill-in filter takes precedence and stacks with the rest.
+      if (drillFn && !drillFn(f)) return false;
       if (query && !`${f.filename} ${f.filepath}`.toLowerCase().includes(query.toLowerCase())) return false;
       if (filters.codec && codecKey(f.codec) !== filters.codec) return false;
       if (filters.res && resKey(f.res) !== filters.res) return false;
@@ -104,7 +174,14 @@ export function Library({ data, pipelineData, onFileOpen }) {
       duration_desc: (a, b) => (b.dur || 0) - (a.dur || 0),
     }[sort];
     return [...filtered].sort(cmp);
-  }, [all, query, filters, sort, pipelineFiles]);
+  }, [all, query, filters, sort, pipelineFiles, drillFn]);
+
+  // Reset selection + pagination when the drill key changes so the user
+  // lands on the first matching file rather than wherever they last were.
+  useEffect(() => {
+    setSelIdx(0);
+    setVisibleCount(50);
+  }, [drillKey]);
 
   // reset pagination when filters change
   useEffect(() => setVisibleCount(50), [query, filters, sort]);
@@ -120,6 +197,44 @@ export function Library({ data, pipelineData, onFileOpen }) {
 
   return (
     <div className="view">
+      {drillKey && (
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 12,
+            padding: "8px 14px",
+            marginBottom: 12,
+            background: "var(--surface)",
+            border: "1px solid var(--accent)",
+            borderRadius: 6,
+          }}
+        >
+          <span style={{ color: "var(--accent)", fontWeight: 600, fontSize: 12 }}>
+            DRILL-IN
+          </span>
+          <span style={{ fontSize: 13 }}>
+            Showing only files that fail: <b>{drillLabel[drillKey] || drillKey}</b> ({fmtNum(rows.length)} of{" "}
+            {fmtNum(all.length)})
+          </span>
+          <button
+            onClick={onClearDrill}
+            style={{
+              marginLeft: "auto",
+              padding: "4px 10px",
+              background: "transparent",
+              border: "1px solid var(--line)",
+              borderRadius: 4,
+              color: "var(--ink-2)",
+              cursor: "pointer",
+              fontSize: 11,
+            }}
+            title="Clear the drill-in filter and show the full library"
+          >
+            Clear filter ✕
+          </button>
+        </div>
+      )}
       <div className="page-head">
         <div>
           <div className="page-title">
