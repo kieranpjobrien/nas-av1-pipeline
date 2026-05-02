@@ -116,16 +116,47 @@ class TestCategoriseEntry:
 
 
 class TestMergeNewFiles:
-    def test_new_smaller_file_jumps_to_front_of_queue(self, tmp_path):
-        """The headline use-case: queue holds 8 GB and 5 GB items; a 200 MB
-        episode appears in the report; after merge it sits at index 0."""
+    def test_new_largest_file_lands_at_front_with_default_order(self, tmp_path):
+        """Default order is largest-first (set 2026-05-02). A new big file
+        joining the queue lands at index 0 so the encoder hits it next."""
         from pipeline.config import build_config
 
         orch = _orch(tmp_path)
         cfg = build_config()
         orch.config = cfg
 
-        # Existing live queue with two big items.
+        small = _h264_entry(r"\\NAS\Series\Show\S01E01.mkv", 200_000_000)
+        med = _h264_entry(r"\\NAS\Movies\Med.mkv", 5_000_000_000)
+        full_q: list[dict] = []
+        gap_q: list[dict] = []
+        for entry in (small, med):
+            cat, it = categorise_entry(entry, cfg, orch.state, orch.control)
+            assert cat == "full_gamut"
+            full_q.append(it)
+        full_q.sort(key=lambda x: x["file_size_bytes"], reverse=True)
+
+        # Sonarr drops an 8 GB title. Report now has all three.
+        big = _h264_entry(r"\\NAS\Movies\Big.mkv", 8_000_000_000)
+        report = _write_report(tmp_path, [big, med, small])
+
+        added_full, added_gap = orch._merge_new_files(full_q, gap_q, report)
+        assert added_full == 1
+        assert added_gap == 0
+        assert len(full_q) == 3
+        assert full_q[0]["filepath"] == r"\\NAS\Movies\Big.mkv"
+        # Largest-first invariant preserved
+        sizes = [item["file_size_bytes"] for item in full_q]
+        assert sizes == sorted(sizes, reverse=True)
+
+    def test_smallest_first_order_still_works_when_configured(self, tmp_path):
+        """Override path: setting encode_queue_order='smallest_first' falls back
+        to the previous burn-through-quick-wins ordering."""
+        from pipeline.config import build_config
+
+        orch = _orch(tmp_path)
+        cfg = build_config({"encode_queue_order": "smallest_first"})
+        orch.config = cfg
+
         big = _h264_entry(r"\\NAS\Movies\Big.mkv", 8_000_000_000)
         med = _h264_entry(r"\\NAS\Movies\Med.mkv", 5_000_000_000)
         full_q: list[dict] = []
@@ -136,16 +167,12 @@ class TestMergeNewFiles:
             full_q.append(it)
         full_q.sort(key=lambda x: x["file_size_bytes"])
 
-        # Sonarr drops a small episode. Report now has all three.
         small = _h264_entry(r"\\NAS\Series\Show\S01E01.mkv", 200_000_000)
         report = _write_report(tmp_path, [big, med, small])
 
         added_full, added_gap = orch._merge_new_files(full_q, gap_q, report)
         assert added_full == 1
-        assert added_gap == 0
-        assert len(full_q) == 3
         assert full_q[0]["filepath"] == r"\\NAS\Series\Show\S01E01.mkv"
-        # Smallest-first invariant preserved
         sizes = [item["file_size_bytes"] for item in full_q]
         assert sizes == sorted(sizes)
 

@@ -161,8 +161,17 @@ def build_queues(report_path: str, config: dict, state: PipelineState, control: 
         elif category == "gap_filler":
             gap_filler_queue.append(item)
 
-    # Smallest-first: easiest quick wins run before the big remuxes.
-    full_gamut_queue.sort(key=lambda x: x["file_size_bytes"])
+    # Largest-first by default: the big files dominate ETA, so processing
+    # them first makes the ETA visibly shrink rather than grow as the queue
+    # discovers untouched 30 GB 4K HDR titles. The user explicitly asked
+    # for this order on 2026-05-02 ("I'd rather that estimate get smaller
+    # than larger"). Override via config["encode_queue_order"]="smallest_first"
+    # if you want the old burn-through-quick-wins behaviour.
+    order = (config.get("encode_queue_order") or "largest_first").lower()
+    full_gamut_queue.sort(
+        key=lambda x: x["file_size_bytes"],
+        reverse=(order == "largest_first"),
+    )
 
     # Gap filler: NAS-only work first (no fetch), then by size
     # needs_fetch is True only for audio transcode — everything else runs on NAS

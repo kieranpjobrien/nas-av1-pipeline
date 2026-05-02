@@ -1415,7 +1415,13 @@ class Orchestrator:
         with self._dispatched_lock:
             full_gamut_queue.extend(new_full)
             gap_filler_queue.extend(new_gap)
-            full_gamut_queue.sort(key=lambda x: x.get("file_size_bytes", 0))
+            # Match the startup queue order — see pipeline.__main__ for the
+            # default + rationale (largest-first to make the ETA shrink).
+            order = (self.config.get("encode_queue_order") or "largest_first").lower()
+            full_gamut_queue.sort(
+                key=lambda x: x.get("file_size_bytes", 0),
+                reverse=(order == "largest_first"),
+            )
 
             def _gap_sort_key(e: dict) -> tuple[int, int]:
                 gaps = analyse_gaps(e, self.config)

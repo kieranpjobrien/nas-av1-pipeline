@@ -198,6 +198,14 @@ DEFAULT_CONFIG = {
     # Without a watchdog the same case stalls forever and blocks the
     # single-flight gap_filler queue. 90s default.
     "gap_filler_mkvmerge_stall_secs": 90,
+
+    # Order in which the full-gamut encode queue is processed.
+    #   "largest_first" (default): big files first, ETA shrinks visibly
+    #   "smallest_first":          quick wins first, larger files at the tail
+    # User flipped this to largest_first on 2026-05-02 to stop the ETA
+    # from growing every time the queue refresh discovered another 30 GB
+    # 4K HDR title.
+    "encode_queue_order": "largest_first",
 }
 
 # Containers that can cause NVENC failures — remux to .mkv before encoding
