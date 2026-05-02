@@ -79,6 +79,86 @@ def _read_mkv_cq_tag(filepath: str, mkvmerge: str | None = None) -> int | None:
     return None
 
 
+def _build_bitrate_to_cq_table(state_db: str, files_by_path: dict) -> dict:
+    """Walk pipeline_state for files with a known stamped CQ, group their
+    bitrates by (grade, res_key, cq), and return a median table for each
+    bucket. Used as a 3rd-tier fallback for files with no MKV tag and no
+    state row — instead of writing them off as "unknown" we look up the
+    closest-CQ bucket for their (grade, res) and assign that.
+
+    Built once per audit (cheap — single SELECT, no per-file probing).
+    Returns {(grade, res_key): {cq: median_bitrate_kbps}}.
+    """
+    from collections import defaultdict
+    from pipeline.content_grade import derive_grade
+
+    raw: dict[tuple, dict[int, list[int]]] = defaultdict(lambda: defaultdict(list))
+    try:
+        conn = sqlite3.connect(state_db)
+        cur = conn.cursor()
+        cur.execute("SELECT filepath, extras FROM pipeline_files WHERE status='done' AND extras IS NOT NULL")
+        for fp, ex in cur.fetchall():
+            try:
+                e = json.loads(ex)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            cq = (e.get("encode_params_used") or {}).get("cq")
+            if not isinstance(cq, int):
+                continue
+            f = files_by_path.get(fp)
+            if not f:
+                continue
+            grade = derive_grade(f)
+            video = f.get("video") or {}
+            res = video.get("resolution_class") or "1080p"
+            bitrate = video.get("bitrate_kbps") or f.get("overall_bitrate_kbps") or 0
+            if bitrate <= 0:
+                continue
+            res_key = "4K_HDR" if (res == "4K" and video.get("hdr")) else (
+                "4K_SDR" if res == "4K" else res
+            )
+            raw[(grade, res_key)][cq].append(int(bitrate))
+        conn.close()
+    except sqlite3.Error:
+        return {}
+
+    # Reduce to medians; drop buckets with <3 samples (too noisy to trust).
+    table: dict[tuple, dict[int, int]] = {}
+    for key, per_cq in raw.items():
+        m = {}
+        for cq, vals in per_cq.items():
+            if len(vals) >= 3:
+                vals_sorted = sorted(vals)
+                m[cq] = vals_sorted[len(vals_sorted) // 2]
+        if m:
+            table[key] = m
+    return table
+
+
+def _infer_cq_from_bitrate(bitrate_kbps: int, table: dict, grade: str, res_key: str) -> int | None:
+    """Map an observed bitrate to the closest CQ in the (grade, res_key)
+    bucket. Returns None if we have no calibration for this bucket.
+
+    Confidence is implicit in how close the bitrate is to the bucket's
+    median — we don't surface a numeric confidence (callers treat it as
+    "best guess, mark with source='bitrate_inferred'"). The audit JSON
+    captures the source so the dashboard can render unknowns vs inferred
+    vs stamped distinctly.
+    """
+    bucket = table.get((grade, res_key)) or table.get((grade, "1080p"))
+    if not bucket:
+        return None
+    # Find the CQ whose median bitrate is closest to ours
+    best_cq = None
+    best_dist = None
+    for cq, med_bitrate in bucket.items():
+        dist = abs(bitrate_kbps - med_bitrate)
+        if best_dist is None or dist < best_dist:
+            best_dist = dist
+            best_cq = cq
+    return best_cq
+
+
 def _read_db_cq(state_db: str, filepath: str) -> int | None:
     """Return CQ from pipeline_state.db encode_params_used, if present."""
     try:
@@ -104,7 +184,7 @@ def _read_db_cq(state_db: str, filepath: str) -> int | None:
     return None
 
 
-def _audit_one(entry: dict, state_db: str, base_cq_lookup) -> dict:
+def _audit_one(entry: dict, state_db: str, base_cq_lookup, bitrate_table: dict | None = None) -> dict:
     """Audit a single file. Returns {filepath, target_cq, current_cq, source, bucket, grade}."""
     from pipeline.content_grade import target_cq as compute_target
 
@@ -126,13 +206,24 @@ def _audit_one(entry: dict, state_db: str, base_cq_lookup) -> dict:
     base_cq = base_cq_lookup(content_type, res_key)
     target, grade, offset = compute_target(base_cq, entry)
 
-    # Read current CQ — tag first, DB fallback
+    # Read current CQ in three tiers (most reliable to least):
+    #   1. MKV ENCODER tag (post-2026-05-03 encodes have it)
+    #   2. pipeline_state.db encode_params_used (recent encodes pre-stamp)
+    #   3. Bitrate inference against the calibration table (any AV1 file with
+    #      a known bitrate, no matter how old; ±2 CQ fuzziness is the cost)
     current = _read_mkv_cq_tag(fp)
     source = "tag" if current is not None else None
     if current is None:
         current = _read_db_cq(state_db, fp)
         if current is not None:
             source = "state_db"
+    if current is None and bitrate_table:
+        bitrate = (entry.get("video") or {}).get("bitrate_kbps") or entry.get("overall_bitrate_kbps") or 0
+        if bitrate > 0:
+            inferred = _infer_cq_from_bitrate(int(bitrate), bitrate_table, grade, res_key)
+            if inferred is not None:
+                current = inferred
+                source = "bitrate_inferred"
     if current is None:
         source = "unknown"
 
@@ -195,10 +286,21 @@ def main() -> int:
     if args.limit:
         av1 = av1[: args.limit]
 
+    # Build the bitrate-to-CQ inference table once. This pulls every
+    # known-CQ encode from pipeline_state, groups by (grade, res_key, cq),
+    # and stores median bitrates. Used as the 3rd-tier fallback for files
+    # with no MKV tag and no state row.
+    files_by_path = {f["filepath"]: f for f in files}
+    bitrate_table = _build_bitrate_to_cq_table(state_db, files_by_path)
+    logging.info(
+        f"Bitrate calibration table built from {sum(len(v) for v in bitrate_table.values())} "
+        f"(grade,res,cq) buckets across {len(bitrate_table)} (grade,res) groups"
+    )
+
     logging.info(f"Auditing {len(av1)} AV1 file(s) with {args.workers} workers...")
     results: list[dict] = []
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
-        futs = [pool.submit(_audit_one, e, state_db, _base_cq) for e in av1]
+        futs = [pool.submit(_audit_one, e, state_db, _base_cq, bitrate_table) for e in av1]
         for i, fut in enumerate(as_completed(futs), 1):
             results.append(fut.result())
             if i % 100 == 0 or i == len(av1):
