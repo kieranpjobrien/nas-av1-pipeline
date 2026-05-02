@@ -118,6 +118,7 @@ export const api = {
   setConfig: (overrides) => putJSON("/config", overrides),
   getMkvpropedAvailable: () => fetchJSON("/mkvpropedit-available"),
   getLibraryCompletion: () => fetchJSON("/library-completion"),
+  getCqAudit: () => fetchJSON("/cq-audit"),
   getLangDetectStatus: () => fetchJSON("/lang-detect/status"),
   quickWins: () => postJSON("/quick-wins", {}),
   getForceList: () => fetchJSON("/control/force-list"),

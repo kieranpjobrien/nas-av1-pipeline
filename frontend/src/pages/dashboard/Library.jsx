@@ -147,6 +147,31 @@ export function Library({ data, pipelineData, onFileOpen, drillKey, onClearDrill
     foreignSubs: false,
     status: null, // null | "needs_encode" | "errored"
   });
+  // CQ audit results — only fetched when the user drills into Grade-Optimised.
+  // Map from filepath -> bucket; we annotate `f.cq_audit_bucket` in-place so
+  // the drillFailures.grade_optimal predicate can filter on it.
+  const [cqAudit, setCqAudit] = useState(null);
+  useEffect(() => {
+    if (drillKey !== "grade_optimal") return;
+    let cancelled = false;
+    api.getCqAudit().then((aud) => {
+      if (cancelled) return;
+      const map = new Map();
+      for (const r of aud.results || []) map.set(r.filepath, r);
+      setCqAudit({ ready: aud.ready, map, audited_at: aud.audited_at });
+    }).catch(() => setCqAudit({ ready: false, map: new Map() }));
+    return () => { cancelled = true; };
+  }, [drillKey]);
+  // Annotate `all` with bucket data so the drill predicate can read it.
+  // Cheap — single pass, mutates an in-memory shadow not the input.
+  const annotatedAll = useMemo(() => {
+    if (drillKey !== "grade_optimal" || !cqAudit?.map) return all;
+    return all.map((f) => {
+      const r = cqAudit.map.get(f.filepath);
+      if (!r) return f;
+      return { ...f, cq_audit_bucket: r.bucket, cq_audit_target: r.target_cq, cq_audit_current: r.current_cq };
+    });
+  }, [all, cqAudit, drillKey]);
   const [sort, setSort] = useState("size_desc");
   const [group, setGroup] = useState("none");
   const [sortOpen, setSortOpen] = useState(false);
@@ -157,7 +182,8 @@ export function Library({ data, pipelineData, onFileOpen, drillKey, onClearDrill
 
   const drillFn = drillKey && drillFailures[drillKey];
   const rows = useMemo(() => {
-    const filtered = all.filter((f) => {
+    const source = drillKey === "grade_optimal" ? annotatedAll : all;
+    const filtered = source.filter((f) => {
       // Drill-in filter takes precedence and stacks with the rest.
       if (drillFn && !drillFn(f)) return false;
       if (query && !`${f.filename} ${f.filepath}`.toLowerCase().includes(query.toLowerCase())) return false;
@@ -183,7 +209,7 @@ export function Library({ data, pipelineData, onFileOpen, drillKey, onClearDrill
       duration_desc: (a, b) => (b.dur || 0) - (a.dur || 0),
     }[sort];
     return [...filtered].sort(cmp);
-  }, [all, query, filters, sort, pipelineFiles, drillFn]);
+  }, [all, annotatedAll, drillKey, query, filters, sort, pipelineFiles, drillFn]);
 
   // Reset selection + pagination when the drill key changes so the user
   // lands on the first matching file rather than wherever they last were.

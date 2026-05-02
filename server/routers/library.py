@@ -536,3 +536,35 @@ def get_completion_missing(category: str) -> dict:
             missing.append(entry)
 
     return {"category": category, "count": len(missing), "files": missing[:500]}
+
+
+@router.get("/api/cq-audit")
+def get_cq_audit() -> dict:
+    """Return the audit sidecar produced by ``tools.audit_encode_cq``.
+
+    Frontend reads this when the user drills into the "Grade-Optimised"
+    hero card so the file list can show only the bucket they care about
+    (too_low / too_high / unknown / optimal).
+
+    Returns an empty payload + ``ready: False`` when no audit has been
+    run yet, so the frontend can render "audit pending — run
+    tools.audit_encode_cq" rather than crashing.
+    """
+    from paths import STAGING_DIR
+
+    audit_path = STAGING_DIR / "audit_cq.json"
+    if not audit_path.exists():
+        return {"ready": False, "results": [], "buckets": {}}
+    try:
+        with audit_path.open(encoding="utf-8") as f:
+            audit = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {"ready": False, "results": [], "buckets": {}}
+
+    # Add ready=True + audited_at so the UI can show a "last audited" hint
+    try:
+        audit["audited_at"] = audit_path.stat().st_mtime
+    except OSError:
+        audit["audited_at"] = None
+    audit["ready"] = True
+    return audit
