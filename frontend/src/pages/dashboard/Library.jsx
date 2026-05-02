@@ -114,6 +114,14 @@ const drillFailures = {
   filename: (f) => f.filename_matches_folder === false,
   // Folder doesn't match (English filename rule, same flag in current API)
   english_filename: (f) => f.filename_matches_folder === false,
+  // Grade-optimal: any file that's NOT in the optimal bucket. The audit
+  // bucket (optimal/too_low/too_high/unknown) is read from the audit
+  // sidecar JSON written by tools.audit_encode_cq. Without the sidecar we
+  // have no bucket info at all → show nothing rather than guess.
+  grade_optimal: (f) => {
+    const b = f.cq_audit_bucket;
+    return b && b !== "optimal";
+  },
 };
 const drillLabel = {
   video: "Non-AV1 video",
@@ -124,6 +132,7 @@ const drillLabel = {
   langs: "Has und tracks",
   filename: "Filename mismatch",
   english_filename: "Folder mismatch",
+  grade_optimal: "CQ ≠ grade target",
 };
 
 export function Library({ data, pipelineData, onFileOpen, drillKey, onClearDrill }) {

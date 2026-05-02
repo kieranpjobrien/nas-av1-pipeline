@@ -704,8 +704,33 @@ export function Glance({ data, pipelineData, throughputPerDay, workersActive, wo
               { k: "langs", label: "Langs Known", pct: completion.pct_langs_known, done: (completion.total || 0) - (completion.files_with_und || 0), colour: "#10b981" },
               { k: "filename", label: "Clean Filename", pct: completion.pct_filename, done: completion.has_clean_filename, colour: "#6366f1" },
               { k: "english_filename", label: "Folder Match", pct: completion.pct_english_filename, done: completion.has_english_filename, colour: "#ec4899" },
+              {
+                k: "grade_optimal",
+                label: "Grade-Optimised",
+                pct: completion.pct_grade_optimal,
+                // "done" for this stat = the optimal bucket. The "to go" calc uses
+                // the audited total (optimal + too_low + too_high + unknown), not
+                // the library total — files that haven't been audited yet just
+                // show as "audit pending" rather than padding the denominator.
+                done: completion.grade_optimal || 0,
+                colour: "#fb7185",
+              },
             ].map(({ k, label, pct, done, colour }) => {
-              const total2 = completion.total || 0;
+              // Most cards are total-of-library; grade_optimal denominator is
+              // the AUDIT total (only files that have been audited count), so
+              // an unaudited library renders as "0 to go" rather than every
+              // file pretending to fail. The audit tool fills in the rest as
+              // it runs.
+              let denom;
+              if (k === "grade_optimal") {
+                denom = (completion.grade_optimal || 0)
+                  + (completion.grade_too_low || 0)
+                  + (completion.grade_too_high || 0)
+                  + (completion.grade_unknown || 0);
+              } else {
+                denom = completion.total || 0;
+              }
+              const total2 = denom;
               const remaining = Math.max(0, total2 - (done || 0));
               const clickable = remaining > 0 && !!onDrillTo;
               return (

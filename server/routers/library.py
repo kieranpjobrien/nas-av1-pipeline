@@ -6,6 +6,7 @@ Routes:
     GET  /api/completion-missing  - files missing a specific completion category
 """
 
+import json
 import time
 
 from fastapi import APIRouter, HTTPException
@@ -257,6 +258,51 @@ def get_library_completion() -> dict:
     counts["quick_wins_subs_count"] = len(counts["quick_wins_subs"])
     del counts["quick_wins_audio"]
     del counts["quick_wins_subs"]
+
+    # === Grade-optimal CQ stat ===
+    # Read the audit sidecar produced by tools.audit_encode_cq. Writing this
+    # inline at request time would mean ~7000 mkvmerge calls per dashboard
+    # poll — way too slow. The audit tool runs on its own cadence (manual
+    # or via a scheduled task) and the API just reads the rolled-up counts.
+    #
+    # When the sidecar doesn't exist (fresh install, never audited),
+    # surface zeros so the dashboard renders "Grade-Optimised: 0% — run
+    # tools.audit_encode_cq" rather than crashing.
+    counts["grade_optimal"] = 0
+    counts["grade_too_low"] = 0     # encoded gentler than rule wants → re-encode
+    counts["grade_too_high"] = 0    # encoded harsher than rule wants → manual review
+    counts["grade_unknown"] = 0     # no stamp + no state row
+    counts["grade_audited_at"] = None
+    try:
+        from paths import STAGING_DIR  # noqa: PLC0415
+        audit_path = STAGING_DIR / "audit_cq.json"
+        if audit_path.exists():
+            with audit_path.open(encoding="utf-8") as af:
+                audit = json.load(af)
+            buckets = audit.get("buckets") or {}
+            counts["grade_optimal"] = int(buckets.get("optimal", 0))
+            counts["grade_too_low"] = int(buckets.get("too_low", 0))
+            counts["grade_too_high"] = int(buckets.get("too_high", 0))
+            counts["grade_unknown"] = int(buckets.get("unknown", 0))
+            # Audited-at is the file's mtime — useful for the UI to show
+            # "audit is N hours old" and prompt a refresh.
+            try:
+                counts["grade_audited_at"] = audit_path.stat().st_mtime
+            except OSError:
+                pass
+    except Exception:
+        # Don't let an audit-sidecar bug knock the rest of the endpoint
+        # out — readers still want their core compliance numbers.
+        pass
+
+    grade_total_audited = (
+        counts["grade_optimal"] + counts["grade_too_low"]
+        + counts["grade_too_high"] + counts["grade_unknown"]
+    )
+    counts["pct_grade_optimal"] = (
+        round(100 * counts["grade_optimal"] / grade_total_audited, 1)
+        if grade_total_audited else 0
+    )
 
     # Detailed completion stats for hero display
     has_tmdb = sum(1 for f in files if f.get("tmdb"))
