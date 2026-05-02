@@ -1,0 +1,8 @@
+{
+  "_comment": "Files with no dialogue — orchestral / instrumental only. Tagged with ISO 639-2 'zxx' (no linguistic content) so whisper detection is short-circuited and compliance accepts them. Add new entries here as you find them; rerun `uv run python -m tools.tag_no_dialogue --titles tools/no_dialogue.json`.",
+  "files": [
+    { "filepath": "\\\\KieranNAS\\Media\\Movies\\Paperman (2012)\\Paperman (2012).mkv", "tracks": "all" },
+    { "filepath": "\\\\KieranNAS\\Media\\Movies\\Inner Workings (2016)\\Inner Workings (2016).mkv", "tracks": "all" },
+    { "filepath": "\\\\KieranNAS\\Media\\Movies\\Feast (2014)\\Feast (2014).mkv", "tracks": "all" }
+  ]
+}

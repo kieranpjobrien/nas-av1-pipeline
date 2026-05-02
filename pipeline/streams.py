@@ -187,7 +187,13 @@ def tmdb_keeper_langs(tmdb_original_language: str | None) -> set[str] | None:
     orig = tmdb_original_language.strip().lower()
     if not orig:
         return None
-    keepers: set[str] = {"und", "", orig}
+    # ``zxx`` (ISO 639-2 "no linguistic content / not applicable") is always
+    # an acceptable audio keeper — it's how dialogue-free tracks (orchestral
+    # shorts like Paperman / The Lost Thing / Inner Workings) are tagged.
+    # Without this, those tracks fail audio_lang_ok against any non-English
+    # original_language even though they have no language at all. Added
+    # alongside KEEP_LANGS update on 2026-05-02.
+    keepers: set[str] = {"und", "", "zxx", orig}
     iso2 = _ISO1_TO_ISO2.get(orig)
     if iso2:
         keepers.add(iso2)

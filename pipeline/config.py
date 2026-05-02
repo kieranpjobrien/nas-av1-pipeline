@@ -1,7 +1,20 @@
 """Pipeline configuration defaults and constants."""
 
 # Language sets used across the pipeline for track filtering
-KEEP_LANGS: set[str] = {"eng", "en", "english", "und", ""}
+# Language codes treated as "non-foreign" everywhere — track strip leaves
+# them alone, compliance doesn't flag them.
+#
+# - "eng"/"en"/"english": English audio/subs (the user's primary)
+# - "und"/"": untagged or unknown — held back from strip until language
+#   detection resolves them (rule 2026-04-29 inviolate)
+# - "zxx": ISO 639-2 "no linguistic content / not applicable" — used for
+#   audio tracks that are dialogue-free (orchestral score only,
+#   instrumental shorts like Paperman / The Lost Thing / Inner Workings).
+#   These tracks are deliberately tagged this way; they're not "foreign"
+#   in the strip sense and they're not "undetected" in the detect sense.
+#   Whisper correctly returns unresolved on them because there's no speech.
+#   Added 2026-05-02.
+KEEP_LANGS: set[str] = {"eng", "en", "english", "und", "", "zxx"}
 ENG_LANGS: set[str] = {"eng", "en", "english"}
 
 
