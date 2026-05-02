@@ -151,6 +151,9 @@ export function Library({ data, pipelineData, onFileOpen, drillKey, onClearDrill
   // Map from filepath -> bucket; we annotate `f.cq_audit_bucket` in-place so
   // the drillFailures.grade_optimal predicate can filter on it.
   const [cqAudit, setCqAudit] = useState(null);
+  // Sub-filter within the grade_optimal drill. null = all non-optimal,
+  // otherwise narrows to one bucket. "too_high" is the deletion-review bucket.
+  const [cqBucket, setCqBucket] = useState(null);
   useEffect(() => {
     if (drillKey !== "grade_optimal") return;
     let cancelled = false;
@@ -181,11 +184,26 @@ export function Library({ data, pipelineData, onFileOpen, drillKey, onClearDrill
   const pipelineFiles = pipelineData?.files || {};
 
   const drillFn = drillKey && drillFailures[drillKey];
+  // Bucket counts for the sub-filter chip row. Only meaningful inside the
+  // grade_optimal drill — outside it we don't need them and the audit map
+  // hasn't been fetched anyway.
+  const bucketCounts = useMemo(() => {
+    if (drillKey !== "grade_optimal" || !annotatedAll) return null;
+    const c = { too_low: 0, too_high: 0, unknown: 0, optimal: 0 };
+    for (const f of annotatedAll) {
+      const b = f.cq_audit_bucket;
+      if (b && c[b] !== undefined) c[b] += 1;
+    }
+    return c;
+  }, [annotatedAll, drillKey]);
+
   const rows = useMemo(() => {
     const source = drillKey === "grade_optimal" ? annotatedAll : all;
     const filtered = source.filter((f) => {
       // Drill-in filter takes precedence and stacks with the rest.
       if (drillFn && !drillFn(f)) return false;
+      // Sub-bucket filter inside the grade_optimal drill.
+      if (drillKey === "grade_optimal" && cqBucket && f.cq_audit_bucket !== cqBucket) return false;
       if (query && !`${f.filename} ${f.filepath}`.toLowerCase().includes(query.toLowerCase())) return false;
       if (filters.codec && codecKey(f.codec) !== filters.codec) return false;
       if (filters.res && resKey(f.res) !== filters.res) return false;
@@ -209,13 +227,14 @@ export function Library({ data, pipelineData, onFileOpen, drillKey, onClearDrill
       duration_desc: (a, b) => (b.dur || 0) - (a.dur || 0),
     }[sort];
     return [...filtered].sort(cmp);
-  }, [all, annotatedAll, drillKey, query, filters, sort, pipelineFiles, drillFn]);
+  }, [all, annotatedAll, drillKey, cqBucket, query, filters, sort, pipelineFiles, drillFn]);
 
   // Reset selection + pagination when the drill key changes so the user
   // lands on the first matching file rather than wherever they last were.
   useEffect(() => {
     setSelIdx(0);
     setVisibleCount(50);
+    setCqBucket(null);
   }, [drillKey]);
 
   // reset pagination when filters change
@@ -268,6 +287,46 @@ export function Library({ data, pipelineData, onFileOpen, drillKey, onClearDrill
           >
             Clear filter ✕
           </button>
+        </div>
+      )}
+      {drillKey === "grade_optimal" && bucketCounts && (
+        <div className="facets" style={{ marginBottom: 12 }}>
+          <div className="facet-group">
+            <span className="lbl">Bucket</span>
+            <button
+              className={`chip ${cqBucket === null ? "on" : ""}`}
+              onClick={() => setCqBucket(null)}
+              title="Show every file that isn't grade-optimal"
+            >
+              All non-optimal{" "}
+              <span className="c">
+                {fmtNum(bucketCounts.too_low + bucketCounts.too_high + bucketCounts.unknown)}
+              </span>
+            </button>
+            <button
+              className={`chip ${cqBucket === "too_low" ? "on" : ""}`}
+              onClick={() => setCqBucket("too_low")}
+              title="Encoded with a CQ below the grade target — re-encode candidates"
+            >
+              Too low <span className="c">{fmtNum(bucketCounts.too_low)}</span>
+            </button>
+            <button
+              className={`chip ${cqBucket === "too_high" ? "on" : ""}`}
+              onClick={() => setCqBucket("too_high")}
+              title="Encoded with a CQ above the grade target — over-compressed; review for delete + re-download"
+            >
+              Too high <span className="c">{fmtNum(bucketCounts.too_high)}</span>
+            </button>
+            {bucketCounts.unknown > 0 && (
+              <button
+                className={`chip ${cqBucket === "unknown" ? "on" : ""}`}
+                onClick={() => setCqBucket("unknown")}
+                title="No CQ tag and no bitrate-inference match"
+              >
+                Unknown <span className="c">{fmtNum(bucketCounts.unknown)}</span>
+              </button>
+            )}
+          </div>
         </div>
       )}
       <div className="page-head">
@@ -549,6 +608,37 @@ export function Library({ data, pipelineData, onFileOpen, drillKey, onClearDrill
 
 function FileRow({ f, selected, onClick, onDoubleClick, pipelineInfo }) {
   const st = statusLabel(pipelineInfo?.status);
+  const bucket = f.cq_audit_bucket;
+  const bucketColor = {
+    too_low: "var(--accent)",
+    too_high: "var(--bad)",
+    unknown: "var(--ink-3)",
+    optimal: "var(--good)",
+  }[bucket];
+  const bucketBadge = bucket && (
+    <span
+      className="tag"
+      title={
+        bucket === "too_high"
+          ? "Encoded above the grade target — over-compressed (lower quality than intended). Candidate for delete + re-download."
+          : bucket === "too_low"
+          ? "Encoded below the grade target — bigger than needed. Candidate for re-encode at the grade target."
+          : bucket === "unknown"
+          ? "No CQ tag and no bitrate-inference match"
+          : "On target"
+      }
+      style={{
+        marginLeft: 6,
+        background: "transparent",
+        border: `1px solid ${bucketColor}`,
+        color: bucketColor,
+        textTransform: "none",
+        fontVariantNumeric: "tabular-nums",
+      }}
+    >
+      CQ {f.cq_audit_current ?? "?"}→{f.cq_audit_target ?? "?"}
+    </span>
+  );
   return (
     <div
       className={`ft-row ${selected ? "sel" : ""}`}
@@ -558,6 +648,7 @@ function FileRow({ f, selected, onClick, onDoubleClick, pipelineInfo }) {
       <div className="ft-name">
         <div className="n">
           {prettyTitle(f.filename)} {f.hdr && <span className="tag hdr">HDR</span>}
+          {bucketBadge}
         </div>
         <div className="p">{f.filepath}</div>
       </div>
@@ -928,6 +1019,68 @@ function Inspector({ sel, panel, setPanel, onFileOpen }) {
             <div style={{ fontSize: 11, color: "var(--ink-3)" }}>No subtitle tracks found.</div>
           )}
         </div>
+        {sel.cq_audit_bucket && (
+          <div className="ins-section">
+            <h4>
+              Grade audit{" "}
+              <span
+                className="tag"
+                style={{
+                  background: "transparent",
+                  border: `1px solid ${
+                    sel.cq_audit_bucket === "too_high"
+                      ? "var(--bad)"
+                      : sel.cq_audit_bucket === "too_low"
+                      ? "var(--accent)"
+                      : "var(--ink-3)"
+                  }`,
+                  color:
+                    sel.cq_audit_bucket === "too_high"
+                      ? "var(--bad)"
+                      : sel.cq_audit_bucket === "too_low"
+                      ? "var(--accent)"
+                      : "var(--ink-3)",
+                  textTransform: "none",
+                }}
+              >
+                {sel.cq_audit_bucket.replace("_", " ")}
+              </span>
+            </h4>
+            <dl className="ins-grid">
+              <dt>Current CQ</dt>
+              <dd>{sel.cq_audit_current ?? "—"}</dd>
+              <dt>Target CQ</dt>
+              <dd>{sel.cq_audit_target ?? "—"}</dd>
+              <dt>Delta</dt>
+              <dd
+                style={{
+                  color:
+                    sel.cq_audit_current != null && sel.cq_audit_target != null
+                      ? sel.cq_audit_current > sel.cq_audit_target
+                        ? "var(--bad)"
+                        : "var(--accent)"
+                      : "var(--ink-3)",
+                }}
+              >
+                {sel.cq_audit_current != null && sel.cq_audit_target != null
+                  ? `${sel.cq_audit_current - sel.cq_audit_target > 0 ? "+" : ""}${
+                      sel.cq_audit_current - sel.cq_audit_target
+                    }`
+                  : "—"}
+              </dd>
+              <dt>Verdict</dt>
+              <dd style={{ fontSize: 11, color: "var(--ink-2)" }}>
+                {sel.cq_audit_bucket === "too_high"
+                  ? "Over-compressed vs grade target — review for delete + re-download."
+                  : sel.cq_audit_bucket === "too_low"
+                  ? "Under-compressed vs grade target — re-encode candidate."
+                  : sel.cq_audit_bucket === "unknown"
+                  ? "No CQ tag and no bitrate match — needs manual probe."
+                  : "On target."}
+              </dd>
+            </dl>
+          </div>
+        )}
         <div className="ins-section">
           <h4>
             Encode plan{" "}
@@ -1009,6 +1162,37 @@ function Inspector({ sel, panel, setPanel, onFileOpen }) {
           title="Reveal in the NAS file browser · rename, move, check sidecar subs/artwork"
         >
           {panel === "fm" ? "Hide file manager" : "Open in file manager"} <span className="k">O</span>
+        </button>
+        <button
+          className="ins-btn"
+          style={{
+            marginLeft: "auto",
+            color: "var(--bad)",
+            borderColor: "var(--bad)",
+          }}
+          title="Permanently delete this file from the NAS. Use for too-high CQ files you want to re-download at higher quality."
+          onClick={async () => {
+            const ok = window.confirm(
+              `Delete this file from the NAS?\n\n${sel.filename}\n\nThis cannot be undone. The file is removed from disk and dropped from the pipeline state.`
+            );
+            if (!ok) return;
+            try {
+              await api.deleteFile(sel.filepath);
+              window.notify?.({
+                kind: "good",
+                title: "Deleted",
+                body: prettyTitle(sel.filename),
+              });
+            } catch (e) {
+              window.notify?.({
+                kind: "bad",
+                title: "Delete failed",
+                body: String(e.message || e),
+              });
+            }
+          }}
+        >
+          Delete file <span className="k">⌫</span>
         </button>
       </div>
     </div>
