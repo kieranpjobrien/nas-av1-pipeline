@@ -15,6 +15,20 @@ from pipeline.streams import (
 )
 
 
+# Codecs where NVDEC has a reputation for silent degradation rather than a
+# clean failure — speed drops to ~1 fps without an error code, and the
+# reactive retry path (which depends on ffmpeg exiting non-zero) never
+# triggers. We force software decode upfront for these. The 2026-05-03
+# Any Given Sunday VC-1 incident motivated the list; add codecs as we
+# discover more cases.
+_NVDEC_SILENT_DEGRADATION_CODECS = frozenset({
+    "vc1",     # SMPTE 421M — the original case (HD-DVD / older Blu-ray)
+    "wmv3",    # WMV9 ASF, same family as VC-1, similarly flaky
+    "mpeg2",   # interlaced MPEG-2 from old broadcast captures
+    "mpeg2video",
+})
+
+
 def format_bytes(b: int) -> str:
     if b >= 1024**4:
         return f"{b / 1024**4:.2f} TB"
@@ -398,6 +412,27 @@ def build_ffmpeg_cmd(
         "ffmpeg",
         "-y",
     ]
+
+    # Proactive NVDEC-flaky-codec detection.
+    #
+    # 2026-05-03 finding: Any Given Sunday (1999) Director's Cut is a VC-1
+    # source. NVDEC technically supports VC-1 but in practice silently
+    # degrades to ~0.8 fps — the encoder loop sees NO error, just glacial
+    # progress (0.046× realtime, 56h ETA on a 2.5h movie). The reactive
+    # retry path in _run_encode only fires when ffmpeg exits non-zero,
+    # which never happens here.
+    #
+    # Force software decode upfront for codecs that have a reputation for
+    # this kind of silent NVDEC degradation. CPU decode is slower than NVDEC
+    # but vastly faster than NVDEC's stuck-mode, and NVENC encode runs at
+    # full speed regardless.
+    src_codec = (item.get("video_codec") or "").lower()
+    if use_hwaccel and src_codec in _NVDEC_SILENT_DEGRADATION_CODECS:
+        logging.warning(
+            f"  Forcing software decode for {src_codec.upper()} source "
+            f"(NVDEC known-flaky on this codec)"
+        )
+        use_hwaccel = False
 
     # GPU-resident decode path. ``-hwaccel cuda`` tells ffmpeg to hand decoding to
     # NVDEC (a separate hardware block from NVENC — no contention on Ada RTX cards).
