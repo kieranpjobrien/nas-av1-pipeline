@@ -252,8 +252,17 @@ def get_res_key(item: dict) -> str:
 def resolve_encode_params(config: dict, item: dict) -> dict:
     """Resolve NVENC encode parameters based on content type + resolution.
 
-    Returns dict with keys: cq, preset, multipass, lookahead, maxrate, bufsize.
+    Returns dict with keys: cq, preset, multipass, lookahead, maxrate, bufsize,
+    content_type, res_key, content_grade, cq_offset, base_cq.
+
+    The base CQ comes from the resolution × library matrix. On top of that we
+    apply a content-grade offset (sitcom +5, classic_film +1, etc.) so older
+    sitcoms get the harsher quantization their static talking-head content
+    can absorb without a visible quality hit. See pipeline.content_grade for
+    the matrix.
     """
+    from pipeline.content_grade import target_cq
+
     library_type = item.get("library_type", "movie")
     content_type = "series" if library_type in ("series", "show", "tv", "anime") else "movie"
     resolution = item.get("resolution", "1080p")
@@ -269,8 +278,14 @@ def resolve_encode_params(config: dict, item: dict) -> dict:
     else:
         res_key = "SD"
 
+    base_cq = config["cq"].get(content_type, {}).get(res_key, 30)
+    final_cq, content_grade, applied_offset = target_cq(base_cq, item)
+
     return {
-        "cq": config["cq"].get(content_type, {}).get(res_key, 30),
+        "cq": final_cq,
+        "base_cq": base_cq,
+        "cq_offset": applied_offset,
+        "content_grade": content_grade,
         "preset": config["nvenc_preset"].get(content_type, {}).get(res_key, "p4"),
         "multipass": config["nvenc_multipass"].get(content_type, {}).get(res_key, "disabled"),
         "lookahead": config["nvenc_lookahead"].get(content_type, {}).get(res_key, 16),

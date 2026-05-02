@@ -126,6 +126,77 @@ def _parse_release_info(filename: str) -> dict:
     }
 
 
+def _stamp_encode_metadata(
+    filepath: str,
+    *,
+    encoder: str,
+    cq: int | None = None,
+    content_grade: str | None = None,
+) -> bool:
+    """Write encode parameters into the MKV's global tags via mkvpropedit.
+
+    Three SimpleTags get added at the global (movie/episode) level:
+      * ``ENCODER``         — full param string for human inspection
+      * ``CQ``              — integer CQ used (machine-readable)
+      * ``CONTENT_GRADE``   — string from content_grade.derive_grade()
+
+    The audit tool reads these via ``mkvmerge --identify --identification-format
+    json`` and compares the stamped CQ to what the current grade rules say it
+    *should* be. Without the stamp the audit can only fall back to the state
+    DB (which doesn't survive cascade-of-loss incidents).
+
+    Returns True on success, False on any tooling error (caller logs and
+    moves on — the encode itself already succeeded).
+    """
+    from pipeline import local_mux
+
+    # mkvpropedit takes tag attributes via per-line --tags flags OR an XML
+    # tag file. The XML path supports SimpleTag entries cleanly; the flag
+    # path is for single property-name updates (Title, language, etc.) and
+    # doesn't compose well for free-form metadata.
+    import tempfile
+    import xml.sax.saxutils as _xml
+
+    parts = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<!DOCTYPE Tags SYSTEM "matroskatags.dtd">',
+        '<Tags>',
+        '  <Tag>',
+        '    <Targets><TargetTypeValue>50</TargetTypeValue></Targets>',
+        f'    <Simple><Name>ENCODER</Name><String>{_xml.escape(encoder)}</String></Simple>',
+    ]
+    if cq is not None:
+        parts.append(f'    <Simple><Name>CQ</Name><String>{int(cq)}</String></Simple>')
+    if content_grade:
+        parts.append(f'    <Simple><Name>CONTENT_GRADE</Name><String>{_xml.escape(content_grade)}</String></Simple>')
+    parts.extend(['  </Tag>', '</Tags>'])
+    xml_body = "\n".join(parts)
+
+    # Write the tag XML to a temp file because mkvpropedit's --tags flag
+    # takes a path, not stdin. tempfile cleans up on close.
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".xml", delete=False, encoding="utf-8"
+    ) as f:
+        f.write(xml_body)
+        xml_path = f.name
+    try:
+        result = local_mux.local_mkvpropedit(
+            filepath, ["--tags", f"global:{xml_path}"], timeout=60
+        )
+        if result.returncode >= 2:
+            logging.warning(
+                f"  mkvpropedit tag rc={result.returncode}: "
+                f"{(result.stderr or '').strip()[:200]}"
+            )
+            return False
+        return True
+    finally:
+        try:
+            os.remove(xml_path)
+        except OSError:
+            pass
+
+
 def _append_history_jsonl(path, entry: dict) -> None:
     """Append a single JSONL entry with fsync. JSONL tolerates partial writes at the
     line level — the worst case from a crash is one truncated trailing line, which
@@ -1166,6 +1237,34 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
     except Exception as e:
         state.set_file(filepath, FileStatus.ERROR, error=f"replace failed: {e}", stage="replace")
         return False
+
+    # === Stamp encode parameters into MKV global tags ===
+    # Without this, every encode is opaque after the fact — we'd never know
+    # which CQ a 6-month-old file was encoded at, so we couldn't tell whether
+    # it matches the current grade rules. Stamp ENCODER + CQ + CONTENT_GRADE
+    # so the audit tool reads them directly. ~50 ms cost, fully recoverable.
+    #
+    # Failure here is non-fatal — the encode succeeded and the file is in
+    # place; missing tags just means the audit tool will fall back to the
+    # state DB or flag the file as "unknown CQ" later.
+    try:
+        params_used = encode_params_used or {}
+        encoder_value = (
+            f"av1_nvenc cq={params_used.get('cq', '?')} "
+            f"preset={params_used.get('preset', '?')} "
+            f"multipass={params_used.get('multipass', '?')} "
+            f"grade={params_used.get('content_grade', '?')} "
+            f"base_cq={params_used.get('base_cq', '?')} "
+            f"offset={params_used.get('cq_offset', 0):+d}"
+        )
+        _stamp_encode_metadata(
+            final_path,
+            encoder=encoder_value,
+            cq=params_used.get("cq"),
+            content_grade=params_used.get("content_grade"),
+        )
+    except Exception as e:  # noqa: BLE001
+        logging.warning(f"  encode-tag stamp failed (non-fatal): {e!r}")
 
     # === Post-replace: filename standards check ===
     # If the on-disk filename still matches common scene-tag patterns, clean-filename
