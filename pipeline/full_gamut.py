@@ -1094,6 +1094,59 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
             )
             return False
 
+    # === Stream-level integrity check ===
+    # The 2026-04-13/15 distributed-gap-filler sprint produced ~960 files
+    # with valid metadata but corrupt AV1 streams (Matroska "element exceeds
+    # master element" + libdav1d "obu_forbidden_bit" damage). Header probes
+    # missed all of them. To prevent the same class shipping again, we
+    # decode the first 10 seconds of the encoded output via ``ffmpeg -v error
+    # -f null -``. Any decode-error output means the file is structurally
+    # damaged. Better to ERROR-park here than replace the user's source
+    # with garbage we can't even play back.
+    #
+    # Cost: ~300-500 ms on a clean file (header + first GOP only). Worth it.
+    integrity_signatures = (
+        "exceeds containing master element", "exceeds max length",
+        "unknown-sized element", "inside parent with finite size",
+        "obu_forbidden_bit out of range", "failed to parse temporal unit",
+        "unknown obu type", "overrun in obu bit buffer", "error parsing obu data",
+        "invalid data found when processing input", "error submitting packet to decoder",
+    )
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-v", "error", "-hide_banner",
+             "-i", dest_path, "-t", "10", "-f", "null", "-"],
+            capture_output=True, text=True, timeout=60,
+            encoding="utf-8", errors="replace",
+        )
+        stderr_lo = (result.stderr or "").lower()
+        hits = [sig for sig in integrity_signatures if sig in stderr_lo]
+    except subprocess.TimeoutExpired:
+        hits = ["integrity_check_timeout"]
+    except Exception as e:  # noqa: BLE001
+        # Don't gate on the check itself failing — log + proceed
+        logging.warning(f"  Integrity check error (proceeding): {e!r}")
+        hits = []
+
+    if hits:
+        logging.error(f"  Integrity FAILED for {final_name}: {', '.join(hits[:3])}")
+        # Keep the corrupt output in place under .corrupt so we can examine
+        # it post-mortem rather than silently deleting evidence.
+        corrupt_path = dest_path + ".corrupt"
+        try:
+            os.replace(dest_path, corrupt_path)
+            logging.error(f"  Corrupt output preserved at: {corrupt_path}")
+        except OSError as e:
+            logging.error(f"  Could not preserve corrupt output: {e}")
+        state.set_file(
+            filepath,
+            FileStatus.ERROR,
+            error=f"corruption detected post-encode: {hits[0]}",
+            stage="integrity",
+            corruption_signatures=hits,
+        )
+        return False
+
     # === Replace original (crash-safe) ===
     # Backup policy: DO NOT auto-delete the .original.bak. We leave it in place so
     # Synology's #recycle captures a safety copy on any subsequent housekeeping, AND

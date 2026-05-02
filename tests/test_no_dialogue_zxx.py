@@ -68,6 +68,24 @@ def test_tmdb_keeper_langs_returns_none_for_empty():
     assert tmdb_keeper_langs(None) is None
 
 
+def test_invariant_skips_zxx_tracks():
+    """The 2026-05-02 finding: ``no_done_with_foreign_audio`` was flagging
+    Inner Workings and Feast as proven-foreign because their audio tags
+    are ``zxx`` ≠ TMDb ``en``. zxx is "no linguistic content" — it's
+    outside the comparison space, not a foreign language. The check must
+    skip these tracks entirely so dialogue-free orchestral shorts don't
+    permanently fail the invariant."""
+    src = open("tools/invariants.py", encoding="utf-8").read()
+    # The set of codes treated as "not a language" must include zxx.
+    assert '"zxx"' in src or "'zxx'" in src, "zxx not whitelisted in invariants"
+    # And the comment naming the rationale should be present so future
+    # editors know why this exception exists.
+    assert "no linguistic content" in src.lower(), (
+        "rationale comment missing — without it the next person to edit "
+        "this will likely re-introduce the bug"
+    )
+
+
 def test_tag_no_dialogue_main_requires_arg():
     """CLI surface check — running without --file or --titles is a
     parser error, not a silent no-op."""

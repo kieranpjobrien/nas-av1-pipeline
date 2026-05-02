@@ -722,20 +722,35 @@ def check_no_done_with_foreign_audio(report: Optional[dict] = None) -> Invariant
         any_match = False
         any_proven_foreign = False
         any_unverified_und = False
+        # Codes that aren't real languages and shouldn't be compared:
+        #  - "und"/"unk": untagged / unknown
+        #  - "zxx": ISO 639-2 "no linguistic content" — used for orchestral
+        #    shorts (Paperman, Feast, Inner Workings, etc). Whisper correctly
+        #    fails to detect on them; they're tagged zxx deliberately.
+        #    A zxx track contributes neither a match nor a violation —
+        #    it's simply outside the language-comparison space.
+        NOT_A_LANGUAGE = {"und", "unk", "zxx"}
         for s in audio_streams:
             tag = (s.get("language") or "").lower().strip()
             detected = (s.get("detected_language") or "").lower().strip()
+            # Skip the track entirely if every signal we have is NOT_A_LANGUAGE.
+            # Without this, a zxx-tagged track is treated as "detected != original"
+            # and flagged as proven foreign even though it has no language at all.
+            if tag in NOT_A_LANGUAGE and (not detected or detected in NOT_A_LANGUAGE):
+                if not tag and not detected:
+                    any_unverified_und = True
+                continue
             for cand in (tag, detected):
-                if cand and cand not in {"und", "unk"} and _languages_equivalent(cand, original):
+                if cand and cand not in NOT_A_LANGUAGE and _languages_equivalent(cand, original):
                     any_match = True
                     break
             if any_match:
                 break
             # Track has a confident detected language that's NOT original — proven foreign
-            if detected and detected not in {"und", "unk"} and not _languages_equivalent(detected, original):
+            if detected and detected not in NOT_A_LANGUAGE and not _languages_equivalent(detected, original):
                 any_proven_foreign = True
             # Track is und with no detection — needs audit before we can call it
-            if (not tag or tag in {"und", "unk"}) and not detected:
+            if (not tag or tag in NOT_A_LANGUAGE) and not detected:
                 any_unverified_und = True
         if any_match:
             continue
