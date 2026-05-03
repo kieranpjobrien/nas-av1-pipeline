@@ -131,18 +131,32 @@ def _build_bitrate_to_cq_table(state_db: str, files_by_path: dict) -> dict:
 
 def _infer_cq_from_bitrate(bitrate_kbps: int, table: dict, grade: str, res_key: str) -> int | None:
     """Map an observed bitrate to the closest CQ in the (grade, res_key)
-    bucket. Returns None if we have no calibration for this bucket.
+    bucket. Returns None only if there is no calibration data at all for
+    this resolution.
+
+    Fallback chain (most specific to least specific):
+      1. (grade, res_key)            — exact match
+      2. (default, res_key)          — same resolution, any grade — covers
+                                        new grades (e.g. blockbuster) that
+                                        haven't accumulated their own
+                                        calibration data yet
+      3. (grade, "1080p")            — same grade, fall back to 1080p
+                                        which is by far the most-populated
+                                        resolution bucket
+      4. (default, "1080p")          — last resort, default grade at 1080p
 
     Confidence is implicit in how close the bitrate is to the bucket's
-    median — we don't surface a numeric confidence (callers treat it as
-    "best guess, mark with source='bitrate_inferred'"). The audit JSON
-    captures the source so the dashboard can render unknowns vs inferred
-    vs stamped distinctly.
+    median. The audit JSON captures source='bitrate_inferred' so the
+    dashboard can distinguish stamped CQ from inferred.
     """
-    bucket = table.get((grade, res_key)) or table.get((grade, "1080p"))
+    bucket = (
+        table.get((grade, res_key))
+        or table.get(("default", res_key))
+        or table.get((grade, "1080p"))
+        or table.get(("default", "1080p"))
+    )
     if not bucket:
         return None
-    # Find the CQ whose median bitrate is closest to ours
     best_cq = None
     best_dist = None
     for cq, med_bitrate in bucket.items():
