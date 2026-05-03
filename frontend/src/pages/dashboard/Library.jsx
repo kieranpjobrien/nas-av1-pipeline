@@ -146,6 +146,7 @@ export function Library({ data, pipelineData, onFileOpen, drillKey, onClearDrill
     atmos: false,
     foreignSubs: false,
     status: null, // null | "needs_encode" | "errored"
+    library: null, // null | "movie" | "series"
   });
   // CQ audit results — only fetched when the user drills into Grade-Optimised.
   // Map from filepath -> bucket; we annotate `f.cq_audit_bucket` in-place so
@@ -223,6 +224,11 @@ export function Library({ data, pipelineData, onFileOpen, drillKey, onClearDrill
       if (filters.status === "errored") {
         if (!statusIsErrored(pipelineFiles[f.filepath])) return false;
       }
+      if (filters.library) {
+        const lib = (f.library || libraryOf(f.filepath) || "").toLowerCase();
+        if (filters.library === "movie" && lib !== "movies" && lib !== "movie") return false;
+        if (filters.library === "series" && lib !== "series" && lib !== "tv") return false;
+      }
       return true;
     });
     const cmp = {
@@ -268,6 +274,20 @@ export function Library({ data, pipelineData, onFileOpen, drillKey, onClearDrill
 
   const sortLabel = SORT_OPTIONS.find((o) => o.k === sort)?.label || sort;
   const groupLabel = GROUP_OPTIONS.find((o) => o.k === group)?.label || group;
+
+  // Library type counts for the Movies/Series facet. Computed off the
+  // unfiltered list so the chip number reflects the total in each
+  // bucket, not the count after other facets are applied.
+  const libraryCounts = useMemo(() => {
+    let movies = 0;
+    let series = 0;
+    for (const f of all) {
+      const lib = (f.library || libraryOf(f.filepath) || "").toLowerCase();
+      if (lib === "movies" || lib === "movie") movies += 1;
+      else if (lib === "series" || lib === "tv") series += 1;
+    }
+    return { movies, series };
+  }, [all]);
 
   return (
     <div className="view">
@@ -454,6 +474,21 @@ export function Library({ data, pipelineData, onFileOpen, drillKey, onClearDrill
       </div>
 
       <div className="facets">
+        <div className="facet-group">
+          <span className="lbl">Library</span>
+          <button
+            className={`chip ${filters.library === "movie" ? "on" : ""}`}
+            onClick={() => toggle("library", "movie")}
+          >
+            Movies <span className="c">{fmtNum(libraryCounts.movies)}</span>
+          </button>
+          <button
+            className={`chip ${filters.library === "series" ? "on" : ""}`}
+            onClick={() => toggle("library", "series")}
+          >
+            Series <span className="c">{fmtNum(libraryCounts.series)}</span>
+          </button>
+        </div>
         <div className="facet-group">
           <span className="lbl">Codec</span>
           {["av1", "hevc", "h264"].map((c) => (

@@ -40,6 +40,21 @@ import xml.etree.ElementTree as ET
 import xml.sax.saxutils as _xml
 
 
+class MkvTagWriteError(RuntimeError):
+    """Raised when mkvpropedit returns a hard failure (rc >= 2).
+
+    Carries the actual error string from mkvpropedit so callers can
+    surface a useful message ("file not Matroska or could not be found",
+    "permission denied", "format error") instead of a generic
+    "mkvpropedit failed".
+    """
+
+    def __init__(self, message: str, *, returncode: int, filepath: str):
+        super().__init__(message)
+        self.returncode = returncode
+        self.filepath = filepath
+
+
 def _find_mkvextract() -> str | None:
     """Locate the mkvextract binary on Windows / PATH. Cheap so not cached."""
     exe = shutil.which("mkvextract")
@@ -148,7 +163,14 @@ def _build_tag_xml(tags: list[dict]) -> str:
 
 
 def _write_tag_xml(filepath: str, xml_body: str, *, timeout: int = 60) -> bool:
-    """Write tag XML via mkvpropedit. Returns True on rc < 2."""
+    """Write tag XML via mkvpropedit.
+
+    Returns True on rc < 2 (success or warnings). Raises
+    :class:`MkvTagWriteError` with the actual error string on rc >= 2 so
+    callers can surface a precise reason — generic "mkvpropedit failed"
+    is useless when the underlying problem is "file no longer exists"
+    or "not a valid Matroska file".
+    """
     from pipeline import local_mux  # noqa: PLC0415
 
     with tempfile.NamedTemporaryFile(
@@ -161,13 +183,22 @@ def _write_tag_xml(filepath: str, xml_body: str, *, timeout: int = 60) -> bool:
             filepath, ["--tags", f"global:{xml_path}"], timeout=timeout
         )
         if result.returncode >= 2:
+            # mkvpropedit puts hard errors on stdout; stderr is usually empty.
+            err = ((result.stdout or result.stderr) or "").strip()
+            if err.startswith("Error:"):
+                err = err[len("Error:"):].strip()
+            err = err.split("\n", 1)[0][:300]
             logging.warning(
                 "  mkvpropedit rc=%s on %s: %s",
                 result.returncode,
                 os.path.basename(filepath),
-                ((result.stderr or result.stdout) or "").strip()[:200],
+                err,
             )
-            return False
+            raise MkvTagWriteError(
+                err or f"mkvpropedit returned rc={result.returncode}",
+                returncode=result.returncode,
+                filepath=filepath,
+            )
         return True
     finally:
         try:

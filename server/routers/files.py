@@ -133,6 +133,7 @@ def grade_accept(req: DeleteFileRequest) -> dict:
     """
     from paths import NAS_MOVIES, NAS_SERIES, STAGING_DIR
     from pipeline.grade_review import set_grade_review
+    from pipeline.mkv_tags import MkvTagWriteError
 
     norm = os.path.normpath(req.path)
     nas_movies = os.path.normpath(str(NAS_MOVIES))
@@ -140,11 +141,14 @@ def grade_accept(req: DeleteFileRequest) -> dict:
     if not (norm.startswith(nas_movies) or norm.startswith(nas_series)):
         raise HTTPException(403, "Path is outside NAS media directories")
     if not os.path.exists(norm):
-        raise HTTPException(404, "File not found")
+        raise HTTPException(404, "File no longer exists on disk — likely deleted or moved since the last scan")
 
-    ok = set_grade_review(req.path, "accepted")
-    if not ok:
-        raise HTTPException(500, "mkvpropedit failed to write grade-review tag")
+    try:
+        set_grade_review(req.path, "accepted")
+    except MkvTagWriteError as e:
+        # Bubble the real reason ("not a Matroska file or could not be found",
+        # "permission denied", etc.) so the toast is useful instead of generic.
+        raise HTTPException(422, f"Cannot write tag: {e}") from e
 
     # Patch the audit sidecar in place so the user sees the result before
     # the next full audit. The audit reader walks 6,000 files; we don't want
@@ -163,6 +167,7 @@ def grade_clear(req: DeleteFileRequest) -> dict:
     """
     from paths import NAS_MOVIES, NAS_SERIES, STAGING_DIR
     from pipeline.grade_review import clear_grade_review
+    from pipeline.mkv_tags import MkvTagWriteError
 
     norm = os.path.normpath(req.path)
     nas_movies = os.path.normpath(str(NAS_MOVIES))
@@ -170,11 +175,12 @@ def grade_clear(req: DeleteFileRequest) -> dict:
     if not (norm.startswith(nas_movies) or norm.startswith(nas_series)):
         raise HTTPException(403, "Path is outside NAS media directories")
     if not os.path.exists(norm):
-        raise HTTPException(404, "File not found")
+        raise HTTPException(404, "File no longer exists on disk — likely deleted or moved since the last scan")
 
-    ok = clear_grade_review(req.path)
-    if not ok:
-        raise HTTPException(500, "mkvpropedit failed to clear grade-review tag")
+    try:
+        clear_grade_review(req.path)
+    except MkvTagWriteError as e:
+        raise HTTPException(422, f"Cannot clear tag: {e}") from e
 
     # Re-derive the bucket from the stamped CQ so the sidecar is consistent.
     new_bucket = _rebucket_from_sidecar(STAGING_DIR / "audit_cq.json", req.path)

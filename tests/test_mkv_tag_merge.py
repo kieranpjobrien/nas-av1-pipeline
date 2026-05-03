@@ -111,22 +111,33 @@ def test_merge_empty_new_tags_clears_only_owned():
     assert "<Name>GRADE_REVIEW_AT</Name>" not in xml
 
 
-def test_merge_writes_through_failure():
-    """If mkvpropedit reports a hard failure (rc>=2) the merge returns False
-    so callers can surface the error."""
+def test_merge_propagates_write_error():
+    """Hard mkvpropedit failures bubble up as MkvTagWriteError so callers
+    (especially the API layer) can surface the actual reason — generic
+    'mkvpropedit failed' is useless when the underlying issue is 'file
+    no longer exists' or 'not a valid Matroska file'."""
+    import pytest
+
+    from pipeline.mkv_tags import MkvTagWriteError
 
     def fake_write(filepath, xml_body, *, timeout=60):
-        return False
+        raise MkvTagWriteError(
+            "not a Matroska file or it could not be found",
+            returncode=2,
+            filepath=filepath,
+        )
 
     with patch("pipeline.mkv_tags.read_global_tags", lambda f, *, timeout=60: []), \
          patch("pipeline.mkv_tags._write_tag_xml", fake_write):
-        ok = merge_global_tags(
-            "fake.mkv",
-            owned_names={"X"},
-            new_tags=[{"name": "X", "value": "y"}],
-        )
+        with pytest.raises(MkvTagWriteError) as exc_info:
+            merge_global_tags(
+                "fake.mkv",
+                owned_names={"X"},
+                new_tags=[{"name": "X", "value": "y"}],
+            )
 
-    assert ok is False
+    assert "not a Matroska file" in str(exc_info.value)
+    assert exc_info.value.returncode == 2
 
 
 def test_merge_xml_escapes_special_chars():
