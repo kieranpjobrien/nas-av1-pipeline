@@ -618,9 +618,80 @@ def build_ffmpeg_cmd(
     if include_subs:
         cmd.extend(["-c:s", "copy"])
 
-    # Set language metadata for external subtitle streams
+    # Strip encoder metadata bloat (scene group tags, encoder info) BEFORE we
+    # write our own — ``-map_metadata -1`` drops global metadata. Per-stream
+    # language tags also get lost in transcode (E-AC-3 encoder doesn't carry
+    # the source's language tag through), so we explicitly re-stamp them
+    # below from item.audio_streams / item.subtitle_streams. Pre-2026-05-04
+    # this was missing entirely — every encoded file ended up with UND on
+    # all audio + sub tracks despite the language detection running and
+    # storing the right values in the state DB.
+    cmd.extend(["-map_metadata", "-1"])
+
+    # Restore per-stream language tags for kept INTERNAL audio streams.
+    # item["audio_streams"] is what the orchestrator merged from
+    # detected_audio (whisper-resolved languages) so it's the
+    # source-of-truth. audio_keep is the list of input indices being
+    # mapped (or None = all); the output index is the position in that
+    # iteration order.
+    audio_streams_data = item.get("audio_streams") or []
+    if audio_streams_data:
+        if audio_keep is not None:
+            kept_audio_indices = list(audio_keep)
+        else:
+            kept_audio_indices = list(range(len(audio_streams_data)))
+        for out_idx, in_idx in enumerate(kept_audio_indices):
+            if in_idx >= len(audio_streams_data):
+                continue
+            track = audio_streams_data[in_idx]
+            lang = (track.get("language") or "").strip().lower()
+            if lang and lang not in ("und", "unk"):
+                cmd.extend([f"-metadata:s:a:{out_idx}", f"language={lang}"])
+            title = (track.get("title") or "").strip()
+            if title:
+                cmd.extend([f"-metadata:s:a:{out_idx}", f"title={title}"])
+
+    # Same treatment for INTERNAL subtitle streams. _map_subtitle_streams
+    # decided which input indices to keep above; we re-derive that decision
+    # here so we can stamp the matching languages on the output indices.
+    if include_subs:
+        sub_data = item.get("subtitle_streams") or []
+        if sub_data and config.get("strip_non_english_subs", True):
+            from pipeline.streams import all_languages_known, parse_sub_stream
+            from pipeline.config import ENG_LANGS
+
+            parsed_subs = [parse_sub_stream(raw, index=i) for i, raw in enumerate(sub_data)]
+            if all_languages_known(parsed_subs):
+                kept_sub_indices: list[int] = []
+                found_regular_eng = False
+                for i, sub in enumerate(parsed_subs):
+                    if sub.is_forced:
+                        kept_sub_indices.append(i)
+                    elif sub.language in ENG_LANGS and not sub.is_hi and not found_regular_eng:
+                        kept_sub_indices.append(i)
+                        found_regular_eng = True
+                if not kept_sub_indices:
+                    # Fallthrough case: -map 0:s? mapped all subs, output
+                    # index order matches input order.
+                    kept_sub_indices = list(range(len(sub_data)))
+            else:
+                # Deferred case: -map 0:s? — same input/output order.
+                kept_sub_indices = list(range(len(sub_data)))
+        else:
+            kept_sub_indices = list(range(len(sub_data)))
+
+        for out_idx, in_idx in enumerate(kept_sub_indices):
+            if in_idx >= len(sub_data):
+                continue
+            track = sub_data[in_idx]
+            lang = (track.get("language") or "").strip().lower()
+            if lang and lang not in ("und", "unk"):
+                cmd.extend([f"-metadata:s:s:{out_idx}", f"language={lang}"])
+
+    # Set language metadata for EXTERNAL subtitle streams (Bazarr sidecars
+    # we mapped as additional inputs above). Output index continues after
+    # the internal subs.
     if external_subs:
-        # Count internal subtitle streams to get the right output index
         internal_sub_count = len(item.get("subtitle_streams", [])) if include_subs else 0
         for i, sub_path in enumerate(external_subs):
             lang = _parse_sub_language(sub_path)
@@ -630,10 +701,6 @@ def build_ffmpeg_cmd(
             basename = os.path.basename(sub_path).lower()
             if ".hi." in basename or ".sdh." in basename:
                 cmd.extend([f"-disposition:s:{out_idx}", "hearing_impaired"])
-
-    # Strip encoder metadata bloat (scene group tags, encoder info) BEFORE we
-    # write our own — `-map_metadata -1` drops everything from the source.
-    cmd.extend(["-map_metadata", "-1"])
 
     # Pre-encode TMDb metadata: container-level title/date/comment go in via
     # ffmpeg `-metadata` so the encoded MKV carries them as soon as it lands.

@@ -622,3 +622,91 @@ class TestTMDbMetadataPreEncode:
         assert "language=es" in cmd
         # The comment marker survives so future runs can spot pipeline-encoded files.
         assert any("comment=encoded by NASCleanup" in arg for arg in cmd)
+
+
+class TestPerStreamLanguagePreservation:
+    """Pre-2026-05-04 the encoder lost per-stream language tags on every
+    encode — `-map_metadata -1` strips global metadata, and ffmpeg's E-AC-3
+    transcoder doesn't carry per-stream language tags through. The result
+    was 100% of encoded files showing UND across all audio + sub tracks
+    despite the language detection running and storing the right values
+    in the state DB. These tests pin that the encoder explicitly
+    re-stamps per-stream languages after `-map_metadata -1`.
+    """
+
+    def test_kept_audio_streams_get_language_metadata(self) -> None:
+        """Each kept audio stream should get -metadata:s:a:N language=X."""
+        item = {
+            "audio_streams": [
+                {"codec_raw": "eac3", "channels": 6, "language": "jpn"},
+                {"codec_raw": "ac3", "channels": 2, "language": "eng"},
+            ],
+            "subtitle_streams": [],
+            "duration_seconds": 1000,
+            "hdr": False,
+        }
+        cmd = build_ffmpeg_cmd("/in/file.mkv", "/out/file.mkv", item, _base_config())
+        # The first stream is jpn, second is eng — both should be stamped at
+        # their output indices (which match input order when nothing's stripped).
+        # Note: with both jpn + eng present, the audio-keep policy may strip
+        # the eng dub. The point is: whatever survives gets stamped.
+        joined = " ".join(cmd)
+        # At least the original-language track should have its language stamped.
+        assert "-metadata:s:a:0" in cmd
+        assert any(arg == "language=jpn" or arg == "language=eng" for arg in cmd)
+
+    def test_und_language_not_emitted(self) -> None:
+        """A stream with language=und should not get a -metadata flag —
+        emitting `language=und` is no better than letting ffmpeg do its
+        default (and could overwrite a real language ffmpeg-side)."""
+        item = {
+            "audio_streams": [{"codec_raw": "aac", "channels": 2, "language": "und"}],
+            "subtitle_streams": [],
+            "duration_seconds": 1000,
+            "hdr": False,
+        }
+        cmd = build_ffmpeg_cmd("/in/file.mkv", "/out/file.mkv", item, _base_config())
+        # No per-stream language flag should be emitted for the und track.
+        for i, tok in enumerate(cmd):
+            if tok == "-metadata:s:a:0":
+                assert cmd[i + 1] != "language=und"
+
+    def test_audio_stream_title_propagates(self) -> None:
+        """Track titles ('DDP 1.0', 'Commentary by ...') should also survive
+        the encode — they're useful disambiguation in Plex when there are
+        multiple audio tracks of the same language."""
+        item = {
+            "audio_streams": [
+                {"codec_raw": "eac3", "channels": 6, "language": "eng",
+                 "title": "Director's Commentary"},
+            ],
+            "subtitle_streams": [],
+            "duration_seconds": 1000,
+            "hdr": False,
+        }
+        cmd = build_ffmpeg_cmd("/in/file.mkv", "/out/file.mkv", item, _base_config())
+        assert "title=Director's Commentary" in cmd
+
+    def test_kept_internal_subs_get_language_metadata(self) -> None:
+        """Internal subtitle tracks should keep their language tags too —
+        Plex uses the language tag to pick the right sub track at playback."""
+        item = {
+            "audio_streams": [{"codec_raw": "aac", "channels": 2, "language": "eng"}],
+            "subtitle_streams": [
+                {"codec_raw": "subrip", "language": "eng"},
+            ],
+            "duration_seconds": 1000,
+            "hdr": False,
+        }
+        cmd = build_ffmpeg_cmd("/in/file.mkv", "/out/file.mkv", item, _base_config())
+        # The kept eng sub at output index 0 should carry language=eng.
+        assert "-metadata:s:s:0" in cmd
+        assert "language=eng" in cmd
+
+    def test_map_metadata_minus_one_still_present(self) -> None:
+        """We must continue stripping global metadata with -map_metadata -1
+        — the per-stream re-stamps below are additive, not a replacement."""
+        item = _base_item()
+        cmd = build_ffmpeg_cmd("/in/file.mkv", "/out/file.mkv", item, _base_config())
+        joined = " ".join(cmd)
+        assert "-map_metadata -1" in joined
