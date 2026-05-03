@@ -33,6 +33,7 @@ GRADE_SITCOM = "sitcom"
 GRADE_TV_ANIMATION = "tv_animation"
 GRADE_CINEMA_ANIMATION = "cinema_animation"
 GRADE_CLASSIC_FILM = "classic_film"
+GRADE_BLOCKBUSTER = "blockbuster"
 GRADE_DEFAULT = "default"
 
 ALL_GRADES = (
@@ -40,6 +41,7 @@ ALL_GRADES = (
     GRADE_TV_ANIMATION,
     GRADE_CINEMA_ANIMATION,
     GRADE_CLASSIC_FILM,
+    GRADE_BLOCKBUSTER,
     GRADE_DEFAULT,
 )
 
@@ -50,7 +52,35 @@ _GRADE_BASE_OFFSET: dict[str, int] = {
     GRADE_DEFAULT: 0,
     GRADE_CINEMA_ANIMATION: 0,  # detail-rich CGI for cinema → no offset
     GRADE_CLASSIC_FILM: 1,      # film grain doesn't need pristine bits at HD → +1
+    # CGI-heavy spectacle compresses well — smooth gradients, predictable
+    # motion vectors, masking from chaotic action scenes. The 4K HDR base
+    # CQ of 22 is calibrated for cinematography-driven films (Dune, Blade
+    # Runner 2049). Marvel / DC / comic-book blockbusters can take +3
+    # without visible artefacts at typical viewing distances. Set 2026-05-03
+    # at user's request — Avengers Endgame at default (CQ 22) felt overkill.
+    GRADE_BLOCKBUSTER: 3,
 }
+
+# Keyword + genre tests for the blockbuster grade. Both must match — keyword
+# alone false-positives on Birdman (Drama / superhero theme), genre alone
+# false-positives on every action movie. The intersection nails Marvel /
+# DC / Star Wars / Sin City without bleeding into prestige cinema.
+_BLOCKBUSTER_KEYWORDS = frozenset(
+    {
+        "superhero",
+        "marvel cinematic universe",
+        "dc extended universe",
+        "based on comic",
+    }
+)
+_BLOCKBUSTER_GENRES = frozenset(
+    {
+        "action",
+        "adventure",
+        "science fiction",
+        "fantasy",
+    }
+)
 
 # Cap on total offset so a stacking of grade + age can't push CQ to a level
 # where artefacts get visible even on simple content. AV1 NVENC at CQ ~38 is
@@ -81,6 +111,15 @@ def _normalise_genres(tmdb: dict | None) -> set[str]:
             if name:
                 out.add(name.lower())
     return out
+
+
+def _normalise_keywords(tmdb: dict | None) -> set[str]:
+    """Return TMDb keywords as a lowercased set. TMDb keywords come as a
+    list of plain strings via the scanner's enrichment pipeline."""
+    if not tmdb:
+        return set()
+    raw = tmdb.get("keywords") or []
+    return {(k or "").lower() for k in raw if k}
 
 
 def _entry_year(entry: dict) -> int | None:
@@ -130,16 +169,24 @@ def derive_grade(entry: dict) -> str:
     through to ``GRADE_DEFAULT`` (no offset).
 
     Decision tree (first match wins):
-      1. Series + Comedy genre + ≤30 min runtime → ``sitcom``
-      2. Animation genre + runtime <25 min → ``tv_animation``
+      1. Series + Animation + runtime <25 min → ``tv_animation``
+      2. Series + Comedy + ≤30 min runtime → ``sitcom``
       3. Movie + Animation → ``cinema_animation``
-      4. Movie + pre-1980 + (Drama OR Romance OR War) → ``classic_film``
-      5. Otherwise → ``default``
+      4. Movie + comic/superhero keyword + action-ish genre → ``blockbuster``
+      5. Movie + pre-1980 + (Drama OR Romance OR War) → ``classic_film``
+      6. Otherwise → ``default``
 
     Note: tv_animation comes BEFORE cinema_animation. A short Bluey
     episode is animation but has Bluey-grade flat-shading; we want it
     in the harsher tv_animation bucket regardless of whether TMDb
     happens to mark Bluey as a movie or series.
+
+    Blockbuster goes BEFORE classic_film so e.g. Superman (1978) lands
+    in the VFX-heavy bucket rather than getting the gentler classic
+    treatment — pre-1980 superhero films still encode like spectacle.
+    Animated superhero films (Spider-Verse, Big Hero 6) stay in
+    cinema_animation because the animated frame structure dominates the
+    compression budget.
     """
     library_type = (entry.get("library_type") or "").lower()
     is_series = library_type in ("series", "show", "tv", "anime")
@@ -161,11 +208,24 @@ def derive_grade(entry: dict) -> str:
     if is_series and "comedy" in genres and runtime is not None and runtime <= 30:
         return GRADE_SITCOM
 
-    # 3. Cinema Animation — animation movies (Pixar / Disney / Ghibli)
+    # 3. Cinema Animation — animation movies (Pixar / Disney / Ghibli /
+    #    Spider-Verse). Stays before blockbuster: an animated comic
+    #    adaptation behaves like animation for compression purposes, so
+    #    Spider-Verse gets +0 (cinema_animation) not +3 (blockbuster).
     if is_movie and "animation" in genres:
         return GRADE_CINEMA_ANIMATION
 
-    # 4. Classic Film
+    # 4. Blockbuster — Marvel / DC / Star Wars / comic adaptations. CGI
+    #    spectacle has smooth gradients and chaotic action that masks
+    #    artefacts, so it can take +3 vs the cinematography baseline.
+    #    Requires both a comic/superhero keyword AND an action-ish genre
+    #    to avoid false-positives like Birdman (Drama with superhero theme).
+    if is_movie:
+        keywords = _normalise_keywords(entry.get("tmdb"))
+        if keywords & _BLOCKBUSTER_KEYWORDS and genres & _BLOCKBUSTER_GENRES:
+            return GRADE_BLOCKBUSTER
+
+    # 5. Classic Film
     if is_movie and year is not None and year < 1980 and (
         "drama" in genres or "romance" in genres or "war" in genres
     ):

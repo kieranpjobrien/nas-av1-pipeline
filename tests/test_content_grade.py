@@ -30,9 +30,12 @@ from pipeline.content_grade import (
 
 
 def _entry(library_type: str, *, genres: list[str], year: str | None = None,
-           runtime: int | None = None, episode_runtime: list[int] | None = None) -> dict:
+           runtime: int | None = None, episode_runtime: list[int] | None = None,
+           keywords: list[str] | None = None) -> dict:
     """Construct a minimal media_report entry with the bits the grader cares about."""
     tmdb: dict = {"genres": [{"name": g} for g in genres]}
+    if keywords is not None:
+        tmdb["keywords"] = keywords
     if library_type in ("series", "show", "tv", "anime"):
         if year:
             tmdb["first_air_date"] = f"{year}-01-01"
@@ -115,6 +118,97 @@ def test_classic_film_genre_must_match():
 def test_no_tmdb_falls_back_to_default():
     e = {"library_type": "movie"}
     assert derive_grade(e) == GRADE_DEFAULT
+
+
+# --- blockbuster grade ----------------------------------------------------
+
+
+def test_avengers_endgame_classifies_as_blockbuster():
+    """Avengers Endgame is the canonical case — superhero keyword + action
+    genre triggers the +3 offset so 4K HDR target moves from 22 to 25."""
+    from pipeline.content_grade import GRADE_BLOCKBUSTER
+
+    e = _entry(
+        "movie",
+        genres=["Adventure", "Science Fiction", "Action"],
+        year="2019",
+        runtime=181,
+        keywords=["superhero", "time travel", "based on comic"],
+    )
+    assert derive_grade(e) == GRADE_BLOCKBUSTER
+
+
+def test_avengers_endgame_target_cq_at_4k_hdr():
+    """Pin the math: base 22 + blockbuster +3 = 25 at 4K HDR."""
+    e = _entry(
+        "movie",
+        genres=["Adventure", "Science Fiction", "Action"],
+        year="2019",
+        runtime=181,
+        keywords=["superhero", "time travel", "based on comic"],
+    )
+    final, grade, offset = target_cq(22, e)
+    assert final == 25
+    assert offset == 3
+
+
+def test_birdman_does_not_classify_as_blockbuster():
+    """Birdman has a 'superhero' keyword (thematic) but its genre is
+    Drama / Comedy — the genre intersection rule keeps it out of
+    blockbuster. Stays at default."""
+    e = _entry(
+        "movie",
+        genres=["Drama", "Comedy"],
+        year="2014",
+        runtime=119,
+        keywords=["superhero", "actor", "ego", "broadway"],
+    )
+    assert derive_grade(e) == GRADE_DEFAULT
+
+
+def test_action_movie_without_comic_keyword_not_blockbuster():
+    """Action genre alone doesn't trigger blockbuster — Mad Max Fury Road
+    has Action / Adventure / Sci-Fi genres but no comic/superhero keyword."""
+    e = _entry(
+        "movie",
+        genres=["Action", "Adventure", "Science Fiction"],
+        year="2015",
+        runtime=120,
+        keywords=["chase", "post-apocalyptic future", "warlord"],
+    )
+    assert derive_grade(e) == GRADE_DEFAULT
+
+
+def test_animated_superhero_movie_stays_cinema_animation():
+    """Spider-Verse has the superhero keyword AND animation genre — but
+    the animated frame structure dominates the compression budget, so
+    cinema_animation (+0) wins over blockbuster (+3). Decision-tree
+    ordering matters."""
+    from pipeline.content_grade import GRADE_CINEMA_ANIMATION
+
+    e = _entry(
+        "movie",
+        genres=["Animation", "Action", "Adventure"],
+        year="2018",
+        runtime=117,
+        keywords=["superhero", "based on comic", "alternate dimension"],
+    )
+    assert derive_grade(e) == GRADE_CINEMA_ANIMATION
+
+
+def test_pre_1980_superhero_film_is_blockbuster_not_classic():
+    """Superman (1978) is pre-1980 but VFX spectacle — the blockbuster
+    check fires before classic_film so it lands at +3 not +1."""
+    from pipeline.content_grade import GRADE_BLOCKBUSTER
+
+    e = _entry(
+        "movie",
+        genres=["Action", "Adventure", "Science Fiction"],
+        year="1978",
+        runtime=143,
+        keywords=["superhero", "based on comic", "metropolis"],
+    )
+    assert derive_grade(e) == GRADE_BLOCKBUSTER
 
 
 # --- age_offset ------------------------------------------------------------
