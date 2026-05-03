@@ -105,6 +105,8 @@ export const api = {
   deleteFile: (path) => postJSON("/file/delete", { path }),
   gradeAccept: (path) => postJSON("/file/grade-accept", { path }),
   gradeClear: (path) => postJSON("/file/grade-clear", { path }),
+  cqOverride: (path, cq) => postJSON("/file/cq-override", { path, cq }),
+  cqClear: (path) => postJSON("/file/cq-clear", { path }),
   getGpu: () => fetchJSON("/gpu"),
   getHostStats: () => fetchJSON("/host-stats"),
   getFileSiblings: (path) => fetchJSON(`/file/siblings?path=${encodeURIComponent(path)}`),

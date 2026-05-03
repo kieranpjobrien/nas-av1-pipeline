@@ -281,10 +281,29 @@ def resolve_encode_params(config: dict, item: dict) -> dict:
     base_cq = config["cq"].get(content_type, {}).get(res_key, 30)
     final_cq, content_grade, applied_offset = target_cq(base_cq, item)
 
+    # Per-file CQ override (set via /api/file/cq-override from the dashboard).
+    # Replaces the grade-derived target so the user can dial a specific film
+    # up or down without modifying the grade rules. Override is bounds-checked
+    # at the API; here we just trust whatever's in extras.
+    override_applied: int | None = None
+    filepath = item.get("filepath")
+    if filepath:
+        try:
+            from pipeline.cq_override import get_override  # noqa: PLC0415
+            from paths import PIPELINE_STATE_DB  # noqa: PLC0415
+            override = get_override(PIPELINE_STATE_DB, filepath)
+            if override is not None:
+                override_applied = override
+                final_cq = override
+        except Exception:
+            # Override is best-effort; if anything explodes, use the grade target.
+            pass
+
     return {
         "cq": final_cq,
         "base_cq": base_cq,
         "cq_offset": applied_offset,
+        "cq_override": override_applied,
         "content_grade": content_grade,
         "preset": config["nvenc_preset"].get(content_type, {}).get(res_key, "p4"),
         "multipass": config["nvenc_multipass"].get(content_type, {}).get(res_key, "disabled"),

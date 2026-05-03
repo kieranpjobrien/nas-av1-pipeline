@@ -5,6 +5,8 @@ Routes:
     POST /api/file/delete         - delete a single file
     POST /api/file/grade-accept   - mark a file as Grade-Optimal (MKV tag override)
     POST /api/file/grade-clear    - clear the Grade-Optimal override
+    POST /api/file/cq-override    - set a per-file CQ override
+    POST /api/file/cq-clear       - clear the CQ override
     GET  /api/file-detail         - cross-reference media report + pipeline state
     GET  /api/duplicates          - find duplicate files with quality scoring
 """
@@ -254,6 +256,63 @@ def _patch_audit_sidecar(sidecar_path, filepath: str, new_bucket: str, review_st
     return True
 
 
+@router.post("/api/file/cq-override")
+def cq_override(req: dict) -> dict:
+    """Set the per-file CQ override that the encoder will use instead of
+    the grade-derived target. Body: ``{path, cq}``.
+
+    The dashboard's "Proposed CQ: [-] N [+]" buttons hit this endpoint
+    each time the user nudges. Stored in the pipeline_state.db extras
+    blob so it survives restarts and is visible in the audit history.
+    """
+    from paths import NAS_MOVIES, NAS_SERIES, PIPELINE_STATE_DB
+    from pipeline.cq_override import CQ_MAX, CQ_MIN, set_override
+
+    path = req.get("path")
+    cq = req.get("cq")
+    if not path or not isinstance(cq, int):
+        raise HTTPException(400, "path (str) and cq (int) required")
+
+    norm = os.path.normpath(path)
+    nas_movies = os.path.normpath(str(NAS_MOVIES))
+    nas_series = os.path.normpath(str(NAS_SERIES))
+    if not (norm.startswith(nas_movies) or norm.startswith(nas_series)):
+        raise HTTPException(403, "Path is outside NAS media directories")
+
+    if not (CQ_MIN <= cq <= CQ_MAX):
+        raise HTTPException(400, f"cq must be in [{CQ_MIN}, {CQ_MAX}]; got {cq}")
+
+    try:
+        ok = set_override(PIPELINE_STATE_DB, path, cq)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    if not ok:
+        raise HTTPException(500, "Failed to persist CQ override")
+    return {"ok": True, "filepath": path, "cq_override": cq}
+
+
+@router.post("/api/file/cq-clear")
+def cq_clear(req: dict) -> dict:
+    """Remove the per-file CQ override. The encoder falls back to the
+    grade-derived target on the next encode."""
+    from paths import NAS_MOVIES, NAS_SERIES, PIPELINE_STATE_DB
+    from pipeline.cq_override import clear_override
+
+    path = req.get("path")
+    if not path:
+        raise HTTPException(400, "path required")
+    norm = os.path.normpath(path)
+    nas_movies = os.path.normpath(str(NAS_MOVIES))
+    nas_series = os.path.normpath(str(NAS_SERIES))
+    if not (norm.startswith(nas_movies) or norm.startswith(nas_series)):
+        raise HTTPException(403, "Path is outside NAS media directories")
+
+    ok = clear_override(PIPELINE_STATE_DB, path)
+    if not ok:
+        raise HTTPException(500, "Failed to clear CQ override")
+    return {"ok": True, "filepath": path}
+
+
 @router.get("/api/file/siblings")
 def get_file_siblings(path: str) -> dict:
     """List files that sit alongside the given media file (sub sidecars, artwork, nfo, etc.).
@@ -314,7 +373,12 @@ def get_file_siblings(path: str) -> dict:
 
 @router.get("/api/file-detail")
 def get_file_detail(path: str) -> dict:
-    """Cross-reference media report + pipeline state for a single file."""
+    """Cross-reference media report + pipeline state for a single file.
+
+    Adds a ``cq`` block with the grade-derived target, the user's
+    override (if any), and the effective value the encoder would use.
+    The dashboard's "Proposed CQ: [-] N [+]" widget reads from here.
+    """
     result: dict = {"path": path, "media": None, "pipeline": None}
 
     report_data = read_report_cached(MEDIA_REPORT)
@@ -328,6 +392,32 @@ def get_file_detail(path: str) -> dict:
     state_data = _get_pipeline_state()
     if state_data and "files" in state_data:
         result["pipeline"] = state_data["files"].get(path)
+
+    # CQ block — proposed target + override + effective. Cheap (no I/O
+    # except a single state-DB SELECT for the override) so we can inline
+    # it in every file-detail response.
+    if result.get("media"):
+        try:
+            from paths import PIPELINE_STATE_DB
+            from pipeline.cq_override import compute_proposed_cq, get_override
+
+            entry = dict(result["media"])
+            entry["filepath"] = path  # ensure compute_proposed_cq sees the path
+            proposed = compute_proposed_cq(entry)
+            override = get_override(PIPELINE_STATE_DB, path)
+            result["cq"] = {
+                "proposed_cq": proposed["cq"],
+                "base_cq": proposed["base_cq"],
+                "cq_offset": proposed["cq_offset"],
+                "content_grade": proposed["content_grade"],
+                "res_key": proposed["res_key"],
+                "override": override,
+                "effective_cq": override if override is not None else proposed["cq"],
+            }
+        except Exception:
+            # Best-effort — if grade derivation fails (missing TMDb etc.)
+            # the UI just doesn't render the proposed-CQ widget.
+            pass
 
     return result
 

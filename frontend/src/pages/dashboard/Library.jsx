@@ -989,6 +989,44 @@ function Inspector({ sel, panel, setPanel, onFileOpen, onAuditPatch }) {
   const subIssues = issues.filter((i) => i.scope === "sub");
   const togglePanel = (k) => setPanel(panel === k ? null : k);
 
+  // Proposed CQ + override block. Fetched from /api/file-detail when the
+  // selection changes so the user sees both the grade-derived target and
+  // their own override (if any). Buttons below POST cqOverride / cqClear
+  // and update local state optimistically.
+  const [cqInfo, setCqInfo] = useState(null);
+  useEffect(() => {
+    if (!sel?.filepath) return;
+    let cancelled = false;
+    api.getFileDetail(sel.filepath)
+      .then((d) => { if (!cancelled) setCqInfo(d.cq || null); })
+      .catch(() => { if (!cancelled) setCqInfo(null); });
+    return () => { cancelled = true; };
+  }, [sel?.filepath]);
+
+  const adjustCq = async (delta) => {
+    if (!cqInfo) return;
+    const next = Math.max(18, Math.min(45, (cqInfo.effective_cq ?? cqInfo.proposed_cq) + delta));
+    if (next === (cqInfo.effective_cq ?? cqInfo.proposed_cq)) return;
+    setCqInfo((prev) => (prev ? { ...prev, override: next, effective_cq: next } : prev));
+    try {
+      await api.cqOverride(sel.filepath, next);
+    } catch (e) {
+      window.notify?.({ kind: "bad", title: "CQ override failed", body: String(e.message || e) });
+      // Revert on failure
+      api.getFileDetail(sel.filepath).then((d) => setCqInfo(d.cq || null)).catch(() => {});
+    }
+  };
+  const resetCq = async () => {
+    if (!cqInfo) return;
+    setCqInfo((prev) => (prev ? { ...prev, override: null, effective_cq: prev.proposed_cq } : prev));
+    try {
+      await api.cqClear(sel.filepath);
+    } catch (e) {
+      window.notify?.({ kind: "bad", title: "Clear failed", body: String(e.message || e) });
+      api.getFileDetail(sel.filepath).then((d) => setCqInfo(d.cq || null)).catch(() => {});
+    }
+  };
+
   return (
     <div className="inspector">
       <div className="ins-head">
@@ -1216,6 +1254,51 @@ function Inspector({ sel, panel, setPanel, onFileOpen, onAuditPatch }) {
             <dt>Est. runtime</dt>
             <dd>~{sel.dur ? fmtDur(sel.dur / 2) : "—"}</dd>
           </dl>
+          {cqInfo && (
+            <div style={{ marginTop: 12, paddingTop: 10, borderTop: "1px solid var(--line)" }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+                <span style={{ fontSize: 11, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: "0.06em" }}>
+                  Proposed CQ
+                </span>
+                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <button
+                    onClick={() => adjustCq(-1)}
+                    style={{ width: 28, height: 28, fontSize: 16, fontWeight: 600,
+                             background: "transparent", border: "1px solid var(--line)",
+                             color: "var(--ink-2)", borderRadius: 4, cursor: "pointer" }}
+                    title="Lower CQ → higher quality, larger output"
+                  >−</button>
+                  <span style={{ fontSize: 18, fontWeight: 600, minWidth: 32, textAlign: "center",
+                                 color: cqInfo.override != null ? "var(--accent)" : "var(--ink-1)",
+                                 fontVariantNumeric: "tabular-nums" }}>
+                    {cqInfo.effective_cq}
+                  </span>
+                  <button
+                    onClick={() => adjustCq(1)}
+                    style={{ width: 28, height: 28, fontSize: 16, fontWeight: 600,
+                             background: "transparent", border: "1px solid var(--line)",
+                             color: "var(--ink-2)", borderRadius: 4, cursor: "pointer" }}
+                    title="Higher CQ → smaller output, more compression"
+                  >+</button>
+                </div>
+              </div>
+              <div style={{ marginTop: 6, fontSize: 10, color: "var(--ink-3)", display: "flex",
+                            justifyContent: "space-between", alignItems: "center" }}>
+                <span>
+                  Grade target {cqInfo.proposed_cq}
+                  {cqInfo.content_grade && ` · ${cqInfo.content_grade.replace("_", " ")}`}
+                  {cqInfo.cq_offset > 0 && ` (+${cqInfo.cq_offset})`}
+                </span>
+                {cqInfo.override != null && (
+                  <button onClick={resetCq}
+                          style={{ background: "transparent", border: "none", color: "var(--accent)",
+                                   cursor: "pointer", fontSize: 10, padding: 0 }}>
+                    Reset to {cqInfo.proposed_cq}
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
         </div>
       </div>
       {panel === "ffprobe" && <FfprobePanel sel={sel} onClose={() => setPanel(null)} />}
