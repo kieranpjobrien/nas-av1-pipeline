@@ -801,10 +801,14 @@
 .nc-app .ft-head,
 .nc-app .ft-row {
   display: grid;
-  grid-template-columns: 1fr 80px 70px 90px 100px 110px;
-  gap: 18px;
+  /* FILE is 1fr — every other column is sized to actual content so the
+     filename gets every spare pixel. Was 80/70/90/100/110 with an 18px
+     gap, which ate ~540px of chrome and crushed FILE to ~30px once the
+     inspector pane was open at typical viewport widths. */
+  grid-template-columns: 1fr 56px 52px 72px 78px 88px;
+  gap: 10px;
   align-items: center;
-  padding: 12px 20px;
+  padding: 10px 14px;
   font-size: 12px;
 }
 .nc-app .ft-head {
@@ -844,12 +848,19 @@
   font-weight: 500;
   font-size: 13px;
   letter-spacing: -0.005em;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   display: flex;
   align-items: center;
   gap: 8px;
+  /* Children compete for width — the badge spans hold their content width
+     and the title span (.n-title) gets `flex: 1; min-width: 0` so it
+     ellipsises rather than being clipped to one character. */
+}
+.nc-app .ft-name .n-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .nc-app .ft-name .p {
   font-family: "JetBrains Mono", monospace;

@@ -668,7 +668,8 @@ function FileRow({ f, selected, onClick, onDoubleClick, pipelineInfo }) {
     >
       <div className="ft-name">
         <div className="n">
-          {prettyTitle(f.filename)} {f.hdr && <span className="tag hdr">HDR</span>}
+          <span className="n-title">{prettyTitle(f.filename)}</span>
+          {f.hdr && <span className="tag hdr">HDR</span>}
           {bucketBadge}
         </div>
         <div className="p">{f.filepath}</div>
