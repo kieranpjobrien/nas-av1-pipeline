@@ -184,10 +184,25 @@ def _write_tag_xml(filepath: str, xml_body: str, *, timeout: int = 60) -> bool:
         )
         if result.returncode >= 2:
             # mkvpropedit puts hard errors on stdout; stderr is usually empty.
-            err = ((result.stdout or result.stderr) or "").strip()
-            if err.startswith("Error:"):
-                err = err[len("Error:"):].strip()
-            err = err.split("\n", 1)[0][:300]
+            # Output looks like:
+            #   "The file is being analyzed.\n"
+            #   "Error: Modification of properties in the section ...\n"
+            # — pick the line that starts with "Error:" rather than the
+            # first line (which is just analysis progress and hides the
+            # real reason behind a misleading "The file is being analyzed.").
+            raw = ((result.stdout or result.stderr) or "")
+            err = ""
+            for line in raw.splitlines():
+                stripped = line.strip()
+                if stripped.startswith("Error:"):
+                    err = stripped[len("Error:"):].strip()
+                    break
+            if not err:
+                # No "Error:" prefix found — fall back to the last non-empty
+                # line, which is closer to the real cause than the first.
+                lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+                err = lines[-1] if lines else ""
+            err = err[:300]
             logging.warning(
                 "  mkvpropedit rc=%s on %s: %s",
                 result.returncode,
