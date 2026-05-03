@@ -369,9 +369,30 @@ _YEAR_PAREN_RE = re.compile(r"\((19[2-9]\d|20[0-2]\d)\)")
 
 
 def _ascii_key(s: str) -> str:
-    """Normalise a title for fuzzy comparison: strip diacritics + punctuation, lowercase."""
+    """Normalise a title for fuzzy comparison: strip diacritics, punctuation,
+    AND whitespace, lowercase the rest.
+
+    Equivalent forms in the wild that all collapse to the same key:
+      * "Bob's Burgers"      vs  "Bobs Burgers"        (apostrophe vs not)
+      * "Star-Lord"          vs  "Star Lord"           (hyphen vs space)
+      * "House M.D."         vs  "House MD"            (dotted abbreviation)
+      * "Love, Death & Robots" vs "Love Death and Robots" (& vs and)
+      * "Shōgun"             vs  "Shogun"              (diacritic stripping)
+
+    Pre-2026-05-04 this fn replaced punctuation with whitespace which
+    matched apostrophe/hyphen pairs but only when both forms used the
+    same delimiter. Apostrophe-elision ("Bob's" → "Bobs") flipped the
+    delimiter pattern and caused 232 false mismatches across the user's
+    library. Dropping all separators makes the comparison invariant to
+    whitespace and punctuation choices the source files made.
+    """
     s = "".join(c for c in unicodedata.normalize("NFKD", s) if not unicodedata.combining(c))
-    return re.sub(r"[^\w]+", " ", s).lower().strip()
+    # "and" ↔ "&" equivalence — collapse both to nothing so titles using
+    # either convention key the same. Done before the punctuation strip so
+    # the "&" doesn't leave a stray "and" island when there's no space
+    # around it (rare but possible).
+    s = re.sub(r"\s+and\s+|\s+&\s+|\s*&\s*", "", s, flags=re.IGNORECASE)
+    return re.sub(r"[^\w]", "", s).lower()
 
 
 def _filename_matches_folder(filepath: str, library_type: str) -> bool:
@@ -396,15 +417,40 @@ def _filename_matches_folder(filepath: str, library_type: str) -> bool:
         fn_title = filename[: m.start()].rstrip(" .-") if m else filename
         folder = _YEAR_PAREN_RE.sub("", parent).strip()
     elif library_type == "series":
-        # strip SxxExx and everything after: "Show S01E01 Title" → "Show"
+        # Strip SxxExx and everything after: "Show S01E01 Title" → "Show"
         m = _SXXEXX_RE.search(filename)
-        fn_title = filename[: m.start()].rstrip(" .-") if m else filename
+        if m:
+            fn_title = filename[: m.start()].rstrip(" .-")
+        else:
+            # No SxxExx — likely a featurette / extra (e.g. "behind-the-scenes.mkv"
+            # in a season folder). Plex handles these as bonus content separately
+            # so they shouldn't count against the show-name compliance check.
+            return True
         # Strip disambiguators from BOTH filename title AND folder. Some files
         # carry the "(US)" in the name, some don't — both forms are fine.
         folder = grandparent  # show folder
-        _region_re = re.compile(r"\s*\((?:US|UK|AU|NZ|CA|IE|IN|ZA|BR|MX|JP|KR)\)", re.IGNORECASE)
-        folder = _region_re.sub("", _YEAR_PAREN_RE.sub("", folder)).strip()
-        fn_title = _region_re.sub("", _YEAR_PAREN_RE.sub("", fn_title)).strip()
+        # Region tags appear two ways in the wild:
+        #   "The Office (US)"  ← folder convention with parens
+        #   "The Office US S01E01.mkv"  ← filename convention without parens
+        # Strip both forms so they collapse to the same key.
+        _region_paren_re = re.compile(r"\s*\((?:US|UK|AU|NZ|CA|IE|IN|ZA|BR|MX|JP|KR)\)", re.IGNORECASE)
+        # End-anchored only — "Mozart in the Jungle" must NOT lose "in" because
+        # IN is in the country list. The bare-tag convention only ever appears
+        # at the END of the show title ("The Office US S01E01.mkv"), so we
+        # restrict the match accordingly.
+        _region_bare_re = re.compile(r"\s+(?:US|UK|AU|NZ|CA|IE|IN|ZA|BR|MX|JP|KR)\s*$", re.IGNORECASE)
+        folder = _region_paren_re.sub("", _YEAR_PAREN_RE.sub("", folder)).strip()
+        fn_title = _region_paren_re.sub("", _YEAR_PAREN_RE.sub("", fn_title)).strip()
+        # Bare tag only stripped from the filename — folder convention always
+        # uses parens, so matching the bare tag in the folder side would be
+        # a false positive.
+        fn_title = _region_bare_re.sub("", fn_title).strip()
+        # Bare year in filename ("Shogun.2024.S01E04..." → strip "2024" so the
+        # title resolves to just "Shogun"). Folder convention puts the year
+        # in parens which the regex above already strips; bare year only
+        # ever appears on the filename side. End/space-bounded so it can't
+        # eat parts of the show title.
+        fn_title = re.sub(r"\b(19[2-9]\d|20[0-2]\d)\b", "", fn_title).strip(" .-")
     else:
         return True
 
