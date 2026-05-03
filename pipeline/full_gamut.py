@@ -126,6 +126,13 @@ def _parse_release_info(filename: str) -> dict:
     }
 
 
+# Tag names this writer owns. The merge helper drops existing entries
+# with these names before appending the encoder's new values, so a
+# subsequent re-encode replaces the encoder block cleanly without
+# touching DIRECTOR / GENRE / GRADE_REVIEW / etc.
+_ENCODER_OWNED_TAGS = frozenset({"ENCODER", "CQ", "CONTENT_GRADE"})
+
+
 def _stamp_encode_metadata(
     filepath: str,
     *,
@@ -140,61 +147,33 @@ def _stamp_encode_metadata(
       * ``CQ``              — integer CQ used (machine-readable)
       * ``CONTENT_GRADE``   — string from content_grade.derive_grade()
 
-    The audit tool reads these via ``mkvmerge --identify --identification-format
-    json`` and compares the stamped CQ to what the current grade rules say it
-    *should* be. Without the stamp the audit can only fall back to the state
-    DB (which doesn't survive cascade-of-loss incidents).
+    Uses :func:`pipeline.mkv_tags.merge_global_tags` so existing tags
+    (TMDb metadata, GRADE_REVIEW, etc.) are preserved. Pre-2026-05-04
+    this function naked-wrote --tags global, which mkvpropedit honoured
+    by REPLACING the entire global tag block — the subsequent
+    write_tmdb_to_mkv pass then wiped this stamp. Sample of 50 latest
+    done encodes: 0/50 had CQ tag stamped because of that clobber.
+
+    The audit tool now reads tags via mkvextract (mkvmerge --identify
+    only surfaces global-tag *counts*, not values) and compares the
+    stamped CQ to what the current grade rules say it should be.
 
     Returns True on success, False on any tooling error (caller logs and
     moves on — the encode itself already succeeded).
     """
-    from pipeline import local_mux
+    from pipeline.mkv_tags import merge_global_tags
 
-    # mkvpropedit takes tag attributes via per-line --tags flags OR an XML
-    # tag file. The XML path supports SimpleTag entries cleanly; the flag
-    # path is for single property-name updates (Title, language, etc.) and
-    # doesn't compose well for free-form metadata.
-    import tempfile
-    import xml.sax.saxutils as _xml
-
-    parts = [
-        '<?xml version="1.0" encoding="UTF-8"?>',
-        '<!DOCTYPE Tags SYSTEM "matroskatags.dtd">',
-        '<Tags>',
-        '  <Tag>',
-        '    <Targets><TargetTypeValue>50</TargetTypeValue></Targets>',
-        f'    <Simple><Name>ENCODER</Name><String>{_xml.escape(encoder)}</String></Simple>',
-    ]
+    new_tags: list[dict] = [{"name": "ENCODER", "value": encoder}]
     if cq is not None:
-        parts.append(f'    <Simple><Name>CQ</Name><String>{int(cq)}</String></Simple>')
+        new_tags.append({"name": "CQ", "value": str(int(cq))})
     if content_grade:
-        parts.append(f'    <Simple><Name>CONTENT_GRADE</Name><String>{_xml.escape(content_grade)}</String></Simple>')
-    parts.extend(['  </Tag>', '</Tags>'])
-    xml_body = "\n".join(parts)
+        new_tags.append({"name": "CONTENT_GRADE", "value": content_grade})
 
-    # Write the tag XML to a temp file because mkvpropedit's --tags flag
-    # takes a path, not stdin. tempfile cleans up on close.
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".xml", delete=False, encoding="utf-8"
-    ) as f:
-        f.write(xml_body)
-        xml_path = f.name
-    try:
-        result = local_mux.local_mkvpropedit(
-            filepath, ["--tags", f"global:{xml_path}"], timeout=60
-        )
-        if result.returncode >= 2:
-            logging.warning(
-                f"  mkvpropedit tag rc={result.returncode}: "
-                f"{(result.stderr or '').strip()[:200]}"
-            )
-            return False
-        return True
-    finally:
-        try:
-            os.remove(xml_path)
-        except OSError:
-            pass
+    return merge_global_tags(
+        filepath,
+        owned_names=_ENCODER_OWNED_TAGS,
+        new_tags=new_tags,
+    )
 
 
 def _append_history_jsonl(path, entry: dict) -> None:
@@ -1244,11 +1223,20 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
     # it matches the current grade rules. Stamp ENCODER + CQ + CONTENT_GRADE
     # so the audit tool reads them directly. ~50 ms cost, fully recoverable.
     #
+    # Pre-2026-05-04 this block referenced an `encode_params_used` variable
+    # that doesn't exist in scope (it's defined ~200 lines later when
+    # building the history entry). The NameError was caught by the broad
+    # `except` and logged as a non-fatal warning — which is why 0/50 of the
+    # latest done encodes had a CQ tag stamped despite the code claiming to
+    # do so. Now we pull from state_extras directly, matching how the
+    # history-entry builder reads it.
+    #
     # Failure here is non-fatal — the encode succeeded and the file is in
     # place; missing tags just means the audit tool will fall back to the
     # state DB or flag the file as "unknown CQ" later.
     try:
-        params_used = encode_params_used or {}
+        stamp_extras = state.get_file(filepath) or {}
+        params_used = stamp_extras.get("encode_params_used") or {}
         encoder_value = (
             f"av1_nvenc cq={params_used.get('cq', '?')} "
             f"preset={params_used.get('preset', '?')} "

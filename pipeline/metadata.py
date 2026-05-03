@@ -8,15 +8,12 @@ MKV tag writing via mkvpropedit. Used both by the pipeline (via
 from __future__ import annotations
 
 import argparse
-import html
 import json
 import logging
 import os
 import re
 import shutil
-import subprocess
 import sys
-import tempfile
 import threading
 import time
 import urllib.error
@@ -405,27 +402,50 @@ def _find_mkvpropedit() -> str | None:
     return None
 
 
+# Tag names this writer owns. Anything outside this set (ENCODER / CQ /
+# CONTENT_GRADE / GRADE_REVIEW / etc.) is preserved by the merge helper.
+# Pre-2026-05-04 this function naked-replaced the global tag block,
+# wiping the encoder's CQ stamp on every encode.
+_TMDB_OWNED_TAGS = frozenset(
+    {
+        "DIRECTOR",
+        "GENRE",
+        "ACTOR",
+        "WRITTEN_BY",
+        "DATE_RELEASED",
+        "LAW_RATING",
+        "IMDB",
+        "TMDB",
+        "COLLECTION",
+        "ORIGINAL_LANGUAGE",
+        "RATING",
+        "KEYWORDS",
+        "PUBLISHER",
+    }
+)
+
+
 def write_tmdb_to_mkv(filepath: str, tmdb: dict) -> bool:
     """Write TMDb metadata into an MKV file's global tags via mkvpropedit.
 
     Sets title, date, genre, director, actors as MKV global segment tags.
     These are read by media players and metadata tools.
-    """
-    mkvprop = _find_mkvpropedit()
-    if not mkvprop:
-        return False
 
+    Uses :func:`pipeline.mkv_tags.merge_global_tags` so encoder stamps
+    (ENCODER / CQ / CONTENT_GRADE) and review tags (GRADE_REVIEW /
+    GRADE_REVIEW_AT) are preserved. The previous version of this
+    function called mkvpropedit with only its own tags, replacing the
+    entire global block and wiping anything else.
+    """
     if not filepath.lower().endswith(".mkv"):
         return False  # skip non-MKV (mp4 etc) — mkvpropedit only works on MKV
-
     if not os.path.exists(filepath):
         return False
 
-    # Build MKV XML tags
-    tags: list[str] = []
+    new_tags: list[dict] = []
 
     def add_tag(name: str, value: str) -> None:
-        tags.append(f"    <Simple><Name>{name}</Name><String>{html.escape(value, quote=True)}</String></Simple>")
+        new_tags.append({"name": name, "value": value})
 
     if tmdb.get("director"):
         add_tag("DIRECTOR", tmdb["director"])
@@ -460,42 +480,21 @@ def write_tmdb_to_mkv(filepath: str, tmdb: dict) -> bool:
     if tmdb.get("networks"):
         add_tag("PUBLISHER", ", ".join(tmdb["networks"]))
 
-    if not tags:
+    if not new_tags:
         return False
 
-    xml = (
-        '<?xml version="1.0" encoding="UTF-8"?>\n'
-        "<Tags>\n"
-        "  <Tag>\n"
-        "    <Targets><TargetTypeValue>50</TargetTypeValue></Targets>\n" + "\n".join(tags) + "\n"
-        "  </Tag>\n"
-        "</Tags>\n"
-    )
+    from pipeline.mkv_tags import merge_global_tags
 
-    # Write XML to temp file, run mkvpropedit
-    tmp_xml = os.path.join(tempfile.gettempdir(), f"tmdb_tags_{os.getpid()}.xml")
     try:
-        with open(tmp_xml, "w", encoding="utf-8") as f:
-            f.write(xml)
-
-        result = subprocess.run(
-            [mkvprop, filepath, "--tags", f"global:{tmp_xml}"],
-            capture_output=True,
-            text=True,
-            timeout=30,
+        return merge_global_tags(
+            filepath,
+            owned_names=_TMDB_OWNED_TAGS,
+            new_tags=new_tags,
+            timeout=60,
         )
-        if result.returncode != 0:
-            logging.debug(f"mkvpropedit failed for {os.path.basename(filepath)}: {result.stderr[:200]}")
-        return result.returncode == 0
     except Exception as e:
         logging.debug(f"TMDb write failed for {os.path.basename(filepath)}: {e}")
         return False
-    finally:
-        if os.path.exists(tmp_xml):
-            try:
-                os.remove(tmp_xml)
-            except OSError:
-                pass
 
 
 # ---------- Per-file enrichment (bulk CLI pipeline) ----------
