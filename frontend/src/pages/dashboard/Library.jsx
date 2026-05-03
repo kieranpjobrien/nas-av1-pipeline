@@ -172,7 +172,13 @@ export function Library({ data, pipelineData, onFileOpen, drillKey, onClearDrill
     return all.map((f) => {
       const r = cqAudit.map.get(f.filepath);
       if (!r) return f;
-      return { ...f, cq_audit_bucket: r.bucket, cq_audit_target: r.target_cq, cq_audit_current: r.current_cq };
+      return {
+        ...f,
+        cq_audit_bucket: r.bucket,
+        cq_audit_target: r.target_cq,
+        cq_audit_current: r.current_cq,
+        cq_audit_review_status: r.review_status || null,
+      };
     });
   }, [all, cqAudit, drillKey]);
   const [sort, setSort] = useState("size_desc");
@@ -241,6 +247,20 @@ export function Library({ data, pipelineData, onFileOpen, drillKey, onClearDrill
   useEffect(() => setVisibleCount(50), [query, filters, sort]);
 
   const sel = rows[selIdx] || rows[0] || all[0];
+
+  // Optimistic local update for grade-review actions: flip the audit map's
+  // bucket entry so the row immediately moves to the new bucket without
+  // waiting for a full /api/cq-audit refetch. The server has already
+  // patched audit_cq.json in place so the next load is consistent.
+  const updateAuditRow = (filepath, patch) => {
+    setCqAudit((prev) => {
+      if (!prev?.map) return prev;
+      const next = new Map(prev.map);
+      const cur = next.get(filepath) || { filepath };
+      next.set(filepath, { ...cur, ...patch });
+      return { ...prev, map: next };
+    });
+  };
 
   const toggle = (k, v) => setFilters((f) => ({ ...f, [k]: f[k] === v ? null : v }));
   const toggleBool = (k) => setFilters((f) => ({ ...f, [k]: !f[k] }));
@@ -599,6 +619,7 @@ export function Library({ data, pipelineData, onFileOpen, drillKey, onClearDrill
             panel={panel}
             setPanel={setPanel}
             onFileOpen={onFileOpen}
+            onAuditPatch={updateAuditRow}
           />
         )}
       </div>
@@ -924,7 +945,7 @@ function FileManagerPanel({ sel, onClose }) {
   );
 }
 
-function Inspector({ sel, panel, setPanel, onFileOpen }) {
+function Inspector({ sel, panel, setPanel, onFileOpen, onAuditPatch }) {
   const issues = detectIssues(sel);
   const hasIssues = issues.length > 0;
   const videoIssue = issues.find((i) => i.scope === "video");
@@ -1070,8 +1091,10 @@ function Inspector({ sel, panel, setPanel, onFileOpen }) {
               </dd>
               <dt>Verdict</dt>
               <dd style={{ fontSize: 11, color: "var(--ink-2)" }}>
-                {sel.cq_audit_bucket === "too_high"
-                  ? "Over-compressed vs grade target — review for delete + re-download."
+                {sel.cq_audit_review_status === "accepted"
+                  ? "Manually accepted — counted as Grade Optimal."
+                  : sel.cq_audit_bucket === "too_high"
+                  ? "Over-compressed vs grade target — review for delete + re-download, or accept if quality is fine."
                   : sel.cq_audit_bucket === "too_low"
                   ? "Under-compressed vs grade target — re-encode candidate."
                   : sel.cq_audit_bucket === "unknown"
@@ -1079,6 +1102,63 @@ function Inspector({ sel, panel, setPanel, onFileOpen }) {
                   : "On target."}
               </dd>
             </dl>
+            <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+              {sel.cq_audit_review_status === "accepted" ? (
+                <button
+                  className="ins-btn"
+                  title="Remove the accepted override — file goes back through the normal CQ-vs-target comparison"
+                  onClick={async () => {
+                    try {
+                      const r = await api.gradeClear(sel.filepath);
+                      onAuditPatch?.(sel.filepath, {
+                        review_status: null,
+                        bucket: r.bucket || "too_high",
+                      });
+                      window.notify?.({
+                        kind: "good",
+                        title: "Override cleared",
+                        body: `${prettyTitle(sel.filename)} → ${r.bucket || "rebucketed"}`,
+                      });
+                    } catch (e) {
+                      window.notify?.({
+                        kind: "bad",
+                        title: "Clear failed",
+                        body: String(e.message || e),
+                      });
+                    }
+                  }}
+                >
+                  Clear override
+                </button>
+              ) : (
+                <button
+                  className="ins-btn primary"
+                  title="Stamp GRADE_REVIEW=accepted into the MKV — file counts as Grade Optimal in audits"
+                  onClick={async () => {
+                    try {
+                      await api.gradeAccept(sel.filepath);
+                      onAuditPatch?.(sel.filepath, {
+                        review_status: "accepted",
+                        bucket: "optimal",
+                      });
+                      window.notify?.({
+                        kind: "good",
+                        title: "Marked Grade Optimal",
+                        body: prettyTitle(sel.filename),
+                      });
+                    } catch (e) {
+                      window.notify?.({
+                        kind: "bad",
+                        title: "Accept failed",
+                        body: String(e.message || e),
+                      });
+                    }
+                  }}
+                >
+                  Mark Grade Optimal ✓
+                </button>
+              )}
+            </div>
           </div>
         )}
         <div className="ins-section">

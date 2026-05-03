@@ -1,10 +1,12 @@
 """File operations endpoints: rename, delete, detail, and duplicates.
 
 Routes:
-    POST /api/file/rename   - rename a file on the NAS
-    POST /api/file/delete   - delete a single file
-    GET  /api/file-detail   - cross-reference media report + pipeline state
-    GET  /api/duplicates    - find duplicate files with quality scoring
+    POST /api/file/rename         - rename a file on the NAS
+    POST /api/file/delete         - delete a single file
+    POST /api/file/grade-accept   - mark a file as Grade-Optimal (MKV tag override)
+    POST /api/file/grade-clear    - clear the Grade-Optimal override
+    GET  /api/file-detail         - cross-reference media report + pipeline state
+    GET  /api/duplicates          - find duplicate files with quality scoring
 """
 
 import os
@@ -115,6 +117,135 @@ def delete_file(req: DeleteFileRequest) -> dict:
         "state_rows_dropped": state_dropped,
         "report_dropped": report_dropped,
     }
+
+
+@router.post("/api/file/grade-accept")
+def grade_accept(req: DeleteFileRequest) -> dict:
+    """Stamp ``GRADE_REVIEW=accepted`` into the MKV's global tags.
+
+    The audit treats this as a hard override: bucket forces to ``optimal``
+    regardless of what the CQ-vs-target comparison says. Use this for
+    too_high files where the user has manually verified the visible quality
+    is fine and they don't want a re-download.
+
+    Also patches ``audit_cq.json`` in-place so the dashboard reflects the
+    change without waiting for a full audit re-run.
+    """
+    from paths import NAS_MOVIES, NAS_SERIES, STAGING_DIR
+    from pipeline.grade_review import set_grade_review
+
+    norm = os.path.normpath(req.path)
+    nas_movies = os.path.normpath(str(NAS_MOVIES))
+    nas_series = os.path.normpath(str(NAS_SERIES))
+    if not (norm.startswith(nas_movies) or norm.startswith(nas_series)):
+        raise HTTPException(403, "Path is outside NAS media directories")
+    if not os.path.exists(norm):
+        raise HTTPException(404, "File not found")
+
+    ok = set_grade_review(req.path, "accepted")
+    if not ok:
+        raise HTTPException(500, "mkvpropedit failed to write grade-review tag")
+
+    # Patch the audit sidecar in place so the user sees the result before
+    # the next full audit. The audit reader walks 6,000 files; we don't want
+    # to make the user wait or trigger a re-audit on every accept click.
+    patched = _patch_audit_sidecar(STAGING_DIR / "audit_cq.json", req.path, "optimal", "accepted")
+    return {"ok": True, "filepath": req.path, "review_status": "accepted", "audit_patched": patched}
+
+
+@router.post("/api/file/grade-clear")
+def grade_clear(req: DeleteFileRequest) -> dict:
+    """Remove ``GRADE_REVIEW`` and ``GRADE_REVIEW_AT`` from the MKV.
+
+    Use this if a prior accept was wrong — the file goes back through the
+    normal CQ-vs-target comparison on the next audit. Sidecar patch
+    re-bins the file by re-running the comparison against its stamped CQ.
+    """
+    from paths import NAS_MOVIES, NAS_SERIES, STAGING_DIR
+    from pipeline.grade_review import clear_grade_review
+
+    norm = os.path.normpath(req.path)
+    nas_movies = os.path.normpath(str(NAS_MOVIES))
+    nas_series = os.path.normpath(str(NAS_SERIES))
+    if not (norm.startswith(nas_movies) or norm.startswith(nas_series)):
+        raise HTTPException(403, "Path is outside NAS media directories")
+    if not os.path.exists(norm):
+        raise HTTPException(404, "File not found")
+
+    ok = clear_grade_review(req.path)
+    if not ok:
+        raise HTTPException(500, "mkvpropedit failed to clear grade-review tag")
+
+    # Re-derive the bucket from the stamped CQ so the sidecar is consistent.
+    new_bucket = _rebucket_from_sidecar(STAGING_DIR / "audit_cq.json", req.path)
+    patched = _patch_audit_sidecar(STAGING_DIR / "audit_cq.json", req.path, new_bucket, None)
+    return {"ok": True, "filepath": req.path, "review_status": None, "bucket": new_bucket, "audit_patched": patched}
+
+
+def _rebucket_from_sidecar(sidecar_path, filepath: str) -> str:
+    """Read the file's current_cq + target_cq from the sidecar and re-derive
+    its natural bucket (ignoring any review override). Used by grade-clear.
+    """
+    import json
+
+    try:
+        with open(sidecar_path, encoding="utf-8") as f:
+            audit = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return "unknown"
+    for r in audit.get("results", []):
+        if r.get("filepath") == filepath:
+            cur, tgt = r.get("current_cq"), r.get("target_cq")
+            if cur is None:
+                return "unknown"
+            if cur == tgt:
+                return "optimal"
+            return "too_low" if cur < tgt else "too_high"
+    return "unknown"
+
+
+def _patch_audit_sidecar(sidecar_path, filepath: str, new_bucket: str, review_status: str | None) -> bool:
+    """Update the per-file row + bucket counts in audit_cq.json in place.
+
+    Returns True if a row was patched, False if the file isn't in the audit
+    yet (in which case the next full audit will pick it up — not an error).
+    """
+    import json
+
+    try:
+        with open(sidecar_path, encoding="utf-8") as f:
+            audit = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return False
+
+    results = audit.get("results", [])
+    target_row = None
+    for r in results:
+        if r.get("filepath") == filepath:
+            target_row = r
+            break
+    if target_row is None:
+        return False
+
+    old_bucket = target_row.get("bucket")
+    if old_bucket == new_bucket and target_row.get("review_status") == review_status:
+        return True  # already in the desired state
+
+    target_row["bucket"] = new_bucket
+    target_row["review_status"] = review_status
+
+    # Adjust the bucket counts so the hero stat on the dashboard matches.
+    buckets = audit.setdefault("buckets", {})
+    if old_bucket and old_bucket in buckets and buckets[old_bucket] > 0:
+        buckets[old_bucket] = buckets[old_bucket] - 1
+    buckets[new_bucket] = buckets.get(new_bucket, 0) + 1
+
+    try:
+        with open(sidecar_path, "w", encoding="utf-8") as f:
+            json.dump(audit, f, indent=2)
+    except OSError:
+        return False
+    return True
 
 
 @router.get("/api/file/siblings")

@@ -52,30 +52,24 @@ DEFAULT_TOLERANCE = 0
 
 
 def _read_mkv_cq_tag(filepath: str, mkvmerge: str | None = None) -> int | None:
-    """Return the integer CQ from the MKV global tags, or None if absent."""
-    from pipeline import local_mux
+    """Return the integer CQ from the MKV global tags, or None if absent.
 
-    info = local_mux.local_identify(filepath, timeout=30)
-    if not info:
-        return None
-    container = info.get("container") or {}
-    props = container.get("properties") or {}
-    # mkvmerge surfaces tags in two slightly different shapes depending on
-    # version. The most common is properties.tag_count + a separate
-    # 'attachments' / 'tracks' walk, but global SimpleTags appear as
-    # individual entries inside container.properties.tags.
-    raw = props.get("tags") or []
-    for t in raw:
-        # Each tag is {"name": "CQ", "value": "38"} OR a nested SimpleTag dict
-        name = (t.get("name") or "").upper()
-        if name == "CQ":
+    Important: ``mkvmerge --identify`` reports only a *count* of global
+    tags (``global_tags[].num_entries``) and does not surface the
+    contents. To get the actual tag names/values we use mkvextract.
+    Earlier versions of this function read ``container.properties.tags``
+    which is always None for global tags — every call silently returned
+    None and the audit fell through to state_db / bitrate inference for
+    100% of files. After 2026-05-03 mkvextract is the source of truth.
+    """
+    from pipeline.grade_review import _read_global_tags
+
+    for t in _read_global_tags(filepath):
+        if t["name"].upper() == "CQ":
             try:
-                return int(t.get("value") or t.get("string_value") or 0)
+                return int(t["value"])
             except (TypeError, ValueError):
                 continue
-    # Fall back to a string-based search of the JSON in case mkvmerge's
-    # schema shifted between versions — the tag name is unique enough that
-    # this won't false-positive.
     return None
 
 
@@ -187,6 +181,7 @@ def _read_db_cq(state_db: str, filepath: str) -> int | None:
 def _audit_one(entry: dict, state_db: str, base_cq_lookup, bitrate_table: dict | None = None) -> dict:
     """Audit a single file. Returns {filepath, target_cq, current_cq, source, bucket, grade}."""
     from pipeline.content_grade import target_cq as compute_target
+    from pipeline.grade_review import read_grade_review
 
     fp = entry.get("filepath", "")
     library_type = entry.get("library_type", "movie")
@@ -236,6 +231,15 @@ def _audit_one(entry: dict, state_db: str, base_cq_lookup, bitrate_table: dict |
     else:
         bucket = "too_high"  # encoded harsher than rule wants — manual review
 
+    # Manual override: if the user has stamped GRADE_REVIEW=accepted, force
+    # the bucket to optimal regardless of CQ comparison. This is how a user
+    # signs off on a too_high file ("I've watched it, it's fine") so the
+    # dashboard stops nagging them about it on every audit re-run.
+    review = read_grade_review(fp)
+    review_status = review.get("status") if review else None
+    if review_status == "accepted":
+        bucket = "optimal"
+
     return {
         "filepath": fp,
         "target_cq": target,
@@ -246,6 +250,8 @@ def _audit_one(entry: dict, state_db: str, base_cq_lookup, bitrate_table: dict |
         "offset": offset,
         "res_key": res_key,
         "content_type": content_type,
+        "review_status": review_status,
+        "review_at": (review or {}).get("reviewed_at") if review else None,
     }
 
 

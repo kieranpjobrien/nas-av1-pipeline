@@ -103,6 +103,8 @@ export const api = {
   setDismissed: (section, paths) => putJSON(`/dismissed/${section}`, { paths }),
   getDuplicates: () => fetchJSON("/duplicates"),
   deleteFile: (path) => postJSON("/file/delete", { path }),
+  gradeAccept: (path) => postJSON("/file/grade-accept", { path }),
+  gradeClear: (path) => postJSON("/file/grade-clear", { path }),
   getGpu: () => fetchJSON("/gpu"),
   getHostStats: () => fetchJSON("/host-stats"),
   getFileSiblings: (path) => fetchJSON(`/file/siblings?path=${encodeURIComponent(path)}`),
