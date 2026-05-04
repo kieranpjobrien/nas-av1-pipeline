@@ -759,6 +759,42 @@ class Orchestrator:
     # Gap Filler Worker — CPU work always, GPU (whisper) between encodes
     # =========================================================================
 
+    def _load_fresh_report_lookup(self) -> dict[str, dict]:
+        """Return a {filepath -> entry} dict from media_report.json,
+        mtime-cached so back-to-back gap_filler passes don't re-parse the
+        whole 8000-entry JSON for nothing.
+
+        Returns ``{}`` on read/parse failure — caller treats that as
+        "couldn't refresh, fall back to stale queue items" rather than
+        skipping all work, since a brief I/O hiccup shouldn't stall the
+        whole gap_filler loop.
+        """
+        import json as _json
+        from paths import MEDIA_REPORT  # noqa: PLC0415
+
+        try:
+            mtime = os.path.getmtime(MEDIA_REPORT)
+        except OSError:
+            return {}
+
+        cached = getattr(self, "_fresh_report_cache", None)
+        if cached and cached[0] == mtime:
+            return cached[1]
+
+        try:
+            with open(MEDIA_REPORT, encoding="utf-8") as f:
+                report = _json.load(f)
+        except (OSError, _json.JSONDecodeError):
+            return {}
+
+        lookup = {
+            entry["filepath"]: entry
+            for entry in (report.get("files") or [])
+            if entry.get("filepath")
+        }
+        self._fresh_report_cache = (mtime, lookup)
+        return lookup
+
     def _gap_filler_worker(self, queue: list[dict]):
         """Gap filler with drain-and-rescan loop: runs one pass then re-scans.
 
@@ -820,6 +856,17 @@ class Orchestrator:
         # won't be picked up until a future "drain & rescan" feature.
         with self._dispatched_lock:
             queue_snapshot = list(queue)
+
+        # Re-read media_report so each item gets analysed against ground
+        # truth, not the stale snapshot it was queued with at startup.
+        # Pre-2026-05-05 this was missing: a file queued for gap_fill at
+        # startup (because it had und subs in the report at the time)
+        # would keep getting re-analysed against the stale entry forever,
+        # even after backfill scripts patched the on-disk language tags
+        # AND updated the media_report. Result: gap_filler iterating
+        # over compliant Seinfeld episodes doing wasteful no-op work.
+        fresh_by_path = self._load_fresh_report_lookup()
+        skipped_now_compliant = 0
         for item in queue_snapshot:
             filepath = item["filepath"]
             existing = self.state.get_file(filepath)
@@ -830,8 +877,29 @@ class Orchestrator:
             if status == FileStatus.ERROR.value or (status and is_terminal(status)):
                 continue
 
+            # Refresh from media_report. If the file is gone from the
+            # report (deleted/renamed by another process), skip — the
+            # refresh worker will pick up the new path on the next pass.
+            fresh = fresh_by_path.get(filepath)
+            if fresh is not None:
+                item = fresh
+            elif fresh_by_path:
+                # Report loaded successfully but this path is missing —
+                # file was renamed or deleted; skip silently.
+                continue
+
             gaps = analyse_gaps(item, self.config)
             gaps.needs_language_detect = False  # whisper handled separately
+
+            # Short-circuit: if the refreshed entry no longer needs anything,
+            # the gap was closed by an out-of-band fix (mkvpropedit backfill,
+            # bulk rename, etc.). Skip processing this pass without mutating
+            # state — re-evaluation next pass is cheap (analyse_gaps is pure
+            # CPU, no I/O) and leaves the file open to legitimate future
+            # work (e.g. user adds a foreign sub sidecar later).
+            if not gaps.needs_anything:
+                skipped_now_compliant += 1
+                continue
 
             # Quick ops: rename, metadata, foreign sub delete — queue independently
             if gaps.needs_filename_clean or gaps.needs_metadata or gaps.needs_foreign_sub_cleanup:
@@ -845,6 +913,11 @@ class Orchestrator:
 
         mux_total = mux_queue.qsize()
         quick_total = quick_queue.qsize()
+        if skipped_now_compliant:
+            logging.info(
+                f"Gap filler: {skipped_now_compliant} item(s) skipped — fresh report shows no gaps "
+                f"(out-of-band cleanup since queue-build)"
+            )
         logging.info(
             f"Gap filler: {mux_total} mux (mkvmerge SSH) + {quick_total} quick (rename/meta/delete)"
         )
