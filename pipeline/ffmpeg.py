@@ -422,14 +422,40 @@ def build_ffmpeg_cmd(
     # retry path in _run_encode only fires when ffmpeg exits non-zero,
     # which never happens here.
     #
+    # 2026-05-05 follow-up: the original check only read ``item["video_codec"]``
+    # which the queue builder stores as the human-readable display string
+    # ("VC-1"), not the ffmpeg codec_raw ("vc1"). String compare against a
+    # set of codec_raw values failed for VC-1, the file slid into NVDEC's
+    # stuck mode again at 0.013x with a 201h ETA. Fix:
+    #   1. Fall back to ``item.video.codec_raw`` when ``video_codec`` doesn't
+    #      hit the set — the report has the raw form even when the queue
+    #      item only has the display string.
+    #   2. Normalise both sides by stripping non-alphanumerics, so any of
+    #      "VC-1" / "vc-1" / "vc1" / "MPEG-2 Video" all collapse to the
+    #      canonical form (vc1, mpeg2video) that the set holds.
+    #
     # Force software decode upfront for codecs that have a reputation for
     # this kind of silent NVDEC degradation. CPU decode is slower than NVDEC
     # but vastly faster than NVDEC's stuck-mode, and NVENC encode runs at
     # full speed regardless.
-    src_codec = (item.get("video_codec") or "").lower()
-    if use_hwaccel and src_codec in _NVDEC_SILENT_DEGRADATION_CODECS:
+    def _normalise_codec(s: str) -> str:
+        return "".join(c for c in (s or "").lower() if c.isalnum())
+
+    src_codec_raw = item.get("video_codec") or ""
+    if not src_codec_raw:
+        src_codec_raw = (item.get("video") or {}).get("codec_raw") or ""
+    src_codec_norm = _normalise_codec(src_codec_raw)
+    # Also try codec_raw as a second-chance read — display strings like
+    # "VC-1" exist in item.video_codec but normalise to "vc1" only via
+    # the strip; if the queue builder ever changes shape this fallback
+    # keeps the check working.
+    if src_codec_norm not in _NVDEC_SILENT_DEGRADATION_CODECS:
+        alt = (item.get("video") or {}).get("codec_raw") or ""
+        if _normalise_codec(alt) in _NVDEC_SILENT_DEGRADATION_CODECS:
+            src_codec_norm = _normalise_codec(alt)
+    if use_hwaccel and src_codec_norm in _NVDEC_SILENT_DEGRADATION_CODECS:
         logging.warning(
-            f"  Forcing software decode for {src_codec.upper()} source "
+            f"  Forcing software decode for {src_codec_raw or src_codec_norm} source "
             f"(NVDEC known-flaky on this codec)"
         )
         use_hwaccel = False

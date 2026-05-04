@@ -710,3 +710,77 @@ class TestPerStreamLanguagePreservation:
         cmd = build_ffmpeg_cmd("/in/file.mkv", "/out/file.mkv", item, _base_config())
         joined = " ".join(cmd)
         assert "-map_metadata -1" in joined
+
+
+class TestNVDECSilentDegradationDetection:
+    """Pre-2026-05-05 the proactive software-decode fallback for VC-1 /
+    WMV3 / MPEG-2 sources only checked ``item["video_codec"]``, which
+    the queue builder stores as the *display* string ("VC-1"). The set
+    holds the canonical ffmpeg codec_raw form ("vc1"). Comparison failed,
+    Any Given Sunday slid into NVDEC's stuck mode for the second time
+    at 0.013x / 201h ETA.
+
+    Fix: normalise both sides (strip non-alphanumerics, lowercase) AND
+    fall back to ``item.video.codec_raw`` so any reasonable spelling of
+    a flaky codec triggers the software-decode path.
+    """
+
+    def _vc1_item(self, codec_field: str = "video_codec", codec_value: str = "VC-1") -> dict:
+        item = _base_item()
+        if codec_field == "video_codec":
+            item["video_codec"] = codec_value
+        elif codec_field == "video.codec_raw":
+            item["video"] = {"codec_raw": codec_value}
+        return item
+
+    def test_vc1_display_string_triggers_software_decode(self) -> None:
+        """The exact failure mode from the 2026-05-05 incident: queue
+        builder set item['video_codec'] = 'VC-1' (display form). The
+        check must normalise it to 'vc1' and force software decode."""
+        item = self._vc1_item("video_codec", "VC-1")
+        cmd = build_ffmpeg_cmd("/in/file.mkv", "/out/file.mkv", item, _base_config())
+        joined = " ".join(cmd)
+        assert "-hwaccel cuda" not in joined, (
+            "VC-1 source must NOT use NVDEC — silent degradation crashes the encode rate "
+            "to 0.013x / 200h ETA"
+        )
+
+    def test_lowercase_vc1_codec_raw_triggers_software_decode(self) -> None:
+        """The canonical form (lowercase, no punctuation) also triggers."""
+        item = self._vc1_item("video_codec", "vc1")
+        cmd = build_ffmpeg_cmd("/in/file.mkv", "/out/file.mkv", item, _base_config())
+        assert "-hwaccel cuda" not in " ".join(cmd)
+
+    def test_video_codec_raw_fallback_when_video_codec_missing(self) -> None:
+        """If video_codec isn't set on the item dict but item.video.codec_raw
+        is, the check must fall back through. The orchestrator's refresh
+        worker passes report entries directly without the queue-builder's
+        flat shape — those have only the nested form."""
+        item = _base_item()
+        # No top-level video_codec; only the nested form
+        item.pop("video_codec", None)
+        item["video"] = {"codec_raw": "vc1"}
+        cmd = build_ffmpeg_cmd("/in/file.mkv", "/out/file.mkv", item, _base_config())
+        assert "-hwaccel cuda" not in " ".join(cmd)
+
+    def test_mpeg2_video_display_form_triggers(self) -> None:
+        """'MPEG-2 Video' is the display form for mpeg2video. After
+        normalisation: 'mpeg2video' which IS in the set."""
+        item = self._vc1_item("video_codec", "MPEG-2 Video")
+        cmd = build_ffmpeg_cmd("/in/file.mkv", "/out/file.mkv", item, _base_config())
+        assert "-hwaccel cuda" not in " ".join(cmd)
+
+    def test_h264_does_not_trigger_software_decode(self) -> None:
+        """Healthy codecs must STILL use NVDEC — software decode is the
+        slow safe-path, not a default. H.264 has solid NVDEC support."""
+        item = _base_item()
+        item["video_codec"] = "h264"
+        cmd = build_ffmpeg_cmd("/in/file.mkv", "/out/file.mkv", item, _base_config())
+        assert "-hwaccel cuda" in " ".join(cmd)
+
+    def test_hevc_does_not_trigger_software_decode(self) -> None:
+        """HEVC also has solid NVDEC support — must keep hwaccel."""
+        item = _base_item()
+        item["video_codec"] = "hevc"
+        cmd = build_ffmpeg_cmd("/in/file.mkv", "/out/file.mkv", item, _base_config())
+        assert "-hwaccel cuda" in " ".join(cmd)
