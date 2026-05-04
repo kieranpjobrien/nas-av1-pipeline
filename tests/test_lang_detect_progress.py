@@ -113,3 +113,63 @@ def test_lang_detect_status_endpoint_handles_corrupt_file(tmp_path, monkeypatch)
 
     result = get_lang_detect_status()
     assert result == {"running": False}
+
+
+def test_lang_detect_status_endpoint_overrides_stale_running_flag(tmp_path, monkeypatch):
+    """Stale-state defence: if the state file says ``running: true`` but
+    its mtime is older than 120s, the daemon crashed without updating the
+    flag. Endpoint must override ``running`` to False so the dashboard
+    panel disappears instead of showing frozen counters as if live.
+
+    Pinned 2026-05-05 after the user spotted the dashboard reporting
+    "3 / 64 files · ETA 1m" for 78+ hours after the whisper daemon
+    crashed (rc=3221226505) and the watchdog gave up.
+    """
+    import os
+    import paths
+    monkeypatch.setattr(paths, "STAGING_DIR", tmp_path)
+
+    state = {
+        "running": True,
+        "total": 64,
+        "processed": 3,
+        "detected": 0,
+        "failed": 3,
+        "current_file": "Paperman (2012).mkv",
+    }
+    state_path = tmp_path / "lang_detect_state.json"
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    # Backdate mtime to 200s ago — well past the 120s staleness threshold.
+    stale_mtime = state_path.stat().st_mtime - 200
+    os.utime(state_path, (stale_mtime, stale_mtime))
+
+    from server.routers.admin import get_lang_detect_status
+
+    result = get_lang_detect_status()
+    assert result["running"] is False  # the override
+    assert result.get("stale") is True
+    assert result.get("stale_age_secs", 0) >= 200
+    # Other fields preserved so a future "last run summary" UI can
+    # render the dead-daemon's last known state without re-introducing
+    # the frozen-progress lie.
+    assert result["total"] == 64
+    assert result["processed"] == 3
+
+
+def test_lang_detect_status_endpoint_recent_running_state_passes_through(
+    tmp_path, monkeypatch,
+):
+    """A genuinely live daemon (mtime within the last 120s) must NOT
+    have its running flag overridden. This is the inverse of the staleness
+    test — pinning that the threshold doesn't trip on healthy state."""
+    import paths
+    monkeypatch.setattr(paths, "STAGING_DIR", tmp_path)
+
+    state = {"running": True, "total": 100, "processed": 50}
+    (tmp_path / "lang_detect_state.json").write_text(json.dumps(state), encoding="utf-8")
+
+    from server.routers.admin import get_lang_detect_status
+
+    result = get_lang_detect_status()
+    assert result["running"] is True
+    assert "stale" not in result

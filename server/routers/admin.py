@@ -258,11 +258,23 @@ def get_lang_detect_status() -> dict:
     ``pipeline.language.write_progress_state`` after every file). When no
     run is active or the file doesn't exist, returns ``{"running": false}``.
 
+    Stale-state defence: the daemon writes per-file (typically every 1-2s
+    at 30-60 files/min). If the state file says ``running: true`` but its
+    mtime is older than 120s, the daemon crashed without updating the
+    flag — return ``running: false`` so the dashboard panel disappears
+    instead of showing frozen counters as if they were live progress.
+
+    The 2026-05-01 23:57 incident: whisper crashed (rc=3221226505 — CUDA
+    STATUS_STACK_BUFFER_OVERRUN), watchdog gave up after 10 attempts,
+    state file kept ``running: true`` for 78+ hours. Dashboard rendered
+    "3 / 64 files · ETA 1m" indefinitely.
+
     The dashboard polls this every few seconds while a batch is running.
     Not cached server-side — the client controls polling frequency.
     """
     import json as _json
     import os as _os
+    import time as _time
 
     from paths import STAGING_DIR as _staging
 
@@ -271,9 +283,24 @@ def get_lang_detect_status() -> dict:
         return {"running": False}
     try:
         with open(state_path, encoding="utf-8") as f:
-            return _json.load(f)
+            data = _json.load(f)
     except (OSError, ValueError):
         return {"running": False}
+
+    # Override the running flag when the file is stale. Threshold is
+    # generous enough to ride out a brief I/O hiccup but tight enough
+    # that a real crash shows up within a couple of dashboard polls.
+    if data.get("running"):
+        try:
+            age_secs = _time.time() - _os.path.getmtime(state_path)
+        except OSError:
+            age_secs = 0
+        if age_secs > 120:
+            data["running"] = False
+            data["stale"] = True
+            data["stale_age_secs"] = round(age_secs)
+
+    return data
 
 
 # --- Deep health / invariants ---
