@@ -107,6 +107,8 @@ export const api = {
   gradeClear: (path) => postJSON("/file/grade-clear", { path }),
   cqOverride: (path, cq) => postJSON("/file/cq-override", { path, cq }),
   cqClear: (path) => postJSON("/file/cq-clear", { path }),
+  requeueFile: (path, reason) => postJSON("/file/requeue", { path, reason }),
+  requeueBatch: (paths, reason) => postJSON("/files/requeue-batch", { paths, reason }),
   getGpu: () => fetchJSON("/gpu"),
   getHostStats: () => fetchJSON("/host-stats"),
   getFileSiblings: (path) => fetchJSON(`/file/siblings?path=${encodeURIComponent(path)}`),

@@ -838,6 +838,13 @@
   background: rgba(212, 255, 74, 0.04);
   box-shadow: inset 3px 0 0 var(--accent);
 }
+.nc-app .ft-row.picked {
+  background: rgba(212, 255, 74, 0.08);
+}
+.nc-app .ft-row.picked.sel {
+  /* Selected (inspected) AND ticked for bulk — combine both treatments. */
+  background: rgba(212, 255, 74, 0.12);
+}
 .nc-app .ft-name {
   min-width: 0;
   display: flex;

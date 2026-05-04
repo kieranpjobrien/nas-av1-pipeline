@@ -7,6 +7,8 @@ Routes:
     POST /api/file/grade-clear    - clear the Grade-Optimal override
     POST /api/file/cq-override    - set a per-file CQ override
     POST /api/file/cq-clear       - clear the CQ override
+    POST /api/file/requeue        - reset a single file to pending so the encoder picks it up
+    POST /api/files/requeue-batch - same, for many filepaths at once
     GET  /api/file-detail         - cross-reference media report + pipeline state
     GET  /api/duplicates          - find duplicate files with quality scoring
 """
@@ -311,6 +313,155 @@ def cq_clear(req: dict) -> dict:
     if not ok:
         raise HTTPException(500, "Failed to clear CQ override")
     return {"ok": True, "filepath": path}
+
+
+@router.post("/api/file/requeue")
+def file_requeue(req: dict) -> dict:
+    """Reset a single file's pipeline_state row to ``pending`` so the
+    orchestrator picks it up on its next queue-build pass.
+
+    Used by the Inspector's "Queue for re-encode" button. Body:
+    ``{path, reason?}``. The reason is stored in the row's ``error``
+    column (which the orchestrator clears on success) so the user can
+    see in audit history *why* the file got requeued.
+
+    Idempotent: if the file is already pending or in flight, this
+    no-ops gracefully.
+    """
+    import json as _json
+    import sqlite3 as _sqlite3
+
+    from paths import NAS_MOVIES, NAS_SERIES, PIPELINE_STATE_DB
+
+    path = req.get("path")
+    if not path:
+        raise HTTPException(400, "path required")
+    norm = os.path.normpath(path)
+    nas_movies = os.path.normpath(str(NAS_MOVIES))
+    nas_series = os.path.normpath(str(NAS_SERIES))
+    if not (norm.startswith(nas_movies) or norm.startswith(nas_series)):
+        raise HTTPException(403, "Path is outside NAS media directories")
+    if not os.path.exists(norm):
+        raise HTTPException(404, "File no longer exists on disk")
+
+    reason = (req.get("reason") or "manual requeue from dashboard")[:200]
+
+    try:
+        con = _sqlite3.connect(str(PIPELINE_STATE_DB))
+        cur = con.cursor()
+        row = cur.execute(
+            "SELECT status, extras FROM pipeline_files WHERE filepath = ?", (path,)
+        ).fetchone()
+        if row is None:
+            # File was never in the queue — insert a pending row so it gets picked up.
+            cur.execute(
+                "INSERT INTO pipeline_files (filepath, status, extras, reason) "
+                "VALUES (?, 'pending', '{}', ?)",
+                (path, reason),
+            )
+            new_status = "pending"
+        else:
+            cur_status = (row[0] or "").lower()
+            # Skip files already in flight — flipping status under a live encode
+            # corrupts the pipeline_state schema invariants (rule 8 / 11).
+            if cur_status in ("processing", "encoding", "fetching", "uploading"):
+                con.close()
+                raise HTTPException(
+                    409, f"File is currently {cur_status}; wait for it to finish or fail."
+                )
+            # Preserve any extras (encode_params_used, detected_audio, ...) so
+            # the next encode reuses them. We just clear stage/error so the
+            # row looks "fresh" to the orchestrator.
+            cur.execute(
+                "UPDATE pipeline_files SET status='pending', stage=NULL, error=NULL, "
+                "reason=? WHERE filepath = ?",
+                (reason, path),
+            )
+            new_status = "pending (was " + cur_status + ")"
+        con.commit()
+        con.close()
+    except _sqlite3.Error as e:
+        raise HTTPException(500, f"State DB error: {e}") from e
+
+    return {"ok": True, "filepath": path, "status": new_status}
+
+
+@router.post("/api/files/requeue-batch")
+def files_requeue_batch(req: dict) -> dict:
+    """Bulk-requeue many files in a single transaction.
+
+    Body: ``{paths: [str, ...], reason?: str}``.
+
+    Used by the Library page's bulk-select bar. Each path is validated
+    individually; failures are collected per-path so a single bad row
+    doesn't abort the whole batch. Returns a summary with ok/failed
+    counts and per-path detail for the failures.
+    """
+    import sqlite3 as _sqlite3
+
+    from paths import NAS_MOVIES, NAS_SERIES, PIPELINE_STATE_DB
+
+    paths = req.get("paths") or []
+    if not isinstance(paths, list) or not paths:
+        raise HTTPException(400, "paths must be a non-empty list of strings")
+    if len(paths) > 5000:
+        # Discipline: a 5k+ batch usually means a UI bug shipped a "select all"
+        # that fired across the entire library. Fail loud rather than silently
+        # mutating thousands of rows.
+        raise HTTPException(400, "batch too large (>5000); split into smaller batches")
+    reason = (req.get("reason") or "bulk requeue from dashboard")[:200]
+
+    nas_movies = os.path.normpath(str(NAS_MOVIES))
+    nas_series = os.path.normpath(str(NAS_SERIES))
+
+    queued = 0
+    skipped: list[dict] = []
+    try:
+        con = _sqlite3.connect(str(PIPELINE_STATE_DB))
+        cur = con.cursor()
+        for raw_path in paths:
+            if not isinstance(raw_path, str) or not raw_path:
+                skipped.append({"path": raw_path, "reason": "invalid path"})
+                continue
+            norm = os.path.normpath(raw_path)
+            if not (norm.startswith(nas_movies) or norm.startswith(nas_series)):
+                skipped.append({"path": raw_path, "reason": "outside NAS media dirs"})
+                continue
+            if not os.path.exists(norm):
+                skipped.append({"path": raw_path, "reason": "file missing"})
+                continue
+            row = cur.execute(
+                "SELECT status FROM pipeline_files WHERE filepath = ?", (raw_path,)
+            ).fetchone()
+            if row is None:
+                cur.execute(
+                    "INSERT INTO pipeline_files (filepath, status, extras, reason) "
+                    "VALUES (?, 'pending', '{}', ?)",
+                    (raw_path, reason),
+                )
+                queued += 1
+                continue
+            cur_status = (row[0] or "").lower()
+            if cur_status in ("processing", "encoding", "fetching", "uploading"):
+                skipped.append({"path": raw_path, "reason": f"in flight ({cur_status})"})
+                continue
+            cur.execute(
+                "UPDATE pipeline_files SET status='pending', stage=NULL, error=NULL, "
+                "reason=? WHERE filepath = ?",
+                (reason, raw_path),
+            )
+            queued += 1
+        con.commit()
+        con.close()
+    except _sqlite3.Error as e:
+        raise HTTPException(500, f"State DB error: {e}") from e
+
+    return {
+        "ok": True,
+        "queued": queued,
+        "skipped": len(skipped),
+        "skipped_detail": skipped[:20],  # cap so the response stays small
+    }
 
 
 @router.get("/api/file/siblings")

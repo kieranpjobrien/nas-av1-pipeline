@@ -188,7 +188,52 @@ export function Library({ data, pipelineData, onFileOpen, drillKey, onClearDrill
   const [groupOpen, setGroupOpen] = useState(false);
   const [visibleCount, setVisibleCount] = useState(50);
   const [panel, setPanel] = useState(null);
+  // Bulk-select set: paths the user has ticked the row checkbox on. Action
+  // bar at the bottom appears whenever this is non-empty and offers
+  // "Queue N for re-encode" + "Clear selection".
+  const [selectedPaths, setSelectedPaths] = useState(() => new Set());
   const pipelineFiles = pipelineData?.files || {};
+
+  const toggleSelect = (path) => {
+    setSelectedPaths((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+  };
+  const clearSelection = () => setSelectedPaths(new Set());
+  const selectAllVisible = (rows) => {
+    setSelectedPaths((prev) => {
+      const next = new Set(prev);
+      rows.forEach((f) => f.filepath && next.add(f.filepath));
+      return next;
+    });
+  };
+  const queueSelected = async () => {
+    const paths = Array.from(selectedPaths);
+    if (paths.length === 0) return;
+    const ok = window.confirm(
+      `Queue ${paths.length} file${paths.length === 1 ? "" : "s"} for re-encode?\n\n` +
+        `They'll be flipped to 'pending' in the pipeline and the encoder will pick them up in size order. ` +
+        `In-flight files are skipped automatically.`
+    );
+    if (!ok) return;
+    try {
+      const r = await api.requeueBatch(paths, "bulk requeue from Library");
+      window.notify?.({
+        kind: "good",
+        title: `Queued ${r.queued} file${r.queued === 1 ? "" : "s"}`,
+        body:
+          r.skipped > 0
+            ? `${r.skipped} skipped (in flight or missing). Check details in the network response.`
+            : "All selected files added to the encode queue.",
+      });
+      clearSelection();
+    } catch (e) {
+      window.notify?.({ kind: "bad", title: "Bulk queue failed", body: String(e.message || e) });
+    }
+  };
 
   const drillFn = drillKey && drillFailures[drillKey];
   // Bucket counts for the sub-filter chip row. Only meaningful inside the
@@ -291,6 +336,59 @@ export function Library({ data, pipelineData, onFileOpen, drillKey, onClearDrill
 
   return (
     <div className="view">
+      {selectedPaths.size > 0 && (
+        <div
+          style={{
+            position: "fixed",
+            bottom: 24,
+            left: "50%",
+            transform: "translateX(-50%)",
+            zIndex: 100,
+            display: "flex",
+            alignItems: "center",
+            gap: 12,
+            padding: "10px 16px",
+            background: "var(--bg-elev)",
+            border: "1px solid var(--accent)",
+            borderRadius: 8,
+            boxShadow: "0 6px 24px rgba(0, 0, 0, 0.4)",
+          }}
+        >
+          <span style={{ fontSize: 13, color: "var(--ink-1)", fontWeight: 500 }}>
+            {fmtNum(selectedPaths.size)} selected
+          </span>
+          <button
+            onClick={queueSelected}
+            style={{
+              padding: "6px 14px",
+              background: "var(--accent)",
+              color: "#000",
+              border: "none",
+              borderRadius: 4,
+              cursor: "pointer",
+              fontWeight: 600,
+              fontSize: 12,
+            }}
+            title="Mark every selected file as pending so the encoder picks them up"
+          >
+            Queue {fmtNum(selectedPaths.size)} for re-encode ↵
+          </button>
+          <button
+            onClick={clearSelection}
+            style={{
+              padding: "6px 12px",
+              background: "transparent",
+              color: "var(--ink-2)",
+              border: "1px solid var(--line)",
+              borderRadius: 4,
+              cursor: "pointer",
+              fontSize: 11,
+            }}
+          >
+            Clear
+          </button>
+        </div>
+      )}
       {drillKey && (
         <div
           style={{
@@ -558,7 +656,23 @@ export function Library({ data, pipelineData, onFileOpen, drillKey, onClearDrill
 
       <div className="lib-layout">
         <div className="file-table">
-          <div className="ft-head">
+          <div className="ft-head" style={{ gridTemplateColumns: "28px 1fr 56px 52px 72px 78px 88px" }}>
+            <span style={{ textAlign: "center" }}>
+              <input
+                type="checkbox"
+                checked={
+                  rows.slice(0, visibleCount).length > 0 &&
+                  rows.slice(0, visibleCount).every((f) => selectedPaths.has(f.filepath))
+                }
+                onChange={(e) => {
+                  e.stopPropagation();
+                  if (e.target.checked) selectAllVisible(rows.slice(0, visibleCount));
+                  else clearSelection();
+                }}
+                title="Select / clear all visible rows"
+                style={{ cursor: "pointer" }}
+              />
+            </span>
             <span>File</span>
             <span style={{ textAlign: "center" }}>Codec</span>
             <span style={{ textAlign: "center" }}>Res</span>
@@ -574,6 +688,8 @@ export function Library({ data, pipelineData, onFileOpen, drillKey, onClearDrill
                   key={f.filepath || i}
                   f={f}
                   selected={sel === f}
+                  picked={selectedPaths.has(f.filepath)}
+                  onPick={() => toggleSelect(f.filepath)}
                   onClick={() => setSelIdx(i)}
                   onDoubleClick={() => onFileOpen?.(f.filepath)}
                   pipelineInfo={pipelineFiles[f.filepath]}
@@ -615,6 +731,8 @@ export function Library({ data, pipelineData, onFileOpen, drillKey, onClearDrill
                       key={f.filepath || absIdx}
                       f={f}
                       selected={sel === f}
+                      picked={selectedPaths.has(f.filepath)}
+                      onPick={() => toggleSelect(f.filepath)}
                       onClick={() => setSelIdx(absIdx)}
                       onDoubleClick={() => onFileOpen?.(f.filepath)}
                       pipelineInfo={pipelineFiles[f.filepath]}
@@ -662,7 +780,7 @@ export function Library({ data, pipelineData, onFileOpen, drillKey, onClearDrill
   );
 }
 
-function FileRow({ f, selected, onClick, onDoubleClick, pipelineInfo }) {
+function FileRow({ f, selected, picked, onPick, onClick, onDoubleClick, pipelineInfo }) {
   const st = statusLabel(pipelineInfo?.status);
   const bucket = f.cq_audit_bucket;
   const bucketColor = {
@@ -697,10 +815,26 @@ function FileRow({ f, selected, onClick, onDoubleClick, pipelineInfo }) {
   );
   return (
     <div
-      className={`ft-row ${selected ? "sel" : ""}`}
+      className={`ft-row ${selected ? "sel" : ""} ${picked ? "picked" : ""}`}
+      style={{ gridTemplateColumns: "28px 1fr 56px 52px 72px 78px 88px" }}
       onClick={onClick}
       onDoubleClick={onDoubleClick}
     >
+      <div
+        style={{ display: "flex", alignItems: "center", justifyContent: "center" }}
+        onClick={(e) => {
+          // Stop the row's onClick — checking shouldn't change row selection
+          e.stopPropagation();
+        }}
+      >
+        <input
+          type="checkbox"
+          checked={!!picked}
+          onChange={onPick}
+          style={{ cursor: "pointer" }}
+          title="Select for bulk action"
+        />
+      </div>
       <div className="ft-name">
         <div className="n">
           <span className="n-title">{prettyTitle(f.filename)}</span>
@@ -1039,7 +1173,7 @@ function Inspector({ sel, panel, setPanel, onFileOpen, onAuditPatch }) {
             <span className="led" />
             <div>
               <b>{issues.length} policy issue{issues.length === 1 ? "" : "s"}</b> — this file doesn't match the library
-              target (AV1 video · Opus audio · ENG subs). Re-encoding will fix all of them.
+              target (AV1 video · EAC-3 audio · ENG subs). Re-encoding will fix all of them.
             </div>
           </div>
         </div>
@@ -1361,6 +1495,28 @@ function Inspector({ sel, panel, setPanel, onFileOpen, onAuditPatch }) {
           title="Reveal in the NAS file browser · rename, move, check sidecar subs/artwork"
         >
           {panel === "fm" ? "Hide file manager" : "Open in file manager"} <span className="k">O</span>
+        </button>
+        <button
+          className="ins-btn"
+          style={{
+            color: "var(--accent)",
+            borderColor: "var(--accent)",
+          }}
+          title="Reset this file's pipeline status to pending so the encoder picks it up. Use for files that should re-encode (too_low CQ, EAC-3 audio fixup, etc.)."
+          onClick={async () => {
+            try {
+              const r = await api.requeueFile(sel.filepath, "manual requeue from Inspector");
+              window.notify?.({
+                kind: "good",
+                title: "Queued for re-encode",
+                body: `${prettyTitle(sel.filename)} · ${r.status}`,
+              });
+            } catch (e) {
+              window.notify?.({ kind: "bad", title: "Queue failed", body: String(e.message || e) });
+            }
+          }}
+        >
+          Queue re-encode <span className="k">R</span>
         </button>
         <button
           className="ins-btn"

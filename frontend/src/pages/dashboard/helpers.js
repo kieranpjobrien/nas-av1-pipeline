@@ -131,8 +131,13 @@ export const aggregateBy = (files, fn) => {
   return out;
 };
 
-// Detect library-policy issues for a file (AV1 video, Opus audio, ENG subs).
+// Detect library-policy issues for a file (AV1 video, EAC-3 audio, ENG subs).
 // Returns an array of {scope:'video'|'audio'|'sub', idx?, short, why, level?}.
+//
+// Audio policy (CLAUDE.md, Sonos Arc + 2x Sonos One rears = 5.1 + Atmos):
+//   * EAC-3 — TARGET codec. 640 kbps surround, 256 kbps stereo. Netflix-grade.
+//   * TrueHD — passthrough mandatory (primary Atmos carrier; Sonos Arc decodes natively).
+//   * Everything else (DTS, DTS-HD MA, FLAC, PCM, AC-3, AAC, MP3, Opus) — transcode to EAC-3.
 export const detectIssues = (f) => {
   if (!f) return [];
   const out = [];
@@ -148,22 +153,18 @@ export const detectIssues = (f) => {
   }
   (f.audio || []).forEach((a, i) => {
     const c = (a.codec || "").toLowerCase();
-    if (/ac.?3|dts|truehd|eac3|ddp|dd\b/.test(c)) {
-      out.push({
-        scope: "audio",
-        idx: i,
-        short: "lossy legacy",
-        why: `${a.codec} is a legacy surround codec — policy is opus @ 192k or passthrough only if lossless.`,
-      });
-    } else if (c && !/opus|flac|pcm/.test(c) && !a.lossless) {
-      out.push({
-        scope: "audio",
-        idx: i,
-        short: "non-opus",
-        why: `Audio codec ${a.codec} is not in the allowed set (opus, flac, pcm).`,
-        level: "warn",
-      });
+    // EAC-3 is the target codec. TrueHD is the mandatory Atmos passthrough.
+    // Both are compliant — no flag.
+    if (/^eac.?3$|^e-ac-3$|ddp|^truehd$/.test(c)) {
+      return;
     }
+    // Everything else transcodes to EAC-3 on the next encode pass.
+    out.push({
+      scope: "audio",
+      idx: i,
+      short: "transcode to EAC-3",
+      why: `${a.codec} will be transcoded to EAC-3 (640k surround / 256k stereo) on re-encode. EAC-3 is the library target codec for Sonos Arc.`,
+    });
   });
   (f.subs || []).forEach((s, i) => {
     const lang = (s.lang || "").toLowerCase();
