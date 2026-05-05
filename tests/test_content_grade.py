@@ -19,6 +19,7 @@ from pipeline.content_grade import (
     GRADE_DEFAULT,
     GRADE_SITCOM,
     GRADE_TV_ANIMATION,
+    GRADE_TV_ANIMATION_LONG,
     age_offset,
     cq_offset,
     derive_grade,
@@ -117,6 +118,142 @@ def test_classic_film_genre_must_match():
 
 def test_no_tmdb_falls_back_to_default():
     e = {"library_type": "movie"}
+    assert derive_grade(e) == GRADE_DEFAULT
+
+
+# --- tv_animation_long (3D CGI action animation) -------------------------
+
+
+def test_bad_batch_classifies_as_tv_animation_long():
+    """The canonical 2026-05-06 case. TMDb genres are
+    'Action & Adventure', 'Animation', 'Sci-Fi & Fantasy'. Should land
+    tv_animation_long (+2 → CQ 32 at 4K SDR base 30), not the per-episode
+    runtime-flip-flopping that was happening before."""
+    e = _entry(
+        "series",
+        genres=["Action & Adventure", "Animation", "Sci-Fi & Fantasy"],
+        year="2021",
+        episode_runtime=[24],
+    )
+    assert derive_grade(e) == GRADE_TV_ANIMATION_LONG
+
+
+def test_clone_wars_classifies_as_tv_animation_long():
+    e = _entry(
+        "series",
+        genres=["Animation", "Action & Adventure", "Sci-Fi & Fantasy"],
+        year="2008",
+        episode_runtime=[22],
+    )
+    assert derive_grade(e) == GRADE_TV_ANIMATION_LONG
+
+
+def test_avatar_tla_classifies_as_tv_animation_long():
+    """ATLA: Animation + Action & Adventure. Painterly 2D rather than
+    3D CGI, but still detail-rich and motion-heavy enough that +2 is
+    a better fit than the +3 flat-shaded comedy bucket."""
+    e = _entry(
+        "series",
+        genres=["Animation", "Action & Adventure"],
+        year="2005",
+        episode_runtime=[23],
+    )
+    assert derive_grade(e) == GRADE_TV_ANIMATION_LONG
+
+
+def test_anime_action_classifies_as_tv_animation_long():
+    """Anime with Action & Adventure tag — same compression budget
+    rationale as Bad Batch: detail-rich + motion-heavy."""
+    e = _entry(
+        "series",
+        genres=["Animation", "Action & Adventure", "Drama"],
+        year="2019",
+        episode_runtime=[24],
+    )
+    assert derive_grade(e) == GRADE_TV_ANIMATION_LONG
+
+
+def test_bluey_stays_in_tv_animation_short():
+    """Flat-shaded short-form: Animation + Family, no Action. Stays in
+    the +3 bucket — flat colours absorb harsher CQ fine."""
+    e = _entry(
+        "series",
+        genres=["Animation", "Family", "Comedy"],
+        year="2018",
+        episode_runtime=[8],
+    )
+    assert derive_grade(e) == GRADE_TV_ANIMATION
+
+
+def test_bobs_burgers_stays_in_tv_animation_short():
+    """Animation + Comedy, no Action genre. Stays tv_animation +3
+    despite being long-form (22 min) — runtime is no longer used to
+    split the animation bucket."""
+    e = _entry(
+        "series",
+        genres=["Animation", "Comedy"],
+        year="2011",
+        episode_runtime=[22],
+    )
+    assert derive_grade(e) == GRADE_TV_ANIMATION
+
+
+def test_long_form_animation_drama_stays_short_grade():
+    """Animation + Drama (no Action) — like a Mushishi-style anime
+    drama. Painterly but quiet. Stays tv_animation +3."""
+    e = _entry(
+        "series",
+        genres=["Animation", "Drama", "Mystery"],
+        year="2005",
+        episode_runtime=[24],
+    )
+    assert derive_grade(e) == GRADE_TV_ANIMATION
+
+
+def test_bad_batch_episode_runtime_drift_does_not_change_grade():
+    """Pre-fix bug: same show's episodes flipped grades because per-file
+    duration drifted across the 25-min threshold. With the new rule,
+    runtime is irrelevant for the animation split — every episode of
+    the same show grades the same."""
+    short_ep = _entry(
+        "series",
+        genres=["Action & Adventure", "Animation", "Sci-Fi & Fantasy"],
+        year="2021",
+        runtime=22,
+    )
+    long_ep = _entry(
+        "series",
+        genres=["Action & Adventure", "Animation", "Sci-Fi & Fantasy"],
+        year="2021",
+        runtime=71,  # The Bad Batch S01E01 is a 71-min premiere
+    )
+    assert derive_grade(short_ep) == GRADE_TV_ANIMATION_LONG
+    assert derive_grade(long_ep) == GRADE_TV_ANIMATION_LONG
+
+
+def test_bad_batch_target_cq_at_4k_sdr():
+    """Pin the math the user signed off on: base 30 + 2 = CQ 32 at 4K SDR."""
+    e = _entry(
+        "series",
+        genres=["Action & Adventure", "Animation", "Sci-Fi & Fantasy"],
+        year="2021",
+        episode_runtime=[24],
+    )
+    final, grade, offset = target_cq(30, e)
+    assert final == 32
+    assert grade == GRADE_TV_ANIMATION_LONG
+    assert offset == 2
+
+
+def test_breaking_bad_stays_default():
+    """Live-action drama, 58-min episodes. Default +0, base CQ unchanged.
+    The user's reference point — Bad Batch should be +2 above this."""
+    e = _entry(
+        "series",
+        genres=["Crime", "Drama"],
+        year="2008",
+        episode_runtime=[58],
+    )
     assert derive_grade(e) == GRADE_DEFAULT
 
 

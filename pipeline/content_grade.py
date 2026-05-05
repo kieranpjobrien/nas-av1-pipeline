@@ -31,6 +31,7 @@ from __future__ import annotations
 
 GRADE_SITCOM = "sitcom"
 GRADE_TV_ANIMATION = "tv_animation"
+GRADE_TV_ANIMATION_LONG = "tv_animation_long"
 GRADE_CINEMA_ANIMATION = "cinema_animation"
 GRADE_CLASSIC_FILM = "classic_film"
 GRADE_BLOCKBUSTER = "blockbuster"
@@ -39,6 +40,7 @@ GRADE_DEFAULT = "default"
 ALL_GRADES = (
     GRADE_SITCOM,
     GRADE_TV_ANIMATION,
+    GRADE_TV_ANIMATION_LONG,
     GRADE_CINEMA_ANIMATION,
     GRADE_CLASSIC_FILM,
     GRADE_BLOCKBUSTER,
@@ -47,11 +49,18 @@ ALL_GRADES = (
 
 # Offset added to the base resolution-matrix CQ. Production-type signal.
 _GRADE_BASE_OFFSET: dict[str, int] = {
-    GRADE_SITCOM: 5,            # talking-head, static, low motion → +5
-    GRADE_TV_ANIMATION: 3,      # flat colours, simple motion → +3
+    GRADE_SITCOM: 5,                    # talking-head, static, low motion → +5
+    GRADE_TV_ANIMATION: 3,              # flat colours, simple motion → +3
+    # 3D CGI animation series (Clone Wars, Bad Batch, ATLA, anime-action).
+    # Compresses better than live-action drama but worse than flat-shaded
+    # comedy animation: detail-rich character models + dark space gradients
+    # need more bits than Bluey/Bob's Burgers but less than Breaking Bad.
+    # User-validated 2026-05-06: Bad Batch at CQ 32 (4K SDR base 30 + 2)
+    # is the sweet spot.
+    GRADE_TV_ANIMATION_LONG: 2,
     GRADE_DEFAULT: 0,
-    GRADE_CINEMA_ANIMATION: 0,  # detail-rich CGI for cinema → no offset
-    GRADE_CLASSIC_FILM: 1,      # film grain doesn't need pristine bits at HD → +1
+    GRADE_CINEMA_ANIMATION: 0,          # detail-rich CGI for cinema → no offset
+    GRADE_CLASSIC_FILM: 1,              # film grain doesn't need pristine bits at HD → +1
     # CGI-heavy spectacle compresses well — smooth gradients, predictable
     # motion vectors, masking from chaotic action scenes. The 4K HDR base
     # CQ of 22 is calibrated for cinematography-driven films (Dune, Blade
@@ -169,24 +178,38 @@ def derive_grade(entry: dict) -> str:
     through to ``GRADE_DEFAULT`` (no offset).
 
     Decision tree (first match wins):
-      1. Series + Animation + runtime <25 min → ``tv_animation``
-      2. Series + Comedy + ≤30 min runtime → ``sitcom``
-      3. Movie + Animation → ``cinema_animation``
-      4. Movie + comic/superhero keyword + action-ish genre → ``blockbuster``
-      5. Movie + pre-1980 + (Drama OR Romance OR War) → ``classic_film``
-      6. Otherwise → ``default``
+      1. Series + Animation + Action&Adventure → ``tv_animation_long`` (+2)
+         Captures 3D CGI action animation (Bad Batch, Clone Wars, ATLA,
+         anime-action). Detail-rich character models + dark space gradients
+         need more bits than flat-shaded comedy animation, but still less
+         than live-action drama.
+      2. Series + Animation → ``tv_animation`` (+3)
+         Captures flat-shaded comedy animation (Bluey, Bob's Burgers,
+         Family Guy, Simpsons, etc.). Flat colours + simple motion
+         compress aggressively.
+      3. Series + Comedy + ≤30 min runtime → ``sitcom`` (+5)
+      4. Movie + Animation → ``cinema_animation`` (+0)
+      5. Movie + comic/superhero keyword + action-ish genre → ``blockbuster`` (+3)
+      6. Movie + pre-1980 + (Drama OR Romance OR War) → ``classic_film`` (+1)
+      7. Otherwise → ``default`` (+0)
 
-    Note: tv_animation comes BEFORE cinema_animation. A short Bluey
-    episode is animation but has Bluey-grade flat-shading; we want it
-    in the harsher tv_animation bucket regardless of whether TMDb
-    happens to mark Bluey as a movie or series.
+    Why genre over runtime for the animation split: pre-2026-05-06 the
+    rule was ``animation AND runtime < 25 → tv_animation``. Episodes of
+    a single show (Bad Batch) drifted across the 25-min threshold
+    naturally — S01E08 at 23 min landed tv_animation, S01E07 at 25 min
+    landed default. Same show, two grades. Per-file ``duration_seconds``
+    is unreliable when TMDb's ``episode_run_time`` is None. Genre is a
+    show-level signal that doesn't drift across episodes.
+
+    Animation grades come BEFORE sitcom. Bob's Burgers is animated AND
+    comedy; we want it in tv_animation (+3) not sitcom (+5) because
+    the animated frame structure dominates the compression budget.
 
     Blockbuster goes BEFORE classic_film so e.g. Superman (1978) lands
     in the VFX-heavy bucket rather than getting the gentler classic
-    treatment — pre-1980 superhero films still encode like spectacle.
-    Animated superhero films (Spider-Verse, Big Hero 6) stay in
-    cinema_animation because the animated frame structure dominates the
-    compression budget.
+    treatment. Animated superhero films (Spider-Verse, Big Hero 6)
+    stay in cinema_animation because the animated frame structure
+    dominates the compression budget.
     """
     library_type = (entry.get("library_type") or "").lower()
     is_series = library_type in ("series", "show", "tv", "anime")
@@ -196,12 +219,29 @@ def derive_grade(entry: dict) -> str:
     runtime = _entry_runtime_min(entry)
     year = _entry_year(entry)
 
-    # 1. TV Animation — animation grade dominates because flat-shading is the
-    #    bigger compression signal than the sitcom format. Bob's Burgers is
-    #    animated AND a sitcom; we want it in tv_animation (+3) not sitcom (+5)
-    #    because the animated frame structure compresses better than its
-    #    static-camera-but-photographic talking-head cousins.
-    if is_series and "animation" in genres and runtime is not None and runtime < 25:
+    # Action-tier animation marker. TMDb's TV genre tag is "Action &
+    # Adventure" as a single concatenated string (different from movies,
+    # which split them). Match on substring so "action & adventure" hits
+    # without false-positiving on standalone "comedy" / "family" / etc.
+    is_action_animation = bool(
+        is_series
+        and "animation" in genres
+        and any("action" in g or "adventure" in g for g in genres)
+    )
+
+    # 1. TV Animation Long — 3D CGI action animation (Bad Batch, Clone Wars,
+    #    ATLA, anime-action). Genre signal is more reliable than runtime
+    #    because per-episode duration drift across the 25-min boundary used
+    #    to flip individual episodes between tv_animation and default within
+    #    the same show.
+    if is_action_animation:
+        return GRADE_TV_ANIMATION_LONG
+
+    # 2. TV Animation — flat-shaded comedy animation (Bluey, Bob's Burgers,
+    #    Family Guy). Sits BEFORE sitcom precedence — flat-shading dominates
+    #    the compression budget over the talking-head sitcom signal, so
+    #    Bob's Burgers gets +3 (tv_animation) not +5 (sitcom).
+    if is_series and "animation" in genres:
         return GRADE_TV_ANIMATION
 
     # 2. Sitcom (live-action talking-head)
