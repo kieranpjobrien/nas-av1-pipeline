@@ -192,15 +192,38 @@ export function Library({ data, pipelineData, onFileOpen, drillKey, onClearDrill
   // bar at the bottom appears whenever this is non-empty and offers
   // "Queue N for re-encode" + "Clear selection".
   const [selectedPaths, setSelectedPaths] = useState(() => new Set());
+  // Anchor for shift-click range selection — the last path the user
+  // clicked the checkbox of (without shift). A subsequent shift-click
+  // selects every visible row from anchor to that target inclusive.
+  const [selectionAnchor, setSelectionAnchor] = useState(null);
   const pipelineFiles = pipelineData?.files || {};
 
-  const toggleSelect = (path) => {
+  const toggleSelect = (path, opts) => {
+    const shift = opts && opts.shift;
     setSelectedPaths((prev) => {
       const next = new Set(prev);
+      if (shift && selectionAnchor && opts && Array.isArray(opts.visibleRows)) {
+        // Shift-click range select. Find anchor + target indices in the
+        // currently-visible rows, then add every row between them
+        // (inclusive). Mirrors GitHub / Gmail behaviour.
+        const visible = opts.visibleRows;
+        const anchorIdx = visible.findIndex((f) => f.filepath === selectionAnchor);
+        const targetIdx = visible.findIndex((f) => f.filepath === path);
+        if (anchorIdx >= 0 && targetIdx >= 0) {
+          const [lo, hi] = anchorIdx < targetIdx ? [anchorIdx, targetIdx] : [targetIdx, anchorIdx];
+          for (let i = lo; i <= hi; i++) {
+            const fp = visible[i].filepath;
+            if (fp) next.add(fp);
+          }
+          return next;
+        }
+        // Fallback if either index is missing — just toggle the single row.
+      }
       if (next.has(path)) next.delete(path);
       else next.add(path);
       return next;
     });
+    if (!shift) setSelectionAnchor(path);
   };
   const clearSelection = () => setSelectedPaths(new Set());
   const selectAllVisible = (rows) => {
@@ -251,11 +274,26 @@ export function Library({ data, pipelineData, onFileOpen, drillKey, onClearDrill
 
   const rows = useMemo(() => {
     const source = drillKey === "grade_optimal" ? annotatedAll : all;
+    // Pipeline statuses that mean "already being handled" — exclude from
+    // the grade-optimal drill so the user doesn't see the same files
+    // listed after they queue them. Anything pending/processing/in-flight
+    // will end up at the new grade target after its encode completes,
+    // so showing it as "needs work" is just stale-state noise.
+    const inFlightStatuses = new Set([
+      "pending", "processing", "encoding", "fetching",
+      "uploading", "qualifying", "queued",
+    ]);
     const filtered = source.filter((f) => {
       // Drill-in filter takes precedence and stacks with the rest.
       if (drillFn && !drillFn(f)) return false;
       // Sub-bucket filter inside the grade_optimal drill.
       if (drillKey === "grade_optimal" && cqBucket && f.cq_audit_bucket !== cqBucket) return false;
+      // Hide already-queued files from the grade-optimal drill — they'll
+      // re-encode under the current grade rule, no further user action needed.
+      if (drillKey === "grade_optimal") {
+        const st = (pipelineFiles[f.filepath]?.status || "").toLowerCase();
+        if (inFlightStatuses.has(st)) return false;
+      }
       if (query && !`${f.filename} ${f.filepath}`.toLowerCase().includes(query.toLowerCase())) return false;
       if (filters.codec && codecKey(f.codec) !== filters.codec) return false;
       if (filters.res && resKey(f.res) !== filters.res) return false;
@@ -689,7 +727,12 @@ export function Library({ data, pipelineData, onFileOpen, drillKey, onClearDrill
                   f={f}
                   selected={sel === f}
                   picked={selectedPaths.has(f.filepath)}
-                  onPick={() => toggleSelect(f.filepath)}
+                  onPick={(e) =>
+                    toggleSelect(f.filepath, {
+                      shift: e?.shiftKey,
+                      visibleRows: slice,
+                    })
+                  }
                   onClick={() => setSelIdx(i)}
                   onDoubleClick={() => onFileOpen?.(f.filepath)}
                   pipelineInfo={pipelineFiles[f.filepath]}
@@ -732,7 +775,12 @@ export function Library({ data, pipelineData, onFileOpen, drillKey, onClearDrill
                       f={f}
                       selected={sel === f}
                       picked={selectedPaths.has(f.filepath)}
-                      onPick={() => toggleSelect(f.filepath)}
+                      onPick={(e) =>
+                        toggleSelect(f.filepath, {
+                          shift: e?.shiftKey,
+                          visibleRows: slice,
+                        })
+                      }
                       onClick={() => setSelIdx(absIdx)}
                       onDoubleClick={() => onFileOpen?.(f.filepath)}
                       pipelineInfo={pipelineFiles[f.filepath]}
@@ -830,9 +878,13 @@ function FileRow({ f, selected, picked, onPick, onClick, onDoubleClick, pipeline
         <input
           type="checkbox"
           checked={!!picked}
-          onChange={onPick}
+          onClick={(e) => onPick?.(e)}
+          // onChange is required for React to consider it a controlled checkbox,
+          // but the click handler above is what actually fires (with shiftKey).
+          // Suppress onChange noop warning by providing an empty handler.
+          onChange={() => {}}
           style={{ cursor: "pointer" }}
-          title="Select for bulk action"
+          title="Select for bulk action — shift-click to range-select"
         />
       </div>
       <div className="ft-name">
