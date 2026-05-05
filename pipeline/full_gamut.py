@@ -1579,7 +1579,33 @@ def _run_encode(
                 encoding="utf-8",
                 errors="replace",
             )
-            stderr = _stream_encode_progress(process, state, filepath, duration_secs)
+
+            # Output-growth watchdog. Kills ffmpeg if the staging output
+            # file stops growing for more than the configured stall window.
+            # Catches the hang class that the existing wall-clock deadline
+            # misses: the deadline check runs INSIDE the stdout-readline
+            # loop, so a process that emits no -progress lines (because it's
+            # stuck in container parsing or similar) blocks the loop on
+            # readline() forever and never reaches the deadline check.
+            #
+            # Triggered the 2026-05-05 incident: Any Given Sunday's corrupt
+            # EBML container caused ffmpeg to spin in error-recovery,
+            # producing no progress lines and growing the output file by 0
+            # bytes for 7.5 hours before the user noticed.
+            import threading
+            stall_secs = float(config.get("encode_output_stall_secs", 180.0))
+            output_growth_stop = threading.Event()
+            output_growth_thread = threading.Thread(
+                target=_output_growth_watchdog,
+                args=(process, output_path, output_growth_stop, stall_secs),
+                daemon=True,
+            )
+            output_growth_thread.start()
+            try:
+                stderr = _stream_encode_progress(process, state, filepath, duration_secs)
+            finally:
+                output_growth_stop.set()
+                output_growth_thread.join(timeout=5)
 
             if process.returncode == 0:
                 if not os.path.exists(output_path):
@@ -1644,6 +1670,65 @@ def _run_encode(
 
     state.set_file(filepath, FileStatus.ERROR, error="encode failed after retries", stage="encoding")
     return False
+
+
+def _output_growth_watchdog(
+    process,
+    output_path: str,
+    stop_event,
+    stall_secs: float = 180.0,
+    poll_secs: float = 30.0,
+) -> None:
+    """Kill ``process`` if ``output_path`` stops growing for ``stall_secs``.
+
+    Runs as a daemon thread alongside the stdout-progress reader. The
+    progress reader watches what ffmpeg *says* it's doing (frame=, fps=,
+    speed= lines on stdout); this watchdog watches what's actually
+    landing on disk. The two together catch:
+
+      * ffmpeg silent on stdout but writing output → progress reader
+        misses the activity, watchdog sees the output growing, no kill
+      * ffmpeg emitting progress lines but writing 0 bytes → progress
+        reader sees the activity, watchdog sees the stall, kills
+
+    The 2026-05-05 incident motivated the latter case: AGS's corrupt
+    EBML container made ffmpeg spin in error-recovery for 7.5 hours
+    while still emitting some progress noise. Output file grew by 0
+    bytes the whole time. Existing wall-clock deadline didn't fire
+    because the readline-blocked loop never reached the time-check.
+
+    The watchdog tolerates the early phase where ``output_path``
+    doesn't exist yet — first-frame latency on a healthy encode is
+    seconds not minutes, so a 180s default still has plenty of headroom.
+
+    Stops cleanly when ``stop_event`` is set OR when the process exits
+    on its own.
+    """
+    last_size = -1
+    last_growth = time.time()
+    while not stop_event.wait(timeout=poll_secs):
+        if process.poll() is not None:
+            return  # ffmpeg exited on its own — nothing to watch
+        try:
+            cur_size = os.path.getsize(output_path)
+        except OSError:
+            cur_size = 0
+        if cur_size > last_size:
+            last_size = cur_size
+            last_growth = time.time()
+            continue
+        stall = time.time() - last_growth
+        if stall >= stall_secs:
+            logging.error(
+                f"  Output {os.path.basename(output_path)} hasn't grown in "
+                f"{int(stall)}s ({cur_size / 1e6:.1f} MB total) — killing "
+                f"ffmpeg as hung"
+            )
+            try:
+                process.kill()
+            except Exception as e:  # noqa: BLE001
+                logging.warning(f"  Watchdog kill failed: {e!r}")
+            return
 
 
 def _stream_encode_progress(process, state: PipelineState, filepath: str, duration_secs: float) -> str:
