@@ -164,6 +164,41 @@ def test_merge_xml_escapes_special_chars():
     assert "&lt;special&gt;" in xml
 
 
+def test_remux_fallback_refuses_to_replace_with_smaller_output(tmp_path):
+    """Pin the 2026-05-06 incident guard: when mkvmerge remux produces
+    an output substantially smaller than the source (the Million Dollar
+    Baby class — valid EBML header but 0 tracks → 4 KB stub), the
+    fallback must NOT atomically replace the original. The previous
+    version did, destroying the source file.
+    """
+    from unittest.mock import patch
+    from pipeline.mkv_tags import _try_remux_in_place
+
+    # Create a fake "source" file with 1 MB of bytes
+    src = tmp_path / "fake_source.mkv"
+    src.write_bytes(b"x" * (1024 * 1024))
+    src_size = src.stat().st_size
+
+    # Stub mkvmerge to return rc=0 and produce a tiny output (the Million
+    # Dollar Baby failure mode — header-only stub).
+    def fake_subprocess_run(cmd, **kwargs):
+        # cmd is [mkvmerge, '-o', tmp_out, src]
+        tmp_out = cmd[2]
+        # Write a 4 KB stub
+        with open(tmp_out, "wb") as f:
+            f.write(b"\x1a\x45\xdf\xa3" + b"x" * 4288)
+        from subprocess import CompletedProcess
+        return CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    with patch("subprocess.run", side_effect=fake_subprocess_run):
+        ok = _try_remux_in_place(str(src))
+
+    assert ok is False, "remux must refuse to replace when output is suspiciously small"
+    # Source must be UNTOUCHED
+    assert src.exists()
+    assert src.stat().st_size == src_size, "source file must not have been replaced"
+
+
 def test_grade_review_writer_owns_only_review_tags():
     """End-to-end: set_grade_review writes its tags + preserves whatever
     else is in the block. Mocked at the I/O layer."""

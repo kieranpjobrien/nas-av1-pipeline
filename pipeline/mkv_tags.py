@@ -257,7 +257,76 @@ def _try_remux_in_place(filepath: str, *, timeout: int = 600) -> bool:
             pass
         return False
 
-    # Atomic replace. On Windows os.replace overwrites the target.
+    # === SAFETY GUARDS before atomic replace ===
+    # The 2026-05-06 incident: Million Dollar Baby had a valid EBML header
+    # but ZERO tracks (some pre-existing structural issue). mkvmerge
+    # happily produced a 4 KB header-only stub and rc=0; my naive
+    # os.replace wiped a 3 GB source file with the stub. NEVER AGAIN.
+    #
+    # Three checks, ALL must pass before we replace:
+    #   1. Output size is at least 50% of source (mkvmerge stream-copy
+    #      overhead is well under that on real content)
+    #   2. mkvmerge --identify on the output reports >=1 track
+    #   3. Track count matches the source's track count exactly (no
+    #      silent track loss)
+    try:
+        src_size = os.path.getsize(filepath)
+        out_size = os.path.getsize(tmp_out)
+    except OSError:
+        src_size = out_size = 0
+
+    if src_size > 0 and out_size < src_size * 0.5:
+        logging.error(
+            f"  remux output suspiciously small "
+            f"({out_size:,} B vs source {src_size:,} B) — REFUSING to replace, "
+            f"file would have been destroyed"
+        )
+        try:
+            os.remove(tmp_out)
+        except OSError:
+            pass
+        return False
+
+    # Probe both files for track count
+    def _track_count(path: str) -> int:
+        try:
+            r = _subprocess.run(
+                [mkvm, "--identification-format", "json", "--identify", path],
+                capture_output=True, text=True, timeout=60,
+                encoding="utf-8", errors="replace",
+            )
+            if r.returncode != 0:
+                return -1
+            import json as _json
+            data = _json.loads(r.stdout or "{}")
+            return len(data.get("tracks") or [])
+        except Exception:
+            return -1
+
+    src_tracks = _track_count(filepath)
+    out_tracks = _track_count(tmp_out)
+    if out_tracks < 1:
+        logging.error(
+            f"  remux output has 0 tracks — REFUSING to replace, "
+            f"file would have been destroyed (source had {src_tracks} tracks)"
+        )
+        try:
+            os.remove(tmp_out)
+        except OSError:
+            pass
+        return False
+    if src_tracks > 0 and out_tracks != src_tracks:
+        logging.error(
+            f"  remux track-count mismatch: source {src_tracks}, output {out_tracks} — "
+            f"REFUSING to replace, would lose {src_tracks - out_tracks} track(s)"
+        )
+        try:
+            os.remove(tmp_out)
+        except OSError:
+            pass
+        return False
+
+    # Guards passed. Atomic replace.
     try:
         os.replace(tmp_out, filepath)
     except OSError as e:
@@ -268,7 +337,10 @@ def _try_remux_in_place(filepath: str, *, timeout: int = 600) -> bool:
             pass
         return False
 
-    logging.info(f"  Remuxed {os.path.basename(filepath)} via mkvmerge — container structure repaired")
+    logging.info(
+        f"  Remuxed {os.path.basename(filepath)} via mkvmerge — "
+        f"container structure repaired ({out_tracks} tracks, {out_size:,} B)"
+    )
     return True
 
 
