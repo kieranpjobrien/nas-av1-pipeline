@@ -162,6 +162,116 @@ def _build_tag_xml(tags: list[dict]) -> str:
     return "\n".join(parts)
 
 
+def _parse_mkvpropedit_error(raw: str) -> str:
+    """Pick the actual ``Error:`` line out of mkvpropedit's verbose output.
+
+    Output usually looks like:
+        "The file is being analyzed.\\n"
+        "Error: Modification of properties in the section ...\\n"
+    The progress-line-as-error parsing trap meant earlier toasts said
+    "Cannot write tag: The file is being analyzed." which was useless.
+    """
+    err = ""
+    for line in (raw or "").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("Error:"):
+            err = stripped[len("Error:"):].strip()
+            break
+    if not err:
+        lines = [ln.strip() for ln in (raw or "").splitlines() if ln.strip()]
+        err = lines[-1] if lines else ""
+    return err[:300]
+
+
+# Errors that mean the file's structure is broken in a way mkvpropedit
+# can't navigate, but mkvmerge CAN read + remux into a clean structure.
+# When we hit one of these on a tag write, retry after a stream-copy
+# remux. The remuxed file replaces the original (atomic rename) so
+# subsequent operations see the cleaned structure.
+_REMUX_RECOVERABLE_PATTERNS = (
+    "no corresponding level 1 element was found",
+    "the file has not been modified",
+    "could not find a valid",  # mkvpropedit "could not find a valid Tracks element"
+)
+
+
+def _try_remux_in_place(filepath: str, *, timeout: int = 600) -> bool:
+    """Stream-copy ``filepath`` through mkvmerge to repair its container.
+
+    Used as a recovery step when mkvpropedit can't navigate the file's
+    EBML structure to write tags. mkvmerge is more tolerant of malformed
+    containers than mkvpropedit — it can read a file with damaged
+    SeekHead / Cues / etc. and write out a clean copy.
+
+    Replaces the original via ``os.replace`` only on mkvmerge rc 0/1
+    (1 = warnings but output usable). Source file untouched on hard
+    failure (rc >= 2) — caller falls through to the original tag-write
+    error.
+
+    Returns True if the remux landed and the original was replaced.
+    """
+    import shutil as _shutil  # noqa: PLC0415
+    import subprocess as _subprocess  # noqa: PLC0415
+
+    mkvm = _shutil.which("mkvmerge")
+    if not mkvm:
+        for candidate in (
+            r"C:\Program Files\MKVToolNix\mkvmerge.exe",
+            r"C:\Program Files (x86)\MKVToolNix\mkvmerge.exe",
+        ):
+            if os.path.isfile(candidate):
+                mkvm = candidate
+                break
+    if not mkvm:
+        return False
+
+    tmp_out = filepath + ".remux_tmp.mkv"
+    if os.path.exists(tmp_out):
+        try:
+            os.remove(tmp_out)
+        except OSError:
+            return False
+    try:
+        result = _subprocess.run(
+            [mkvm, "-o", tmp_out, filepath],
+            capture_output=True, text=True, timeout=timeout,
+            encoding="utf-8", errors="replace",
+        )
+    except (OSError, _subprocess.TimeoutExpired) as e:
+        logging.warning(f"  remux subprocess error on {os.path.basename(filepath)}: {e!r}")
+        try:
+            os.remove(tmp_out)
+        except OSError:
+            pass
+        return False
+
+    # rc 0 = success, rc 1 = warnings (output still usable), rc >=2 = fail.
+    if result.returncode >= 2 or not os.path.exists(tmp_out):
+        logging.warning(
+            f"  remux failed for {os.path.basename(filepath)}: "
+            f"rc={result.returncode} {_parse_mkvpropedit_error(result.stdout)}"
+        )
+        try:
+            os.remove(tmp_out)
+        except OSError:
+            pass
+        return False
+
+    # Atomic replace. On Windows os.replace overwrites the target.
+    try:
+        os.replace(tmp_out, filepath)
+    except OSError as e:
+        logging.warning(f"  remux replace failed: {e!r}")
+        try:
+            os.remove(tmp_out)
+        except OSError:
+            pass
+        return False
+
+    logging.info(f"  Remuxed {os.path.basename(filepath)} via mkvmerge — container structure repaired")
+    return True
+
+
 def _write_tag_xml(filepath: str, xml_body: str, *, timeout: int = 60) -> bool:
     """Write tag XML via mkvpropedit.
 
@@ -170,56 +280,67 @@ def _write_tag_xml(filepath: str, xml_body: str, *, timeout: int = 60) -> bool:
     callers can surface a precise reason — generic "mkvpropedit failed"
     is useless when the underlying problem is "file no longer exists"
     or "not a valid Matroska file".
+
+    On structural-mismatch errors (the 2026-05-06 "no corresponding level 1
+    element was found" class) the function attempts to repair the file by
+    remuxing it through mkvmerge — which is more tolerant of malformed
+    EBML than mkvpropedit — and retries the write once. Files that fail
+    on a fundamentally-corrupt source (Paths of Glory class) still error
+    out cleanly because mkvmerge also bails on those.
     """
     from pipeline import local_mux  # noqa: PLC0415
 
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".xml", delete=False, encoding="utf-8"
-    ) as f:
-        f.write(xml_body)
-        xml_path = f.name
-    try:
-        result = local_mux.local_mkvpropedit(
-            filepath, ["--tags", f"global:{xml_path}"], timeout=timeout
-        )
-        if result.returncode >= 2:
-            # mkvpropedit puts hard errors on stdout; stderr is usually empty.
-            # Output looks like:
-            #   "The file is being analyzed.\n"
-            #   "Error: Modification of properties in the section ...\n"
-            # — pick the line that starts with "Error:" rather than the
-            # first line (which is just analysis progress and hides the
-            # real reason behind a misleading "The file is being analyzed.").
-            raw = ((result.stdout or result.stderr) or "")
-            err = ""
-            for line in raw.splitlines():
-                stripped = line.strip()
-                if stripped.startswith("Error:"):
-                    err = stripped[len("Error:"):].strip()
-                    break
-            if not err:
-                # No "Error:" prefix found — fall back to the last non-empty
-                # line, which is closer to the real cause than the first.
-                lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
-                err = lines[-1] if lines else ""
-            err = err[:300]
-            logging.warning(
-                "  mkvpropedit rc=%s on %s: %s",
-                result.returncode,
-                os.path.basename(filepath),
-                err,
-            )
-            raise MkvTagWriteError(
-                err or f"mkvpropedit returned rc={result.returncode}",
-                returncode=result.returncode,
-                filepath=filepath,
-            )
-        return True
-    finally:
+    def _attempt_write() -> tuple[int, str]:
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".xml", delete=False, encoding="utf-8"
+        ) as f:
+            f.write(xml_body)
+            xml_path = f.name
         try:
-            os.remove(xml_path)
-        except OSError:
-            pass
+            result = local_mux.local_mkvpropedit(
+                filepath, ["--tags", f"global:{xml_path}"], timeout=timeout
+            )
+            return result.returncode, ((result.stdout or result.stderr) or "")
+        finally:
+            try:
+                os.remove(xml_path)
+            except OSError:
+                pass
+
+    rc, raw = _attempt_write()
+    if rc < 2:
+        return True
+
+    err = _parse_mkvpropedit_error(raw)
+    err_low = err.lower()
+    is_structural = any(p in err_low for p in _REMUX_RECOVERABLE_PATTERNS)
+
+    if is_structural:
+        logging.info(
+            f"  mkvpropedit hit structural error on {os.path.basename(filepath)} "
+            f"({err[:80]}) — attempting mkvmerge remux + retry"
+        )
+        if _try_remux_in_place(filepath):
+            rc2, raw2 = _attempt_write()
+            if rc2 < 2:
+                return True
+            # Remux succeeded but tag write still fails — log both
+            err2 = _parse_mkvpropedit_error(raw2)
+            logging.warning(
+                f"  Tag write still failed after remux on {os.path.basename(filepath)}: {err2[:120]}"
+            )
+            err = err2
+            rc = rc2
+
+    logging.warning(
+        "  mkvpropedit rc=%s on %s: %s",
+        rc, os.path.basename(filepath), err,
+    )
+    raise MkvTagWriteError(
+        err or f"mkvpropedit returned rc={rc}",
+        returncode=rc,
+        filepath=filepath,
+    )
 
 
 def merge_global_tags(

@@ -211,6 +211,9 @@ class AudioStream:
 
     Codec is normalised (e.g. ``eac3`` not ``e-ac-3``).
     Language is lowercase; ``""`` or ``und`` for unknown.
+    Title is the raw track-name string from the source MKV — used by
+    the strip selector to detect commentary tracks ("Director's
+    commentary", "Cast commentary", "Isolated music score", etc.).
     """
 
     index: int
@@ -221,6 +224,7 @@ class AudioStream:
     bitrate_kbps: int | None
     lossless: bool
     detected_language: str | None
+    title: str = ""
 
 
 @dataclass
@@ -272,6 +276,13 @@ def parse_audio_stream(raw: dict[str, Any], index: int = 0) -> AudioStream:
     if not lossless:
         lossless = codec in _LOSSLESS_CODECS or "hd ma" in profile or "hd-ma" in profile
 
+    # Title can be at the top level (media-report format) or under tags
+    # (raw ffprobe format).
+    title = raw.get("title")
+    if title is None:
+        title = (raw.get("tags") or {}).get("title")
+    title = (title or "").strip()
+
     return AudioStream(
         index=index,
         codec=codec,
@@ -281,6 +292,7 @@ def parse_audio_stream(raw: dict[str, Any], index: int = 0) -> AudioStream:
         bitrate_kbps=int(bitrate) if bitrate is not None else None,
         lossless=lossless,
         detected_language=raw.get("detected_language"),
+        title=title,
     )
 
 
@@ -446,6 +458,48 @@ def _lang_in_bucket(lang: str, target: str) -> bool:
     return False
 
 
+# Commentary / extras / featurette title keywords. Word-boundary regex —
+# matches "Commentary by ..." but NOT "Documentary about ...". The user's
+# library has 99 AV1 files with "commentary" in the track title plus a
+# long tail of unlabeled second tracks; this catches the explicit cases
+# without false-positiving on legitimate alt mixes.
+_COMMENTARY_TITLE_RE = re.compile(
+    r"\b("
+    r"commentary|"
+    r"director's?|"
+    r"writer's?|"
+    r"audio[\s-]?descri\w*|"        # "Audio description"
+    r"descript\w*[\s-]?service|"     # "Descriptive Audio Service"
+    r"isolated[\s-]?(score|music|dialog\w*)|"
+    r"making[\s-]?of|"
+    r"behind[\s-]?the[\s-]?scenes"
+    r")\b",
+    re.IGNORECASE,
+)
+
+# Lossless codecs that carry the full original mix. When a track in this
+# set is present alongside a lossy track of the SAME channel count + SAME
+# language, the lossy track is a compatibility fallback the source author
+# shipped for older decoders. Sonos Arc decodes TrueHD-Atmos natively,
+# so the lossy companion is dead weight for this user's setup.
+# User-approved 2026-05-06: "If we have Atmos/TrueHD we don't need EAC-3".
+_LOSSLESS_PRIMARY_CODECS = frozenset({"truehd", "dtshd_ma", "dts_hd_ma", "flac", "pcm"})
+_LOSSY_DEDUP_CODECS = frozenset({"eac3", "ac3", "dts", "aac"})
+
+
+def _is_commentary(stream: AudioStream) -> bool:
+    """True if the audio track's title looks like commentary / extras.
+
+    Strict — only matches an EXPLICIT title. Untitled tracks are kept.
+    A track titled just "Commentary" hits; "Director's Cut" doesn't
+    (no commentary keyword); "Audio description" hits.
+    """
+    title = (stream.title or "").strip()
+    if not title:
+        return False
+    return bool(_COMMENTARY_TITLE_RE.search(title))
+
+
 def select_audio_keep_indices_by_original_language(
     streams: list[AudioStream],
     original_language: str | None,
@@ -460,15 +514,35 @@ def select_audio_keep_indices_by_original_language(
 
       * ``original_language is None`` (no TMDb data): return None — caller
         falls back to legacy KEEP_LANGS rule rather than guessing.
-      * Track language matches ``original_language`` bucket: KEEP.
-      * Track language matches English AND ``keep_english_too``: KEEP.
-      * Track language is ``und``/empty AND whisper hasn't resolved it:
-        KEEP (conservative — never strip what we can't identify).
+      * Track language matches ``original_language`` bucket: candidate KEEP.
+      * Track language matches English AND ``keep_english_too``: candidate KEEP.
+      * Track language is ``und`` / empty AND whisper hasn't resolved it:
+        defer entire strip decision for the file (inviolate rule).
       * Track language is a known foreign dub: STRIP.
+
+    On top of the language filter, two additional rules trim the
+    candidate set (added 2026-05-06 after the user's library audit
+    showed 820 multi-audio AV1 files bloating storage with commentaries
+    + lossy duplicates of lossless tracks):
+
+      1. **Strip explicit commentary / extras.** Tracks whose title
+         matches the commentary regex (commentary, director's,
+         isolated music score, audio description, etc.) get dropped.
+         Untitled tracks are kept — only explicit markers strip.
+
+      2. **Lossless wins over lossy of same channel count + language.**
+         When a TrueHD / DTS-HD MA / FLAC / PCM track is present, any
+         EAC-3 / AC-3 / DTS / AAC track of the same channel count in
+         the same language is dropped as a redundant fallback.
 
     Returns ``None`` when no stripping is needed (everything would be kept)
     so the caller can no-op the audio map. Returns ``[]`` only if the input
     list is empty.
+
+    Never returns an empty keep-set when the input was non-empty — that
+    would ship a zero-audio file, which is the 2026-04-23 incident class.
+    Falls back to ``None`` (no strip) if all rules conspire to remove
+    every track.
 
     The ``keep_english_too`` flag exists for users who want the original
     audio AND an English dub on top (convenience). Default False matches
@@ -481,14 +555,12 @@ def select_audio_keep_indices_by_original_language(
 
     # Inviolate rule (2026-04-29): "find the language of everything before
     # stripping it." If ANY track is unresolved (no tag, no whisper detection),
-    # defer the entire strip decision for this file. The previous behaviour
-    # KEPT und tracks but still stripped known-foreign tracks alongside —
-    # under the new rule, even known-foreign tracks survive until every
-    # track has been identified, so the user can review the file holistically.
+    # defer the entire strip decision for this file.
     if not all_languages_known(streams):
         return None
 
-    keep: set[int] = set()
+    # === Pass 1: language filter ===
+    candidates: list[AudioStream] = []
     for s in streams:
         # detected_language (whisper) takes precedence over the MKV tag
         # because we set it specifically when text metadata is unreliable.
@@ -497,18 +569,42 @@ def select_audio_keep_indices_by_original_language(
         effective = detected or tagged
 
         if _lang_in_bucket(effective, original_language):
-            keep.add(s.index)
+            candidates.append(s)
             continue
-
         if keep_english_too and _lang_in_bucket(effective, "en"):
-            keep.add(s.index)
+            candidates.append(s)
             continue
+        # Known foreign dub — strip (drop from candidates).
 
-        # Known foreign dub — strip.
+    # === Pass 2: commentary strip ===
+    candidates = [s for s in candidates if not _is_commentary(s)]
 
-    if len(keep) >= len(streams):
+    # === Pass 3: lossless wins over lossy of same channels + language ===
+    # Build {(channels, language) → True} for tracks where a lossless
+    # version is present. Any lossy track of matching key gets dropped.
+    lossless_keys: set[tuple[int, str]] = {
+        (s.channels, s.language)
+        for s in candidates
+        if s.codec in _LOSSLESS_PRIMARY_CODECS
+    }
+    final = [
+        s for s in candidates
+        if not (
+            s.codec in _LOSSY_DEDUP_CODECS
+            and (s.channels, s.language) in lossless_keys
+        )
+    ]
+
+    keep_indices = sorted({s.index for s in final})
+
+    # Safety: never return an empty keep-set when the input was non-empty.
+    # Falls through to None (no strip) so the encoder ships every track
+    # rather than producing a zero-audio output.
+    if not keep_indices:
+        return None
+    if len(keep_indices) >= len(streams):
         return None  # nothing to strip
-    return sorted(keep)
+    return keep_indices
 
 
 def select_sub_keep_indices(
