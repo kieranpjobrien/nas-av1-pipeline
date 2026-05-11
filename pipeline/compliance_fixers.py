@@ -150,6 +150,35 @@ def _mkvmerge_drop_streams(
             pass
         return False
 
+    # ---- PROOF-OF-WORK validation (2026-05-12) ------------------------
+    # Pre-fix the function returned True whenever mkvmerge produced a
+    # >=50%-size output, regardless of whether the drop actually happened.
+    # The track-ID translation bug (per-type vs global) meant mkvmerge
+    # happily produced a 95%-of-source output with the WRONG tracks
+    # kept — same filter syntax, same exit code 0, same caller-visible
+    # success. Compliance gate then re-probed, saw the same violations,
+    # REFUSE. Loop. The fixer is the contract; if it can't verify the
+    # drop, it MUST return False so the breaker eventually catches it
+    # rather than the cohort silently expanding.
+    out_probe = _probe_full(tmp_out)
+    n_out_audio = len(out_probe.get("audio") or [])
+    n_out_sub = len(out_probe.get("subs") or [])
+    expected_audio = n_audio - (len(drop_audio_indices) if drop_audio_indices else 0)
+    expected_sub = n_sub - (len(drop_sub_indices) if drop_sub_indices else 0)
+    if n_out_audio != expected_audio or n_out_sub != expected_sub:
+        logging.error(
+            f"compliance fix track-count mismatch: expected "
+            f"audio={expected_audio} sub={expected_sub}, "
+            f"got audio={n_out_audio} sub={n_out_sub} — mkvmerge did "
+            f"NOT drop the requested tracks. Refusing to replace. "
+            f"cmd was: {' '.join(cmd[:8])}..."
+        )
+        try:
+            os.remove(tmp_out)
+        except OSError:
+            pass
+        return False
+
     # Atomic replace.
     os.replace(tmp_out, src)
     return True
