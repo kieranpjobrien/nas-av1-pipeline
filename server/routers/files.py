@@ -132,10 +132,11 @@ def grade_accept(req: DeleteFileRequest) -> dict:
     too_high files where the user has manually verified the visible quality
     is fine and they don't want a re-download.
 
-    Also patches ``audit_cq.json`` in-place so the dashboard reflects the
-    change without waiting for a full audit re-run.
+    Also patches the per-file ``audit`` field in ``media_report.json`` in
+    place so the dashboard reflects the change without waiting for a full
+    audit re-run. 2026-05-11: audit lives in media_report now, not a sidecar.
     """
-    from paths import NAS_MOVIES, NAS_SERIES, STAGING_DIR
+    from paths import NAS_MOVIES, NAS_SERIES
     from pipeline.grade_review import set_grade_review
     from pipeline.mkv_tags import MkvTagWriteError
 
@@ -154,10 +155,7 @@ def grade_accept(req: DeleteFileRequest) -> dict:
         # "permission denied", etc.) so the toast is useful instead of generic.
         raise HTTPException(422, f"Cannot write tag: {e}") from e
 
-    # Patch the audit sidecar in place so the user sees the result before
-    # the next full audit. The audit reader walks 6,000 files; we don't want
-    # to make the user wait or trigger a re-audit on every accept click.
-    patched = _patch_audit_sidecar(STAGING_DIR / "audit_cq.json", req.path, "optimal", "accepted")
+    patched = _patch_audit_in_report(req.path, "optimal", "accepted")
     return {"ok": True, "filepath": req.path, "review_status": "accepted", "audit_patched": patched}
 
 
@@ -166,10 +164,10 @@ def grade_clear(req: DeleteFileRequest) -> dict:
     """Remove ``GRADE_REVIEW`` and ``GRADE_REVIEW_AT`` from the MKV.
 
     Use this if a prior accept was wrong — the file goes back through the
-    normal CQ-vs-target comparison on the next audit. Sidecar patch
+    normal CQ-vs-target comparison on the next audit. In-place patch
     re-bins the file by re-running the comparison against its stamped CQ.
     """
-    from paths import NAS_MOVIES, NAS_SERIES, STAGING_DIR
+    from paths import NAS_MOVIES, NAS_SERIES
     from pipeline.grade_review import clear_grade_review
     from pipeline.mkv_tags import MkvTagWriteError
 
@@ -186,76 +184,75 @@ def grade_clear(req: DeleteFileRequest) -> dict:
     except MkvTagWriteError as e:
         raise HTTPException(422, f"Cannot clear tag: {e}") from e
 
-    # Re-derive the bucket from the stamped CQ so the sidecar is consistent.
-    new_bucket = _rebucket_from_sidecar(STAGING_DIR / "audit_cq.json", req.path)
-    patched = _patch_audit_sidecar(STAGING_DIR / "audit_cq.json", req.path, new_bucket, None)
+    new_bucket = _rebucket_from_report(req.path)
+    patched = _patch_audit_in_report(req.path, new_bucket, None)
     return {"ok": True, "filepath": req.path, "review_status": None, "bucket": new_bucket, "audit_patched": patched}
 
 
-def _rebucket_from_sidecar(sidecar_path, filepath: str) -> str:
-    """Read the file's current_cq + target_cq from the sidecar and re-derive
-    its natural bucket (ignoring any review override). Used by grade-clear.
+def _rebucket_from_report(filepath: str) -> str:
+    """Read the file's current_cq + target_cq from media_report.json's
+    per-file ``audit`` field and re-derive its natural bucket (ignoring
+    any review override). Used by grade-clear after the user retracts an
+    earlier "accept this too-high file" decision.
     """
-    import json
+    from tools.report_lock import read_report
 
     try:
-        with open(sidecar_path, encoding="utf-8") as f:
-            audit = json.load(f)
-    except (OSError, json.JSONDecodeError):
+        rep = read_report()
+    except Exception:
         return "unknown"
-    for r in audit.get("results", []):
-        if r.get("filepath") == filepath:
-            cur, tgt = r.get("current_cq"), r.get("target_cq")
-            if cur is None:
-                return "unknown"
-            if cur == tgt:
-                return "optimal"
-            return "too_low" if cur < tgt else "too_high"
+    for f in rep.get("files", []):
+        if f.get("filepath") != filepath:
+            continue
+        a = f.get("audit") or {}
+        cur, tgt = a.get("current_cq"), a.get("target_cq")
+        if cur is None:
+            return "unknown"
+        if cur == tgt:
+            return "optimal"
+        return "too_low" if cur < tgt else "too_high"
     return "unknown"
 
 
-def _patch_audit_sidecar(sidecar_path, filepath: str, new_bucket: str, review_status: str | None) -> bool:
-    """Update the per-file row + bucket counts in audit_cq.json in place.
-
-    Returns True if a row was patched, False if the file isn't in the audit
-    yet (in which case the next full audit will pick it up — not an error).
+def _patch_audit_in_report(filepath: str, new_bucket: str, review_status: str | None) -> bool:
+    """Update the per-file ``audit`` blob + the top-level ``audit_summary``
+    bucket counts in media_report.json. Single-source-of-truth replacement
+    for the old audit_cq.json sidecar patch (2026-05-11 — see commit log
+    for why the sidecar was killed). Returns True if a row was patched,
+    False if the file isn't in the audit yet (next full audit picks it up).
     """
-    import json
+    from tools.report_lock import patch_report
+
+    flag = {"patched": False}
+
+    def _fn(rep: dict) -> None:
+        for f in rep.get("files", []):
+            if f.get("filepath") != filepath:
+                continue
+            audit_blob = f.get("audit")
+            if audit_blob is None:
+                # Not in the audit yet — let the next full audit run pick it up.
+                return
+            old_bucket = audit_blob.get("bucket")
+            if old_bucket == new_bucket and audit_blob.get("review_status") == review_status:
+                flag["patched"] = True  # already in the desired state
+                return
+            audit_blob["bucket"] = new_bucket
+            audit_blob["review_status"] = review_status
+            # Adjust top-level bucket counts so the hero stats match.
+            summary = rep.setdefault("audit_summary", {})
+            buckets = summary.setdefault("buckets", {})
+            if old_bucket and buckets.get(old_bucket, 0) > 0:
+                buckets[old_bucket] = buckets[old_bucket] - 1
+            buckets[new_bucket] = buckets.get(new_bucket, 0) + 1
+            flag["patched"] = True
+            return
 
     try:
-        with open(sidecar_path, encoding="utf-8") as f:
-            audit = json.load(f)
-    except (OSError, json.JSONDecodeError):
+        patch_report(_fn)
+    except Exception:
         return False
-
-    results = audit.get("results", [])
-    target_row = None
-    for r in results:
-        if r.get("filepath") == filepath:
-            target_row = r
-            break
-    if target_row is None:
-        return False
-
-    old_bucket = target_row.get("bucket")
-    if old_bucket == new_bucket and target_row.get("review_status") == review_status:
-        return True  # already in the desired state
-
-    target_row["bucket"] = new_bucket
-    target_row["review_status"] = review_status
-
-    # Adjust the bucket counts so the hero stat on the dashboard matches.
-    buckets = audit.setdefault("buckets", {})
-    if old_bucket and old_bucket in buckets and buckets[old_bucket] > 0:
-        buckets[old_bucket] = buckets[old_bucket] - 1
-    buckets[new_bucket] = buckets.get(new_bucket, 0) + 1
-
-    try:
-        with open(sidecar_path, "w", encoding="utf-8") as f:
-            json.dump(audit, f, indent=2)
-    except OSError:
-        return False
-    return True
+    return flag["patched"]
 
 
 @router.post("/api/file/cq-override")
@@ -345,6 +342,13 @@ def file_requeue(req: dict) -> dict:
         raise HTTPException(404, "File no longer exists on disk")
 
     reason = (req.get("reason") or "manual requeue from dashboard")[:200]
+    # Allow the user to override the circuit breaker. Without this flag we
+    # refuse to revive a ``flagged_corrupt`` row — that's the bug that let
+    # Ford v Ferrari run for 10 attempts (the breaker kept transitioning
+    # the row to flagged_corrupt and the unguarded requeue button kept
+    # flipping it back to pending). The user has to consciously opt in by
+    # passing ``{"force_flagged": true}`` after re-acquiring the source.
+    force_flagged = bool(req.get("force_flagged") or False)
 
     try:
         con = _sqlite3.connect(str(PIPELINE_STATE_DB))
@@ -354,10 +358,13 @@ def file_requeue(req: dict) -> dict:
         ).fetchone()
         if row is None:
             # File was never in the queue — insert a pending row so it gets picked up.
+            # Stamp force_reencode so the orchestrator re-encodes even if the file
+            # is already AV1 (categorise_entry would otherwise route it to
+            # gap_filler/skip and the user's queue action would be a no-op).
             cur.execute(
                 "INSERT INTO pipeline_files (filepath, status, extras, reason) "
-                "VALUES (?, 'pending', '{}', ?)",
-                (path, reason),
+                "VALUES (?, 'pending', ?, ?)",
+                (path, _json.dumps({"force_reencode": True}), reason),
             )
             new_status = "pending"
         else:
@@ -369,13 +376,28 @@ def file_requeue(req: dict) -> dict:
                 raise HTTPException(
                     409, f"File is currently {cur_status}; wait for it to finish or fail."
                 )
+            # Circuit-breaker guard — refuse to revive a flagged_corrupt row
+            # without explicit force. The breaker exists to halt a loop; if
+            # the dashboard can silently undo it the breaker is a fiction.
+            if cur_status == "flagged_corrupt" and not force_flagged:
+                con.close()
+                raise HTTPException(
+                    409,
+                    "File is flagged_corrupt (circuit breaker hit). "
+                    "Re-acquire the source and pass force_flagged=true to retry.",
+                )
             # Preserve any extras (encode_params_used, detected_audio, ...) so
-            # the next encode reuses them. We just clear stage/error so the
-            # row looks "fresh" to the orchestrator.
+            # the next encode reuses them. Add force_reencode=true on top so
+            # categorise_entry routes AV1 files to full_gamut instead of skip.
+            try:
+                extras = _json.loads(row[1] or "{}")
+            except (TypeError, ValueError, _json.JSONDecodeError):
+                extras = {}
+            extras["force_reencode"] = True
             cur.execute(
                 "UPDATE pipeline_files SET status='pending', stage=NULL, error=NULL, "
-                "reason=? WHERE filepath = ?",
-                (reason, path),
+                "reason=?, extras=? WHERE filepath = ?",
+                (reason, _json.dumps(extras), path),
             )
             new_status = "pending (was " + cur_status + ")"
         con.commit()
@@ -397,6 +419,7 @@ def files_requeue_batch(req: dict) -> dict:
     doesn't abort the whole batch. Returns a summary with ok/failed
     counts and per-path detail for the failures.
     """
+    import json as _json
     import sqlite3 as _sqlite3
 
     from paths import NAS_MOVIES, NAS_SERIES, PIPELINE_STATE_DB
@@ -410,6 +433,10 @@ def files_requeue_batch(req: dict) -> dict:
         # mutating thousands of rows.
         raise HTTPException(400, "batch too large (>5000); split into smaller batches")
     reason = (req.get("reason") or "bulk requeue from dashboard")[:200]
+    # See file_requeue: bulk requeue must also refuse flagged_corrupt rows
+    # by default so the user can't accidentally revive the entire breaker
+    # cohort with a "select all + requeue" click.
+    force_flagged = bool(req.get("force_flagged") or False)
 
     nas_movies = os.path.normpath(str(NAS_MOVIES))
     nas_series = os.path.normpath(str(NAS_SERIES))
@@ -431,13 +458,16 @@ def files_requeue_batch(req: dict) -> dict:
                 skipped.append({"path": raw_path, "reason": "file missing"})
                 continue
             row = cur.execute(
-                "SELECT status FROM pipeline_files WHERE filepath = ?", (raw_path,)
+                "SELECT status, extras FROM pipeline_files WHERE filepath = ?", (raw_path,)
             ).fetchone()
             if row is None:
+                # Stamp force_reencode so already-AV1 files don't get silently
+                # routed to gap_filler/skip in categorise_entry (see single-file
+                # requeue for the full rationale).
                 cur.execute(
                     "INSERT INTO pipeline_files (filepath, status, extras, reason) "
-                    "VALUES (?, 'pending', '{}', ?)",
-                    (raw_path, reason),
+                    "VALUES (?, 'pending', ?, ?)",
+                    (raw_path, _json.dumps({"force_reencode": True}), reason),
                 )
                 queued += 1
                 continue
@@ -445,10 +475,21 @@ def files_requeue_batch(req: dict) -> dict:
             if cur_status in ("processing", "encoding", "fetching", "uploading"):
                 skipped.append({"path": raw_path, "reason": f"in flight ({cur_status})"})
                 continue
+            if cur_status == "flagged_corrupt" and not force_flagged:
+                skipped.append({
+                    "path": raw_path,
+                    "reason": "flagged_corrupt (breaker hit) — pass force_flagged=true to override",
+                })
+                continue
+            try:
+                extras = _json.loads(row[1] or "{}")
+            except (TypeError, ValueError, _json.JSONDecodeError):
+                extras = {}
+            extras["force_reencode"] = True
             cur.execute(
                 "UPDATE pipeline_files SET status='pending', stage=NULL, error=NULL, "
-                "reason=? WHERE filepath = ?",
-                (reason, raw_path),
+                "reason=?, extras=? WHERE filepath = ?",
+                (reason, _json.dumps(extras), raw_path),
             )
             queued += 1
         con.commit()

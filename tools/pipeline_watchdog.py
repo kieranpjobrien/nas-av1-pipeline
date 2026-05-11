@@ -96,11 +96,25 @@ def main() -> int:
     except OSError:
         pass
 
+    # Stop-flag — if this file exists the watchdog refuses to launch and
+    # exits cleanly. User creates it to halt the loop without playing
+    # whack-a-mole with kill commands (the bug pre-2026-05-12: killing
+    # the supervisor just made the watchdog respawn it 30s later).
+    stop_flag = Path(r"F:\AV1_Staging\control\stop")
+
     cmd = args.command or ["uv", "run", "python", "-m", "pipeline", "--resume"]
 
     _log(f"watchdog start: cmd={cmd}", log_path)
+    if stop_flag.exists():
+        _log(f"stop flag present at {stop_flag} — watchdog refusing to launch", log_path)
+        return 0
     crashes = 0
     while True:
+        # Re-check stop flag every iteration so a user can halt the loop
+        # mid-backoff without killing the watchdog.
+        if stop_flag.exists():
+            _log(f"stop flag present at {stop_flag} — watchdog exiting cleanly", log_path)
+            return 0
         launch_t0 = time.monotonic()
         _log(f"launching pipeline (crash count={crashes}/{args.max_restarts})", log_path)
         try:
