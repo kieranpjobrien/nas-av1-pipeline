@@ -172,6 +172,17 @@ def categorise_entry(
         if existing and existing.get("force_reencode"):
             return ("full_gamut", _build_full_gamut_item(entry))
         gaps = analyse_gaps(entry, config)
+        # gap_filler explicitly does NOT do audio transcodes (see
+        # pipeline/gap_filler.py:389-394 — fetch+ffmpeg+upload is heavy
+        # and excluded). Pre-2026-05-12 we still routed AV1 files with
+        # AC-3/DTS/etc. audio to gap_filler, which ran its other ops
+        # (track strip, tags) and then marked DONE — leaving the wrong
+        # audio in place. That's a Rule-1 violation (DONE-on-a-lie).
+        # LotR Return of the King shipped with AC-3 5.1 + commentary
+        # sub because of this. Route audio-transcode files to full_gamut
+        # so the encoder actually does the transcode.
+        if gaps.needs_audio_transcode:
+            return ("full_gamut", _build_full_gamut_item(entry))
         if gaps.needs_anything:
             return ("gap_filler", entry)
         return ("skip", None)

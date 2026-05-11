@@ -51,14 +51,39 @@ def _h264_entry(filepath: str, size_bytes: int, filename: str | None = None) -> 
 
 
 def _av1_entry(filepath: str, size_bytes: int) -> dict:
+    """AV1 entry with non-EAC3 audio (needs_audio_transcode is True).
+
+    Post-2026-05-12 these route to full_gamut (the encoder does the
+    transcode). Pre-fix they routed to gap_filler which silently
+    skipped the audio work and marked DONE — see
+    test_gap_filler_audio_transcode_routing.py.
+    """
     return {
         "filepath": filepath,
         "filename": filepath.rsplit("/", 1)[-1].rsplit("\\", 1)[-1],
         "library_type": "movie",
         "video": {"codec": "AV1", "codec_raw": "av1", "resolution_class": "1080p"},
-        # gap_filler kicks in only if there's something to do — give it a
-        # non-EAC3 lossless track so analyse_gaps reports needs_audio_transcode.
         "audio_streams": [{"codec_raw": "flac", "channels": 6, "language": "eng"}],
+        "subtitle_streams": [],
+        "file_size_bytes": size_bytes,
+        "duration_seconds": 6000,
+        "overall_bitrate_kbps": 1800,
+    }
+
+
+def _av1_entry_gap_only(filepath: str, size_bytes: int) -> dict:
+    """AV1 entry that legitimately belongs in gap_filler: audio is already
+    EAC-3 (no transcode needed), but a foreign-language track needs to be
+    stripped (cheap remote mkvmerge op gap_filler CAN handle)."""
+    return {
+        "filepath": filepath,
+        "filename": filepath.rsplit("/", 1)[-1].rsplit("\\", 1)[-1],
+        "library_type": "movie",
+        "video": {"codec": "AV1", "codec_raw": "av1", "resolution_class": "1080p"},
+        "audio_streams": [
+            {"codec_raw": "eac3", "channels": 6, "language": "eng"},
+            {"codec_raw": "eac3", "channels": 6, "language": "fra"},
+        ],
         "subtitle_streams": [],
         "file_size_bytes": size_bytes,
         "duration_seconds": 6000,
@@ -80,14 +105,32 @@ class TestCategoriseEntry:
         assert category == "full_gamut"
         assert item["filepath"] == r"\\NAS\Movies\A.mkv"
 
-    def test_av1_with_gaps_lands_in_gap_filler(self, tmp_path):
+    def test_av1_with_audio_transcode_lands_in_full_gamut(self, tmp_path):
+        """AV1 + non-EAC-3 audio routes to full_gamut so the encoder actually
+        does the audio transcode. Pre-2026-05-12 this routed to gap_filler
+        which silently skipped the audio work and lied DONE."""
         from pipeline.config import build_config
 
         orch = _orch(tmp_path)
         entry = _av1_entry(r"\\NAS\Movies\A.mkv", 2_000_000_000)
         category, item = categorise_entry(entry, build_config(), orch.state, orch.control)
+        assert category == "full_gamut", (
+            f"AV1 + FLAC audio needs transcode → must route to full_gamut, "
+            f"got {category}"
+        )
+        assert item is not None
+
+    def test_av1_with_only_gap_work_lands_in_gap_filler(self, tmp_path):
+        """AV1 with EAC-3 audio + foreign-track strip still routes to gap_filler
+        (which CAN handle that). Pin so the new audio-transcode guard
+        doesn't over-fire."""
+        from pipeline.config import build_config
+
+        orch = _orch(tmp_path)
+        entry = _av1_entry_gap_only(r"\\NAS\Movies\B.mkv", 2_000_000_000)
+        category, item = categorise_entry(entry, build_config(), orch.state, orch.control)
         assert category == "gap_filler"
-        assert item is entry  # gap filler keeps the original entry shape
+        assert item is entry
 
     def test_terminal_status_is_skipped(self, tmp_path):
         orch = _orch(tmp_path)
@@ -148,25 +191,26 @@ class TestCategoriseEntry:
         assert item["filepath"] == fp
         assert item["video_codec"] == "AV1"  # codec carried through
 
-    def test_av1_without_force_reencode_never_full_gamut(self, tmp_path):
-        """Sanity: a pending-status AV1 row WITHOUT force_reencode must NOT
-        land in full_gamut. The flag is the only thing that overrides the
-        AV1 codec branch — without it, the existing gap_filler / skip
-        path applies regardless of pending status.
+    def test_av1_without_force_reencode_or_audio_transcode_stays_in_gap_filler(self, tmp_path):
+        """A pending AV1 row WITHOUT force_reencode AND WITHOUT audio-transcode
+        needs must NOT land in full_gamut. Without those triggers the
+        gap_filler / skip path applies.
+
+        Post-2026-05-12: needs_audio_transcode is now a second override
+        that routes AV1 to full_gamut (see test_av1_with_audio_transcode_lands_in_full_gamut).
+        This test uses the gap-only fixture (EAC-3 audio + foreign track to
+        strip) so neither override fires and the assertion holds.
         """
         from pipeline.config import build_config
 
         orch = _orch(tmp_path)
-        # _av1_entry triggers gap_filler (flac audio); use it because the
-        # exact downstream category doesn't matter — what matters is that
-        # full_gamut is never the answer for AV1 without the flag.
-        entry = _av1_entry(r"\\NAS\Movies\NoFlag.mkv", 2_000_000_000)
+        entry = _av1_entry_gap_only(r"\\NAS\Movies\NoFlag.mkv", 2_000_000_000)
         orch.state.set_file(entry["filepath"], FileStatus.PENDING)
 
         category, _ = categorise_entry(entry, build_config(), orch.state, orch.control)
         assert category != "full_gamut", (
             "AV1 file with status=pending must not fall into full_gamut "
-            "without an explicit force_reencode flag"
+            "without an explicit force_reencode flag or needs_audio_transcode"
         )
 
     def test_force_reencode_overrides_gap_filler(self, tmp_path):
@@ -435,7 +479,9 @@ class TestMergeNewFiles:
         assert added_full == 0
 
     def test_merge_runs_both_queues_independently(self, tmp_path):
-        """A report with one new H.264 + one new AV1-with-gaps adds to BOTH queues."""
+        """A report with one new H.264 + one new AV1-with-gap-only-work adds
+        to BOTH queues. Use the gap-only fixture so the AV1 entry doesn't
+        get routed to full_gamut by the audio-transcode guard."""
         from pipeline.config import build_config
 
         orch = _orch(tmp_path)
@@ -443,7 +489,7 @@ class TestMergeNewFiles:
         orch.config = cfg
 
         h264_new = _h264_entry(r"\\NAS\Movies\NewH264.mkv", 4_000_000_000)
-        av1_new = _av1_entry(r"\\NAS\Movies\NewAV1.mkv", 3_000_000_000)
+        av1_new = _av1_entry_gap_only(r"\\NAS\Movies\NewAV1.mkv", 3_000_000_000)
         report = _write_report(tmp_path, [h264_new, av1_new])
 
         added_full, added_gap = orch._merge_new_files([], [], report)

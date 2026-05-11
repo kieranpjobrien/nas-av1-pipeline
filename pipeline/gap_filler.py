@@ -316,6 +316,30 @@ def gap_fill(
     if getattr(gaps, "_check_external_subs", False):
         _scan_external_subs(filepath, gaps)
 
+    # Defensive guard (2026-05-12): gap_filler does NOT transcode audio
+    # (see comment block above the track-strip section). If we reached
+    # here with needs_audio_transcode set, the categoriser routed wrong
+    # and the file would silently ship with non-policy audio if we
+    # proceeded. Refuse — mark ERROR with a diagnostic so the next
+    # queue-build pass re-evaluates (likely sending to full_gamut).
+    # Pre-fix this code marked DONE despite the un-transcoded audio
+    # (LotR Return of the King shipped with AC-3 5.1 because of this).
+    if gaps.needs_audio_transcode:
+        state.set_file(
+            filepath,
+            FileStatus.ERROR,
+            mode="gap_filler",
+            stage="route_check",
+            error="gap_filler cannot transcode audio — needs full_gamut route",
+            force_reencode=True,
+        )
+        logging.warning(
+            f"  ERROR (mis-routed to gap_filler): {filename} needs audio "
+            f"transcode {gaps.audio_transcode_indices}. "
+            f"Flipped to ERROR + force_reencode so next pass goes to full_gamut."
+        )
+        return False
+
     if not gaps.needs_anything:
         # Re-probe before marking DONE. The cached gap analysis was built from
         # media_report which can lag reality — an external sub may have been dropped in
