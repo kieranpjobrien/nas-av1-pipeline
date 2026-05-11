@@ -27,7 +27,11 @@ Reading CQ:
   2. Fall back to ``pipeline_state.db`` ``encode_params_used.cq`` if
      no tag
 
-Writes JSON output: ``F:/AV1_Staging/audit_cq.json`` by default.
+Writes audit results back into ``media_report.json`` as a per-file
+``audit`` field plus a top-level ``audit_summary``. Single source of
+truth — pre-2026-05-11 these lived in a separate ``audit_cq.json``
+sidecar that drifted from media_report and made the dashboard's
+bulk-requeue button operate on stale data.
 """
 
 from __future__ import annotations
@@ -245,6 +249,21 @@ def _audit_one(entry: dict, state_db: str, base_cq_lookup, bitrate_table: dict |
     else:
         bucket = "too_high"  # encoded harsher than rule wants — manual review
 
+    # 2026-05-08 incident guard: bitrate-inferred CQ is unreliable for
+    # well-compressed sources. The calibration table for 4K HDR only
+    # has reliable medians at cq=22 (35,941 kbps) and cq=24 (16,738 kbps);
+    # any file below 16,738 kbps snaps to "cq=24 closest" even when the
+    # source is actually at cq=28 or higher. Re-encoding such files at
+    # target cq=22 produced 25-30 GB SIZE INCREASES per file with zero
+    # quality gain (Saving Private Ryan 18→47 GB, Sound of Music 19→47 GB,
+    # Seven Samurai 30→55 GB, etc. — 255 of 339 May re-encodes grew
+    # rather than shrank). Downgrade bitrate-inferred too_low to a
+    # separate bucket so the queue builder/dashboard can see the
+    # decision but won't auto-act. tag/state_db sources are reliable
+    # and continue using too_low.
+    if bucket == "too_low" and source == "bitrate_inferred":
+        bucket = "inferred_uncertain"
+
     # Manual override: if the user has stamped GRADE_REVIEW=accepted, force
     # the bucket to optimal regardless of CQ comparison. This is how a user
     # signs off on a too_high file ("I've watched it, it's fine") so the
@@ -275,7 +294,6 @@ def main() -> int:
     parser.add_argument("--state-db", default=None, help="pipeline_state.db path (default paths.PIPELINE_STATE_DB)")
     parser.add_argument("--workers", type=int, default=4, help="Parallel mkvmerge calls (default 4)")
     parser.add_argument("--limit", type=int, default=0, help="Stop after N AV1 files (0 = all)")
-    parser.add_argument("--output", default=None, help="JSON output path (default F:/AV1_Staging/audit_cq.json)")
     args = parser.parse_args()
 
     if args.report is None:
@@ -288,10 +306,6 @@ def main() -> int:
         state_db = str(PIPELINE_STATE_DB)
     else:
         state_db = args.state_db
-    if args.output is None:
-        out_path = "F:/AV1_Staging/audit_cq.json"
-    else:
-        out_path = args.output
 
     from pipeline.config import build_config
     cfg = build_config()
@@ -299,6 +313,8 @@ def main() -> int:
     def _base_cq(content_type: str, res_key: str) -> int:
         return cfg["cq"].get(content_type, {}).get(res_key, 30)
 
+    # Read once (unlocked, just for the audit phase — the WRITE later uses
+    # patch_report under lock so we re-read the latest state at write time).
     with open(report_path, encoding="utf-8") as f:
         report = json.load(f)
     files = report.get("files", [])
@@ -334,8 +350,8 @@ def main() -> int:
 
     logging.info("")
     logging.info("=== CQ AUDIT SUMMARY ===")
-    for k in ("optimal", "too_low", "too_high", "unknown"):
-        logging.info(f"  {k:12s} : {buckets[k]}")
+    for k in ("optimal", "too_low", "too_high", "unknown", "inferred_uncertain"):
+        logging.info(f"  {k:18s} : {buckets[k]}")
     logging.info("")
     logging.info("Grades:")
     for g, n in grades.most_common():
@@ -345,16 +361,50 @@ def main() -> int:
     for s, n in sources.most_common():
         logging.info(f"  {s:12s} : {n}")
 
-    payload = {
-        "scanned": len(results),
-        "buckets": dict(buckets),
-        "grades": dict(grades),
-        "sources": dict(sources),
-        "results": results,
-    }
-    Path(out_path).write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    # === Write audit into media_report.json (single source of truth) ===
+    # Per-file: ``audit`` field on each file entry with the bucket / target /
+    # current / source. Top-level: ``audit_summary`` with overall tallies +
+    # timestamp so the dashboard can render "audit is N hours stale".
+    #
+    # Why patch_report instead of a separate audit_cq.json sidecar (the
+    # pre-2026-05-11 design): two sources of truth diverge. The dashboard's
+    # bulk-requeue button operated on stale audit_cq.json data and queued
+    # files that had ALREADY been encoded correctly that morning, causing a
+    # re-fetch loop. media_report is the canonical scanner output; making it
+    # the only place audit results live means the dashboard can't lie about
+    # encode state. Uses report_lock.patch_report so the scanner can't race
+    # us mid-write.
+    from datetime import datetime, timezone
+
+    from tools.report_lock import patch_report
+
+    audited_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    results_by_path = {r["filepath"]: r for r in results}
+
+    def _patch(rep: dict) -> None:
+        for f in rep.get("files", []):
+            r = results_by_path.get(f.get("filepath"))
+            if not r:
+                # Non-AV1 files or files dropped from this audit run: clear stale audit
+                # so the dashboard doesn't show stale bucket data for files no longer
+                # in the audit set.
+                f.pop("audit", None)
+                continue
+            # Strip the filepath field — it's redundant when stored ON the entry
+            audit_blob = {k: v for k, v in r.items() if k != "filepath"}
+            audit_blob["audited_at"] = audited_at
+            f["audit"] = audit_blob
+        rep["audit_summary"] = {
+            "scanned": len(results),
+            "audited_at": audited_at,
+            "buckets": dict(buckets),
+            "grades": dict(grades),
+            "sources": dict(sources),
+        }
+
+    patch_report(_patch)
     logging.info("")
-    logging.info(f"Full results: {out_path}")
+    logging.info(f"Audit written into media_report.json (per-file `audit` field + top-level `audit_summary`)")
     return 0
 
 

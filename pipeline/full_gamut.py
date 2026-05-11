@@ -331,12 +331,31 @@ def prepare_for_encode(
                     _cleanup(local_path, None, None)
                     return None
                 if qresult.outcome == QualifyOutcome.NOTHING_TO_DO:
-                    logging.info(f"  prep: already compliant: {filename}")
-                    state.set_file(
-                        filepath, FileStatus.DONE, mode="full_gamut", reason="already compliant"
-                    )
-                    _cleanup(local_path, None, None)
-                    return None
+                    # User-explicit force_reencode beats qualify's "already
+                    # compliant" verdict. Qualify only inspects codec /
+                    # audio config / sub config — it doesn't know about CQ
+                    # targets. Pre-2026-05-09 fix, the 24-file overnight
+                    # test produced 0 re-encodes because qualify
+                    # short-circuited 13 of them as "already compliant"
+                    # (codec=AV1 + audio=EAC-3 → looks fine to qualify)
+                    # and silently cleared force_reencode=False, killing
+                    # the user's queue action.
+                    if existing and existing.get("force_reencode"):
+                        logging.info(
+                            f"  prep: qualify=already_compliant but force_reencode=true → "
+                            f"proceeding with re-encode (CQ downgrade): {filename}"
+                        )
+                    else:
+                        logging.info(f"  prep: already compliant: {filename}")
+                        state.set_file(
+                            filepath,
+                            FileStatus.DONE,
+                            mode="full_gamut",
+                            reason="already compliant",
+                            force_reencode=False,
+                        )
+                        _cleanup(local_path, None, None)
+                        return None
             except Exception as e:
                 logging.warning(f"  prep: qualify pre-check failed (non-fatal): {e}")
 
@@ -428,11 +447,39 @@ def full_gamut(
     library_type = item.get("library_type", "")
 
     try:
+        # === GUARD: AV1 source requires force_reencode=true to proceed ===
+        # Without this guard a queued AV1 file can produce a wrong-direction
+        # re-encode (source at high CQ → output at low CQ → BIGGER file with
+        # NO quality gain — NVENC just preserves the source's existing
+        # artifacts at higher bitrate). The 2026-05-08 incident saw 255 of
+        # 339 May re-encodes grow rather than shrink (Saving Private Ryan
+        # 18 GB → 47 GB, Sound of Music 19 → 47 GB, etc.) because the
+        # audit's bitrate inference wrongly classified high-CQ sources as
+        # too_low. Now: AV1 sources only re-encode when the user has
+        # explicitly stamped force_reencode=true via the dashboard or a
+        # tool — and that flag is only set on rows where we have reliable
+        # CQ data (audit source = tag or state_db, not bitrate_inferred).
+        existing_pre = state.get_file(filepath)
+        item_codec = (item.get("video_codec") or "").lower()
+        if "av1" in item_codec:
+            if not (existing_pre and existing_pre.get("force_reencode")):
+                logging.warning(
+                    f"  AV1 source without force_reencode flag: {filename} — "
+                    f"refusing re-encode to avoid wrong-direction balloon. "
+                    f"Marking DONE (current state preserved)."
+                )
+                state.set_file(
+                    filepath,
+                    FileStatus.DONE,
+                    mode="full_gamut",
+                    reason="av1 source preserved (no force_reencode flag)",
+                )
+                return True
+
         # If a prep worker has already done steps 1-5, short-circuit past
         # the entire prep block and go straight to encode. The GPU thread
         # is precious — every second it spends on CPU prep is a second of
         # NVENC idle.
-        existing_pre = state.get_file(filepath)
         if existing_pre and existing_pre.get("prep_done") and existing_pre.get("prep_data"):
             return _encode_only(filepath, item, config, state, staging_dir, gpu_semaphore)
 
@@ -569,13 +616,26 @@ def full_gamut(
                     _cleanup(local_path, None, None)
                     return False
                 if qresult.outcome == QualifyOutcome.NOTHING_TO_DO:
-                    # Already compliant — no encode needed.
-                    logging.info(f"  Already compliant: {filename}")
-                    state.set_file(
-                        filepath, FileStatus.DONE, mode="full_gamut", reason="already compliant"
-                    )
-                    _cleanup(local_path, None, None)
-                    return True
+                    # Same pattern as the prep-stage NOTHING_TO_DO above:
+                    # force_reencode=true wins over qualify's "already
+                    # compliant" verdict. See that branch for the rationale
+                    # (qualify doesn't consider CQ targets).
+                    if existing and existing.get("force_reencode"):
+                        logging.info(
+                            f"  qualify=already_compliant but force_reencode=true → "
+                            f"proceeding with re-encode (CQ downgrade): {filename}"
+                        )
+                    else:
+                        logging.info(f"  Already compliant: {filename}")
+                        state.set_file(
+                            filepath,
+                            FileStatus.DONE,
+                            mode="full_gamut",
+                            reason="already compliant",
+                            force_reencode=False,
+                        )
+                        _cleanup(local_path, None, None)
+                        return True
                 # QUALIFIED: continue with the existing encode flow. The keep
                 # indices are computed inside build_ffmpeg_cmd from item's stream
                 # lists, which reflect the language detection above.
@@ -1084,65 +1144,245 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
                 )
             return False
 
-    # === Standards compliance check ===
-    # Beyond "the encode ran without crashing" we also insist every output file meets
-    # the library's policy:
-    #   - video codec = AV1
-    #   - every audio track in {eac3, truehd, or explicitly-configured lossless passthrough}
-    #   - every audio + sub language in KEEP_LANGS (no foreign audio/subs left over)
-    #   - target filename has scene tags cleaned (checked post-replace below, since the
-    #     rename-to-clean-name happens during replace)
-    # Opus was previously accepted but is now transcoded to EAC-3 — Sonos Arc cannot
-    # decode Opus passthrough so Plex transcoded it on every play; pre-transcoding
-    # once eliminates that cost.
-    # If the encoder somehow leaves a non-conforming file we park it in ERROR rather
-    # than commit it to the library. The command builder SHOULD prevent this; the check
-    # is belt-and-braces for edge cases (e.g. strange stream configurations).
+    # === Standards compliance check (single source of truth) ===
+    # Replaces the previous inline standards block. All checks live in
+    # pipeline.compliance.check_compliance(), the same function the audit
+    # tool runs. Triaged into FIXABLE / REFUSE / UNRECOVERABLE:
+    #   * FIXABLE — extra English sub, missing CQ/ENCODER tags, foreign
+    #     audio/sub survivors. Auto-fixed via mkvmerge stream-drop or
+    #     mkvpropedit tag-stamp on dest_path. Verify re-runs, must pass
+    #     before atomic replace.
+    #   * REFUSE — AV1→AV1 grew >5%, wrong video codec, wrong CQ-target
+    #     would require re-encode. dest_path deleted, source untouched,
+    #     state row → error.
+    #   * UNRECOVERABLE — out-of-band issue (probe error). Same effect as
+    #     REFUSE; surfaces for manual triage.
     if output_probe and not output_probe.get("error"):
-        from pipeline.config import KEEP_LANGS
+        from pipeline.compliance import categorise, check_compliance, Category
+        from pipeline.compliance_fixers import FIXERS
 
-        out_video = output_probe.get("video") or {}
-        out_audio = output_probe.get("audio") or []
-        out_subs = output_probe.get("subs") or []
-        target_audio_codecs = {"eac3", "truehd"}
-        lossless_codecs = {c.lower() for c in config.get("lossless_audio_codecs") or []}
+        # Resolve item from media_report so it has tmdb/library_type for the check.
+        try:
+            from paths import MEDIA_REPORT  # noqa: PLC0415
+            from server.helpers import read_json_safe  # noqa: PLC0415
+            _report = read_json_safe(MEDIA_REPORT) or {}
+            _entry = next(
+                (f for f in _report.get("files", []) if f.get("filepath") in (filepath, final_path)),
+                None,
+            )
+        except Exception:
+            _entry = None
 
-        violations: list[str] = []
-        if (out_video.get("codec") or "").lower() not in ("av1", "av1_nvenc"):
-            violations.append(f"video codec {out_video.get('codec')!r} is not AV1")
-        # ZERO-AUDIO is a violation. The previous version iterated `for a in out_audio:`
-        # and recorded no violations when the list was empty — silently shipping
-        # audio-less files. 1,787 files lost this way. Never again.
-        if not out_audio:
-            violations.append("output has zero audio streams")
-        for i, a in enumerate(out_audio):
-            codec = (a.get("codec") or "").lower()
-            lang = (a.get("language") or "").lower().strip()
-            if codec not in target_audio_codecs and codec not in lossless_codecs:
-                violations.append(f"audio track {i}: codec {codec!r} not in target set")
-            if lang and lang not in KEEP_LANGS:
-                violations.append(f"audio track {i}: language {lang!r} not in KEEP_LANGS")
-        for i, s in enumerate(out_subs):
-            lang = (s.get("language") or "").lower().strip()
-            if lang and lang not in KEEP_LANGS:
-                violations.append(f"sub track {i}: language {lang!r} not in KEEP_LANGS")
+        # Build the item shape compliance expects. ``finalize_upload`` doesn't
+        # have ``item`` in scope (the queue item is consumed by ``full_gamut``
+        # earlier and not threaded through to upload) — only the state DB
+        # ``entry`` and the optional ``_entry`` from media_report. So we
+        # construct the compliance item from those sources directly.
+        compliance_item: dict = {
+            "filename": final_name,
+            "final_name": final_name,
+            "library_type": library_type,
+        }
+        if _entry:
+            compliance_item["tmdb"] = _entry.get("tmdb") or {}
+            compliance_item["resolution"] = ((_entry.get("video") or {}).get("resolution_class", ""))
+            compliance_item["hdr"] = ((_entry.get("video") or {}).get("hdr", False))
+            compliance_item.setdefault("library_type", _entry.get("library_type", ""))
 
-        if violations:
-            logging.error(f"  Standards compliance FAILED for {final_name}:")
-            for v in violations:
-                logging.error(f"    - {v}")
+        # Pull the encode_params used and source AV1-ness from state extras.
+        _stamp = state.get_file(filepath) or {}
+        encode_params_used = _stamp.get("encode_params_used") or {}
+        # source_was_av1: best determined from media_report video.codec_raw.
+        _src_codec_raw = ((_entry or {}).get("video") or {}).get("codec_raw", "").lower()
+        source_was_av1 = _src_codec_raw == "av1"
+
+        # Stamp encode tags on dest_path BEFORE compliance runs so the
+        # check sees them. Pre-2026-05-10 the post-replace stamp was the
+        # only place this happened; moving it pre-replace lets the
+        # compliance gate verify them. Failure here gets caught by the
+        # compliance check and the fixer retries.
+        try:
+            from pipeline.mkv_tags import merge_global_tags as _merge_tags
+
+            _cq = encode_params_used.get("cq")
+            _grade = encode_params_used.get("content_grade") or "default"
+            if _cq is not None:
+                _encoder = (
+                    f"av1_nvenc cq={_cq} preset={encode_params_used.get('preset','p7')} "
+                    f"multipass={encode_params_used.get('multipass','fullres')} "
+                    f"grade={_grade} base_cq={encode_params_used.get('base_cq', _cq)} "
+                    f"offset={'+' if (encode_params_used.get('cq_offset') or 0) >= 0 else ''}"
+                    f"{encode_params_used.get('cq_offset') or 0}"
+                )
+                _merge_tags(
+                    dest_path,
+                    owned_names={"ENCODER", "CQ", "CONTENT_GRADE", "BASE_CQ"},
+                    new_tags=[
+                        {"name": "ENCODER", "value": _encoder},
+                        {"name": "CQ", "value": str(_cq)},
+                        {"name": "CONTENT_GRADE", "value": _grade},
+                    ],
+                )
+        except Exception as _e:
+            logging.warning(f"  pre-verify encode-tag stamp failed (will be retried by fixer): {_e}")
+
+        # Read MKV tags off dest_path for the compliance check.
+        def _read_dest_tags(p: str) -> dict[str, str]:
+            try:
+                _out = subprocess.run(
+                    [r"C:/Program Files/MKVToolNix/mkvextract.exe", "tags", p],
+                    capture_output=True, timeout=60,
+                )
+                if _out.returncode != 0:
+                    return {}
+                _xml = _out.stdout.decode("utf-8", "replace")
+                import re as _re
+                return {
+                    m.group(1).upper(): m.group(2)
+                    for m in _re.finditer(
+                        r"<Simple>\s*<Name>([^<]+)</Name>\s*<String>([^<]*)</String>", _xml
+                    )
+                }
+            except Exception:
+                return {}
+
+        _output_size = os.path.getsize(dest_path)
+
+        def _run_compliance() -> list:
+            return check_compliance(
+                filepath=filepath,
+                item=compliance_item,
+                encode_params=encode_params_used,
+                output_probe=output_probe,
+                mkv_tags=_read_dest_tags(dest_path),
+                input_size_bytes=input_size,
+                output_size_bytes=_output_size,
+                source_was_av1=source_was_av1,
+                config=config,
+            )
+
+        violations = _run_compliance()
+        grouped = categorise(violations)
+
+        # Refuse paths first — no point trying to fix when something fatal blocks ship.
+        refuse = grouped[Category.REFUSE] + grouped[Category.UNRECOVERABLE]
+        if refuse:
+            for v in refuse:
+                logging.error(f"  REFUSE: {v.message}")
             try:
                 os.remove(dest_path)
             except OSError:
                 pass
-            state.set_file(
-                filepath,
-                FileStatus.ERROR,
-                error=f"standards compliance: {violations[0]}" + (f" (+{len(violations) - 1} more)" if len(violations) > 1 else ""),
-                stage="verify",
-                compliance_violations=violations,
+            # Circuit breaker (2026-05-12) — same pattern as integrity:
+            # track ``compliance_refuse_count`` across history. After 3
+            # consecutive refuses on the same file, park as
+            # flagged_corrupt so the queue stops re-trying. Pre-fix: 6
+            # GoodFellas / 5 Mary Poppins / 4 Favourite re-attempts that
+            # all hit the same un-fixable compliance issue.
+            COMPLIANCE_REFUSE_BREAKER = 3
+            prev_extras = state.get_file(filepath) or {}
+            refuse_count = int(prev_extras.get("compliance_refuse_count", 0) or 0) + 1
+            msg_summary = f"compliance refuse: {refuse[0].message}" + (
+                f" (+{len(refuse) - 1} more)" if len(refuse) > 1 else ""
             )
+            if refuse_count >= COMPLIANCE_REFUSE_BREAKER:
+                logging.error(
+                    f"  CIRCUIT BREAKER: {filename} has been refused by the "
+                    f"compliance gate {refuse_count} times — parking as "
+                    f"flagged_corrupt. Cause: {refuse[0].message}"
+                )
+                state.set_file(
+                    filepath,
+                    FileStatus.FLAGGED_CORRUPT,
+                    error=f"{refuse_count} consecutive compliance refuses: {refuse[0].message}",
+                    stage="verify",
+                    compliance_violations=[v.message for v in violations],
+                    compliance_refuse_count=refuse_count,
+                    force_reencode=False,
+                )
+            else:
+                state.set_file(
+                    filepath,
+                    FileStatus.ERROR,
+                    error=msg_summary,
+                    stage="verify",
+                    compliance_violations=[v.message for v in violations],
+                    compliance_refuse_count=refuse_count,
+                )
             return False
+
+        # Fixable violations — run each fixer, then re-check.
+        for v in grouped[Category.FIXABLE]:
+            fixer = FIXERS.get(v.tag)
+            if not fixer:
+                logging.warning(f"  no fixer registered for {v.tag} — leaving violation")
+                continue
+            logging.info(f"  compliance fix: {v.tag} — {v.message}")
+            # Each fixer takes (filepath, violation) plus optional context kwargs.
+            try:
+                if v.tag in ("missing_encode_tags", "cq_mismatch", "grade_mismatch"):
+                    ok = fixer(dest_path, v, encode_params=encode_params_used)
+                elif v.tag == "missing_tmdb_tags":
+                    ok = fixer(dest_path, v, item=compliance_item)
+                elif v.tag == "filename_mismatch":
+                    new_path = fixer(dest_path, v)
+                    ok = bool(new_path)
+                    if ok and new_path:
+                        dest_path = new_path
+                else:
+                    ok = fixer(dest_path, v)
+            except Exception as e:
+                logging.error(f"  fixer {v.tag} raised: {e!r}")
+                ok = False
+            if not ok:
+                logging.error(f"  fixer for {v.tag} failed")
+
+        # Re-run compliance after fixers. Anything still flagged = refuse.
+        if grouped[Category.FIXABLE]:
+            residual = _run_compliance()
+            if residual:
+                for v in residual:
+                    logging.error(f"  REFUSE (post-fix residual): {v.message}")
+                try:
+                    os.remove(dest_path)
+                except OSError:
+                    pass
+                # Circuit breaker for the post-fix residual case too — same
+                # counter as the up-front refuse path. A file the fixers
+                # can't repair is functionally equivalent to one the gate
+                # refused outright.
+                COMPLIANCE_REFUSE_BREAKER = 3
+                prev_extras = state.get_file(filepath) or {}
+                refuse_count = int(prev_extras.get("compliance_refuse_count", 0) or 0) + 1
+                if refuse_count >= COMPLIANCE_REFUSE_BREAKER:
+                    logging.error(
+                        f"  CIRCUIT BREAKER: {filename} fixers failed to "
+                        f"resolve compliance violations {refuse_count} times "
+                        f"— parking as flagged_corrupt."
+                    )
+                    state.set_file(
+                        filepath,
+                        FileStatus.FLAGGED_CORRUPT,
+                        error=f"{refuse_count} unfixed: {residual[0].message}",
+                        stage="verify",
+                        compliance_violations=[v.message for v in residual],
+                        compliance_refuse_count=refuse_count,
+                        force_reencode=False,
+                    )
+                else:
+                    state.set_file(
+                        filepath,
+                        FileStatus.ERROR,
+                        error=f"compliance unfixed: {residual[0].message}"
+                        + (f" (+{len(residual) - 1} more)" if len(residual) > 1 else ""),
+                        stage="verify",
+                        compliance_violations=[v.message for v in residual],
+                        compliance_refuse_count=refuse_count,
+                    )
+                return False
+            logging.info(f"  Compliance gate: passed after {len(grouped[Category.FIXABLE])} in-place fix(es)")
+        else:
+            logging.info("  Compliance gate: passed cleanly")
 
     # === Stream-level integrity check ===
     # The 2026-04-13/15 distributed-gap-filler sprint produced ~960 files
@@ -1188,13 +1428,44 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
             logging.error(f"  Corrupt output preserved at: {corrupt_path}")
         except OSError as e:
             logging.error(f"  Could not preserve corrupt output: {e}")
-        state.set_file(
-            filepath,
-            FileStatus.ERROR,
-            error=f"corruption detected post-encode: {hits[0]}",
-            stage="integrity",
-            corruption_signatures=hits,
-        )
+
+        # Circuit breaker (2026-05-12 — Ford v Ferrari class). We track total
+        # integrity failures across the file's entire history in
+        # ``integrity_failure_count`` (separate from ``integrity_retry_count``
+        # which is per-encode-attempt and resets on the next queue dispatch).
+        # When the count crosses ``INTEGRITY_FAIL_BREAKER``, the next status
+        # is flagged_corrupt instead of error — that's a terminal state the
+        # queue builder skips, breaking the encode→fail→re-queue→encode→fail
+        # loop. Pre-fix: Ford v Ferrari ran this loop 10 times across 9 days
+        # wasting ~9h of GPU. The user has to manually re-acquire the source
+        # (Sonarr/Radarr) and clear the flagged_corrupt status to retry.
+        INTEGRITY_FAIL_BREAKER = 3
+        prev_extras = state.get_file(filepath) or {}
+        total_failures = int(prev_extras.get("integrity_failure_count", 0) or 0) + 1
+        if total_failures >= INTEGRITY_FAIL_BREAKER:
+            logging.error(
+                f"  CIRCUIT BREAKER: {filename} has hit integrity failure "
+                f"{total_failures} times across history — parking as "
+                f"flagged_corrupt. User must re-acquire source to retry."
+            )
+            state.set_file(
+                filepath,
+                FileStatus.FLAGGED_CORRUPT,
+                error=f"{total_failures} consecutive integrity failures: {hits[0]}",
+                stage="integrity",
+                corruption_signatures=hits,
+                integrity_failure_count=total_failures,
+                force_reencode=False,
+            )
+        else:
+            state.set_file(
+                filepath,
+                FileStatus.ERROR,
+                error=f"corruption detected post-encode: {hits[0]}",
+                stage="integrity",
+                corruption_signatures=hits,
+                integrity_failure_count=total_failures,
+            )
         return False
 
     # === Replace original (crash-safe) ===
@@ -1202,6 +1473,16 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
     # Synology's #recycle captures a safety copy on any subsequent housekeeping, AND
     # any tool that wants to verify the replacement (e.g. a nightly audit) can still
     # compare the sizes. Cleanup of old .bak files is a separate, manual/scheduled step.
+    #
+    # Re-encode case (2026-05-10 fix): when a file has been encoded before,
+    # the backup_path already exists from that earlier run. The "move original
+    # to backup" step skips correctly (preserving the truly-original
+    # pre-AV1 source), but the rename of the new .av1.tmp into the original
+    # .mkv slot used to fail with WinError 183 because os.rename doesn't
+    # overwrite on Windows. Switch to os.replace, which atomically overwrites
+    # the existing .mkv. Fresh-encode case (no prior backup, no .mkv yet)
+    # also works under os.replace — it behaves like rename when target is
+    # absent. Bad Batch S03 had 4 episodes stuck in this exact loop.
     backup_path = filepath + ".original.bak"
     try:
         if os.path.exists(final_path) and final_path != filepath:
@@ -1210,49 +1491,20 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
         if os.path.exists(filepath) and not os.path.exists(backup_path):
             os.rename(filepath, backup_path)
         if os.path.exists(dest_path):
-            os.rename(dest_path, final_path)
+            os.replace(dest_path, final_path)
             logging.info(f"  Replaced: {final_name} (backup kept at .original.bak)")
         # NOTE: we intentionally DO NOT remove backup_path here. See commit message.
     except Exception as e:
         state.set_file(filepath, FileStatus.ERROR, error=f"replace failed: {e}", stage="replace")
         return False
 
-    # === Stamp encode parameters into MKV global tags ===
-    # Without this, every encode is opaque after the fact — we'd never know
-    # which CQ a 6-month-old file was encoded at, so we couldn't tell whether
-    # it matches the current grade rules. Stamp ENCODER + CQ + CONTENT_GRADE
-    # so the audit tool reads them directly. ~50 ms cost, fully recoverable.
-    #
-    # Pre-2026-05-04 this block referenced an `encode_params_used` variable
-    # that doesn't exist in scope (it's defined ~200 lines later when
-    # building the history entry). The NameError was caught by the broad
-    # `except` and logged as a non-fatal warning — which is why 0/50 of the
-    # latest done encodes had a CQ tag stamped despite the code claiming to
-    # do so. Now we pull from state_extras directly, matching how the
-    # history-entry builder reads it.
-    #
-    # Failure here is non-fatal — the encode succeeded and the file is in
-    # place; missing tags just means the audit tool will fall back to the
-    # state DB or flag the file as "unknown CQ" later.
-    try:
-        stamp_extras = state.get_file(filepath) or {}
-        params_used = stamp_extras.get("encode_params_used") or {}
-        encoder_value = (
-            f"av1_nvenc cq={params_used.get('cq', '?')} "
-            f"preset={params_used.get('preset', '?')} "
-            f"multipass={params_used.get('multipass', '?')} "
-            f"grade={params_used.get('content_grade', '?')} "
-            f"base_cq={params_used.get('base_cq', '?')} "
-            f"offset={params_used.get('cq_offset', 0):+d}"
-        )
-        _stamp_encode_metadata(
-            final_path,
-            encoder=encoder_value,
-            cq=params_used.get("cq"),
-            content_grade=params_used.get("content_grade"),
-        )
-    except Exception as e:  # noqa: BLE001
-        logging.warning(f"  encode-tag stamp failed (non-fatal): {e!r}")
+    # === Encode-tag stamping was moved pre-replace ===
+    # The compliance gate now stamps ENCODER / CQ / CONTENT_GRADE on
+    # dest_path BEFORE the atomic replace (so the gate's MKV-tag check
+    # has something to verify). After atomic replace, the tags ride
+    # along with the file — no re-stamp needed here. The previous
+    # post-replace stamp block was removed 2026-05-10 to avoid a
+    # double-stamp racing the integrity probe.
 
     # === Post-replace: filename standards check ===
     # If the on-disk filename still matches common scene-tag patterns, clean-filename
@@ -1367,6 +1619,10 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
     # === DONE ===
     # Clear the duration_retry_count on success — a file that retried once and then
     # encoded cleanly shouldn't carry the counter forward if it's re-queued later.
+    # Also clear force_reencode: the user-requested re-encode has happened, so
+    # subsequent queue-build passes should fall back to the normal AV1 codec
+    # check (and route this file to gap_filler/skip). Leaving the flag set
+    # would cause an infinite re-encode loop on every pipeline restart.
     state.set_file(
         filepath,
         FileStatus.DONE,
@@ -1380,6 +1636,7 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
         mode="full_gamut",
         duration_retry_count=0,
         integrity_retry_count=0,
+        force_reencode=False,
     )
 
     # Update global stats

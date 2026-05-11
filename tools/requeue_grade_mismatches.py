@@ -1,7 +1,11 @@
 """Re-queue files whose stamped CQ doesn't match the current grade target.
 
-Reads ``F:/AV1_Staging/audit_cq.json`` (produced by ``tools.audit_encode_cq``)
-and resets pipeline_state rows so the encoder picks them up fresh.
+Reads the per-file ``audit`` field from media_report.json (produced by
+``tools.audit_encode_cq``) and resets pipeline_state rows so the encoder
+picks them up fresh. 2026-05-11: audit_cq.json sidecar was removed; the
+audit now lives in media_report (single source of truth — the sidecar
+drifted from the report and caused the dashboard's bulk-requeue button
+to operate on stale data).
 
 Default: targets the ``too_low`` and ``unknown`` buckets — these are
 files that should be encoded HARDER than they currently are. Re-encoding
@@ -34,8 +38,6 @@ from pathlib import Path
 
 from paths import PIPELINE_STATE_DB
 
-AUDIT_PATH = Path("F:/AV1_Staging/audit_cq.json")
-
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Re-queue files where stamped CQ ≠ grade target.")
@@ -50,23 +52,24 @@ def main() -> int:
         ),
     )
     parser.add_argument("--apply", action="store_true", help="Actually mutate state DB. Default is dry-run.")
-    parser.add_argument("--audit", default=str(AUDIT_PATH), help="Audit JSON path")
     parser.add_argument("--db", default=str(PIPELINE_STATE_DB), help="State DB path")
     args = parser.parse_args()
 
-    audit_path = Path(args.audit)
-    if not audit_path.exists():
+    # 2026-05-11: audit lives in media_report.json's per-file ``audit`` field.
+    from tools.report_lock import read_report
+
+    rep = read_report()
+    results = [
+        {"filepath": f["filepath"], **f["audit"]}
+        for f in rep.get("files", [])
+        if f.get("audit")
+    ]
+    if not results:
         print(
-            f"ERROR: {audit_path} not found.\n"
-            f"       Run first: uv run python -m tools.audit_encode_cq",
+            "media_report.json has no per-file audit blobs — run first:\n"
+            "  uv run python -m tools.audit_encode_cq",
             file=sys.stderr,
         )
-        return 2
-
-    audit = json.loads(audit_path.read_text(encoding="utf-8"))
-    results = audit.get("results") or []
-    if not results:
-        print("Audit has no results — nothing to re-queue.")
         return 0
 
     # Pick which buckets to act on

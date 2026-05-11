@@ -97,6 +97,39 @@ function HealthIndicator() {
       window.notify?.({ kind: "bad", title: "Resume failed", body: String(e.message || e) });
     }
   };
+  // Pause-all from the dashboard. The Control page has finer-grained
+  // fetch-only / encode-only options; the dashboard sticks to a single
+  // big button so "stop everything now" is one click from any view.
+  const pauseAll = async () => {
+    try {
+      await api.pause("all");
+      window.notify?.({ kind: "warn", title: "Pipeline paused",
+                       body: "fetch + encode halted. Resume from here or /control." });
+      const c = await api.getControlStatus().catch(() => null);
+      setCtl(c);
+    } catch (e) {
+      window.notify?.({ kind: "bad", title: "Pause failed", body: String(e.message || e) });
+    }
+  };
+
+  // Shared pill style for the pause/resume affordance.
+  const pillStyle = (kind) => ({
+    fontSize: 9,
+    color: kind === "warn" ? "var(--warn)" : "var(--ink-2)",
+    background: kind === "warn"
+      ? "rgba(240,180,41,0.08)"
+      : "rgba(255,255,255,0.04)",
+    border: kind === "warn"
+      ? "1px solid rgba(240,180,41,0.35)"
+      : "1px solid var(--border)",
+    borderRadius: 4,
+    padding: "2px 6px",
+    marginTop: 2,
+    cursor: "pointer",
+    fontFamily: "inherit",
+    textTransform: "uppercase",
+    letterSpacing: "0.08em",
+  });
 
   return (
     <>
@@ -112,25 +145,13 @@ function HealthIndicator() {
         />
         daemon · {effective}
       </div>
-      {paused && (
-        <button
-          onClick={resume}
-          style={{
-            fontSize: 9,
-            color: "var(--warn)",
-            background: "rgba(240,180,41,0.08)",
-            border: "1px solid rgba(240,180,41,0.35)",
-            borderRadius: 4,
-            padding: "2px 6px",
-            marginTop: 2,
-            cursor: "pointer",
-            fontFamily: "inherit",
-            textTransform: "uppercase",
-            letterSpacing: "0.08em",
-          }}
-          title="Clear pause flags and let the pipeline keep going"
-        >
+      {paused ? (
+        <button onClick={resume} style={pillStyle("warn")} title="Clear pause flags and let the pipeline keep going">
           Resume →
+        </button>
+      ) : (
+        <button onClick={pauseAll} style={pillStyle("plain")} title="Halt fetch + encode (in-flight encode finishes first)">
+          ⏸ Pause
         </button>
       )}
       <div style={{ color: nasOk ? "var(--ink-3)" : "var(--bad)" }}>
@@ -504,6 +525,8 @@ function TopBar({
   const [runMenu, setRunMenu] = useState(false);
   const [pipelineStatus, setPipelineStatus] = useState(null); // "idle" | "running" | "error" | "finished"
   const [busy, setBusy] = useState(false); // true for 1-2s after clicking Run, before status poll catches up
+  const [pauseState, setPauseState] = useState("running");  // running | paused_all | paused_fetch | paused_encode
+  const [pauseBusy, setPauseBusy] = useState(false);
   const runMenuRef = useRef(null);
 
   // Poll pipeline status so the Run button reflects reality. 2.5s is fast enough that a click
@@ -517,6 +540,12 @@ function TopBar({
       } catch {
         if (!cancelled) setPipelineStatus(null);
       }
+      try {
+        const c = await api.getControlStatus();
+        if (!cancelled) setPauseState(c?.pause_state || "running");
+      } catch {
+        // leave previous pauseState — transient API hiccup
+      }
     };
     tick();
     const id = setInterval(tick, 2500);
@@ -527,6 +556,30 @@ function TopBar({
   }, []);
 
   const pipelineRunning = pipelineStatus === "running";
+  const isPaused = pauseState !== "running";
+
+  const togglePause = async () => {
+    setPauseBusy(true);
+    try {
+      if (isPaused) {
+        await api.resume();
+        window.notify?.({ kind: "good", title: "Pipeline resumed",
+                          body: "pause flags cleared" });
+        setPauseState("running");
+      } else {
+        await api.pause("all");
+        window.notify?.({ kind: "warn", title: "Pipeline paused",
+                          body: "fetch + encode halted; in-flight encode finishes" });
+        setPauseState("paused_all");
+      }
+    } catch (e) {
+      window.notify?.({ kind: "bad",
+                        title: isPaused ? "Resume failed" : "Pause failed",
+                        body: String(e.message || e) });
+    } finally {
+      setTimeout(() => setPauseBusy(false), 600);
+    }
+  };
 
   useEffect(() => {
     if (!runMenu) return;
@@ -590,6 +643,35 @@ function TopBar({
           <path d="M12 7v5l3 2" />
         </svg>
         {rescan ? `Rescanning · ${rescan.pct.toFixed(0)}%` : "Rescan"}
+      </button>
+      <button
+        className="top-btn"
+        onClick={togglePause}
+        disabled={pauseBusy}
+        title={
+          isPaused
+            ? "Clear pause flags so the pipeline keeps going"
+            : "Halt fetch + encode (in-flight encode finishes first)"
+        }
+        style={isPaused ? { color: "var(--warn)", borderColor: "var(--warn)" } : {}}
+      >
+        {isPaused ? (
+          // ▶ resume icon (triangle)
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M6 4v16l14-8z" />
+          </svg>
+        ) : (
+          // ⏸ pause icon (two bars)
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
+            <rect x="6" y="4" width="4" height="16" />
+            <rect x="14" y="4" width="4" height="16" />
+          </svg>
+        )}
+        {pauseBusy
+          ? "…"
+          : isPaused
+            ? `Resume (${pauseState.replace("paused_", "")})`
+            : "Pause"}
       </button>
       <div className="split" ref={runMenuRef}>
         <button

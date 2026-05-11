@@ -493,15 +493,104 @@ def get_history_summary() -> dict:
         recent = days_list[-7:]
         avg_per_day = sum(d["count"] for _, d in recent) / len(recent)
         avg_saved_per_day = sum(d["saved_bytes"] for _, d in recent) / len(recent)
+        # GPU throughput in encode-seconds per day. This is the "how much work
+        # can the encoder do in 24h" budget — historical sum divided by window
+        # length. Better than files/day because file sizes vary wildly (a 50 GB
+        # 4K HDR film takes 90 min, a 470 MB TV episode takes 3 min).
+        avg_encode_secs_per_day = sum(d["encode_time_secs"] for _, d in recent) / len(recent)
+
+        # Per-tier (res_key) average encode_time_secs from history. Used as the
+        # prediction lookup for each remaining file. Falls back to overall mean
+        # when a tier has no history yet (rare — would mean a new resolution
+        # class arrived since the last encode).
+        per_tier_avg_secs: dict[str, float] = {}
+        for tier_key, tier in by_tier.items():
+            n = tier["count"]
+            if n > 0:
+                per_tier_avg_secs[tier_key] = tier["encode_time_secs"] / n
+        overall_mean_secs = total_time / sum(t["count"] for t in by_tier.values()) if by_tier else 600.0
 
         state_data = _get_pipeline_state()
         if state_data and "files" in state_data:
-            remaining = sum(
-                1
-                for f in state_data["files"].values()
-                if f.get("status") not in ("verified", "replaced", "skipped", "error")
-            )
-            if avg_per_day > 0 and remaining > 0:
+            # 2026-05-11: refresh the terminal-status filter to match the
+            # current FileStatus enum (DONE + FLAGGED_*). The old list
+            # ("verified", "replaced", "skipped", "error") was leftover from
+            # a pre-rewrite enum and was over-counting "remaining" because
+            # it never matched current DONE rows. ERROR is excluded too
+            # because errored rows need user action, not pipeline time.
+            terminal = {"done", "error", "flagged_foreign_audio",
+                        "flagged_undetermined", "flagged_manual", "flagged_corrupt"}
+            # The state DB shape is ``{filepath: row_dict}``; the row doesn't
+            # always carry its own filepath field (the path is the key).
+            # Iterate items() so we keep the path for the media_report lookup
+            # below — pre-2026-05-11 we iterated .values() and all 4,224
+            # remaining files fell into the "unknown" tier bucket, defeating
+            # the whole point of tier weighting.
+            remaining_files_list: list[tuple[str, dict]] = [
+                (fp, f)
+                for fp, f in state_data["files"].items()
+                if (f.get("status") or "").lower() not in terminal
+            ]
+            remaining = len(remaining_files_list)
+
+            # Tier-weighted prediction: pull each remaining file's media_report
+            # entry, derive (res_key + hdr) the same way the encoder does, look
+            # up the per-tier average encode_secs from history. Sum the lot for
+            # the total predicted encode time. This replaces the previous naive
+            # remaining/avg_per_day division which treated a 50 GB 4K HDR film
+            # the same as a 470 MB TV episode — they have radically different
+            # encode times (~90 min vs ~3 min), so files/day shifted dramatically
+            # depending on what was in the recent 7-day window. The new estimate
+            # is stable across phase changes (binge week of TV → feature-film week).
+            from server.helpers import read_report_cached
+            from paths import MEDIA_REPORT
+            report = read_report_cached(MEDIA_REPORT) or {}
+            mr_by_path = {f.get("filepath"): f for f in report.get("files", [])}
+
+            def _res_key(mr_entry: dict) -> str:
+                v = mr_entry.get("video") or {}
+                res = v.get("resolution_class", "")
+                hdr = v.get("hdr", False)
+                if res == "4K" and hdr:
+                    return "4K_HDR"
+                if res == "4K":
+                    return "4K_SDR"
+                if res in ("1080p", "720p", "480p", "SD"):
+                    return res
+                return "SD"
+
+            predicted_total_secs = 0.0
+            per_res_tally: dict[str, int] = {}
+            for fp, _row in remaining_files_list:
+                mr_e = mr_by_path.get(fp)
+                if not mr_e:
+                    predicted_total_secs += overall_mean_secs
+                    per_res_tally["unknown"] = per_res_tally.get("unknown", 0) + 1
+                    continue
+                tier = _res_key(mr_e)
+                per_res_tally[tier] = per_res_tally.get(tier, 0) + 1
+                predicted_total_secs += per_tier_avg_secs.get(tier, overall_mean_secs)
+
+            if avg_encode_secs_per_day > 0 and remaining > 0:
+                days_remaining = predicted_total_secs / avg_encode_secs_per_day
+                est_date = datetime.now() + timedelta(days=days_remaining)
+                forecast = {
+                    "remaining_files": remaining,
+                    "avg_files_per_day": round(avg_per_day, 1),
+                    "avg_saved_per_day_gb": round(avg_saved_per_day / (1024**3), 2),
+                    "est_completion_date": est_date.strftime("%Y-%m-%d"),
+                    "est_days_remaining": round(days_remaining, 1),
+                    # New tier-weighted fields. Frontend can show "predicted total
+                    # encode hours" + the queue breakdown by resolution so the
+                    # estimate's reasoning is visible, not a magic number.
+                    "predicted_total_encode_hours": round(predicted_total_secs / 3600, 1),
+                    "gpu_active_hours_per_day": round(avg_encode_secs_per_day / 3600, 1),
+                    "remaining_by_tier": per_res_tally,
+                    "per_tier_avg_minutes": {k: round(v / 60, 1) for k, v in per_tier_avg_secs.items()},
+                }
+            elif avg_per_day > 0 and remaining > 0:
+                # Defensive fallback to the old math if for some reason GPU
+                # throughput is zero. Should never happen in production.
                 days_remaining = remaining / avg_per_day
                 est_date = datetime.now() + timedelta(days=days_remaining)
                 forecast = {

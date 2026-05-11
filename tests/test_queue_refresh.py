@@ -114,6 +114,209 @@ class TestCategoriseEntry:
         assert item is None
         assert orch.state.get_file(fp)["status"] == FileStatus.FLAGGED_CORRUPT.value
 
+    def test_av1_with_force_reencode_lands_in_full_gamut(self, tmp_path):
+        """Pin the 2026-05-07 fix: when the dashboard's "Queue re-encode"
+        button stamps ``force_reencode=true`` on an already-AV1 row, the
+        queue builder must route to full_gamut. Pre-fix, AV1 files were
+        unconditionally routed to gap_filler (audio strip / sub stamp
+        only) or skip — so the user's queue action was a silent no-op.
+        """
+        from pipeline.config import build_config
+
+        orch = _orch(tmp_path)
+        fp = r"\\NAS\Movies\GradeNonOptimal.mkv"
+        # Already encoded — would normally be skipped by the AV1 branch.
+        # Compliant audio (eac3 5.1, eng) so analyse_gaps reports nothing
+        # to do — the only thing keeping this file in the queue is the
+        # force_reencode flag we set below.
+        entry = {
+            "filepath": fp,
+            "filename": "GradeNonOptimal.mkv",
+            "library_type": "movie",
+            "video": {"codec": "AV1", "codec_raw": "av1", "resolution_class": "1080p"},
+            "audio_streams": [{"codec_raw": "eac3", "channels": 6, "language": "eng"}],
+            "subtitle_streams": [],
+            "file_size_bytes": 2_000_000_000,
+            "duration_seconds": 6000,
+            "overall_bitrate_kbps": 1800,
+        }
+        # Simulate the requeue endpoint: status=pending + force_reencode=true.
+        orch.state.set_file(fp, FileStatus.PENDING, force_reencode=True)
+
+        category, item = categorise_entry(entry, build_config(), orch.state, orch.control)
+        assert category == "full_gamut", "AV1 + force_reencode must route to full_gamut"
+        assert item["filepath"] == fp
+        assert item["video_codec"] == "AV1"  # codec carried through
+
+    def test_av1_without_force_reencode_never_full_gamut(self, tmp_path):
+        """Sanity: a pending-status AV1 row WITHOUT force_reencode must NOT
+        land in full_gamut. The flag is the only thing that overrides the
+        AV1 codec branch — without it, the existing gap_filler / skip
+        path applies regardless of pending status.
+        """
+        from pipeline.config import build_config
+
+        orch = _orch(tmp_path)
+        # _av1_entry triggers gap_filler (flac audio); use it because the
+        # exact downstream category doesn't matter — what matters is that
+        # full_gamut is never the answer for AV1 without the flag.
+        entry = _av1_entry(r"\\NAS\Movies\NoFlag.mkv", 2_000_000_000)
+        orch.state.set_file(entry["filepath"], FileStatus.PENDING)
+
+        category, _ = categorise_entry(entry, build_config(), orch.state, orch.control)
+        assert category != "full_gamut", (
+            "AV1 file with status=pending must not fall into full_gamut "
+            "without an explicit force_reencode flag"
+        )
+
+    def test_force_reencode_overrides_gap_filler(self, tmp_path):
+        """If a file has BOTH a force_reencode flag AND gap-filler-eligible
+        gaps (e.g. a non-EAC-3 audio stream), force_reencode wins. The
+        full encode rebuilds audio/subs from scratch, so doing a separate
+        gap_filler pass first would just be wasted I/O.
+        """
+        from pipeline.config import build_config
+
+        orch = _orch(tmp_path)
+        # _av1_entry has flac audio → analyse_gaps reports needs_audio_transcode.
+        entry = _av1_entry(r"\\NAS\Movies\GapAndForce.mkv", 2_000_000_000)
+        orch.state.set_file(entry["filepath"], FileStatus.PENDING, force_reencode=True)
+
+        category, item = categorise_entry(entry, build_config(), orch.state, orch.control)
+        assert category == "full_gamut"
+        assert item["filepath"] == entry["filepath"]
+
+    def test_full_gamut_item_carries_tmdb(self, tmp_path):
+        """Pin the 2026-05-08 grade-mismatch fix: the queue item must
+        carry the tmdb blob through to the encoder. Without it,
+        resolve_encode_params calls derive_grade(item) and gets
+        GRADE_DEFAULT for everything (including blockbuster /
+        sitcom / animation), so re-encodes use the wrong target CQ.
+        """
+        from pipeline.config import build_config
+
+        orch = _orch(tmp_path)
+        entry = {
+            "filepath": r"\\NAS\Movies\Avengers - Infinity War.mkv",
+            "filename": "Avengers - Infinity War.mkv",
+            "library_type": "movie",
+            "video": {"codec": "AV1", "codec_raw": "av1", "resolution_class": "4K", "hdr": True},
+            "audio_streams": [{"codec_raw": "eac3", "channels": 6, "language": "eng"}],
+            "subtitle_streams": [],
+            "file_size_bytes": 33_000_000_000,
+            "duration_seconds": 9000,
+            "overall_bitrate_kbps": 30000,
+            "tmdb": {
+                "tmdb_id": 299536,
+                "original_language": "en",
+                "release_date": "2018-04-25",
+                "runtime": 149,
+                "genres": [{"name": "Action"}, {"name": "Adventure"}, {"name": "Science Fiction"}],
+                "keywords": ["superhero", "marvel comic", "based on comic"],
+            },
+        }
+        # Mark force_reencode=true so the AV1 file actually goes to full_gamut.
+        orch.state.set_file(entry["filepath"], FileStatus.PENDING, force_reencode=True)
+
+        category, item = categorise_entry(entry, build_config(), orch.state, orch.control)
+        assert category == "full_gamut"
+        assert "tmdb" in item, "queue item must carry tmdb forward"
+        assert item["tmdb"].get("original_language") == "en"
+        assert item["tmdb"].get("keywords") == ["superhero", "marvel comic", "based on comic"]
+
+    def test_resolve_encode_params_uses_tmdb_for_grade(self, tmp_path):
+        """End-to-end of patch 1: the queue item's tmdb makes its way
+        through resolve_encode_params -> target_cq -> derive_grade
+        and produces the correct grade for the encoder, not 'default'.
+        """
+        from pipeline.config import build_config, resolve_encode_params
+
+        orch = _orch(tmp_path)
+        entry = {
+            "filepath": r"\\NAS\Movies\Avengers - Infinity War.mkv",
+            "filename": "Avengers - Infinity War.mkv",
+            "library_type": "movie",
+            "video": {"codec": "AV1", "codec_raw": "av1", "resolution_class": "4K", "hdr": True},
+            "audio_streams": [{"codec_raw": "eac3", "channels": 6, "language": "eng"}],
+            "subtitle_streams": [],
+            "file_size_bytes": 33_000_000_000,
+            "duration_seconds": 9000,
+            "overall_bitrate_kbps": 30000,
+            "tmdb": {
+                "original_language": "en",
+                "release_date": "2018-04-25",
+                "runtime": 149,
+                "genres": [{"name": "Action"}, {"name": "Adventure"}, {"name": "Science Fiction"}],
+                "keywords": ["superhero", "marvel comic", "based on comic"],
+            },
+        }
+        orch.state.set_file(entry["filepath"], FileStatus.PENDING, force_reencode=True)
+        cfg = build_config()
+        category, item = categorise_entry(entry, cfg, orch.state, orch.control)
+        assert category == "full_gamut"
+
+        params = resolve_encode_params(cfg, item)
+        # 4K_HDR base CQ is 22; blockbuster grade adds +3 -> 25.
+        assert params["content_grade"] == "blockbuster", (
+            f"expected blockbuster grade, got {params['content_grade']!r} — "
+            f"item is missing tmdb data the grader needs"
+        )
+        assert params["cq"] == 25, f"expected cq=25 (base 22 + 3 offset), got {params['cq']}"
+        assert params["base_cq"] == 22
+        assert params["cq_offset"] == 3
+
+
+class TestPriorityBump:
+    """The 2026-05-08 priority-paths bump replaces the removed force-stack
+    mechanism. Items whose filepath is listed in control/priority.json's
+    ``paths`` field jump to the front of the full_gamut queue regardless
+    of size; everything else stays in the configured size order."""
+
+    def test_priority_paths_lifted_to_front(self):
+        """Sorted output: priority items first (size order within), then
+        the rest in size order."""
+        from pipeline.__main__ import _sort_full_gamut
+
+        queue = [
+            {"filepath": "A", "file_size_bytes": 5_000_000_000},
+            {"filepath": "B", "file_size_bytes": 1_000_000_000},  # priority
+            {"filepath": "C", "file_size_bytes": 10_000_000_000},
+            {"filepath": "D", "file_size_bytes": 2_000_000_000},  # priority
+        ]
+        _sort_full_gamut(queue, {"encode_queue_order": "largest_first"}, {"B", "D"})
+        assert [it["filepath"] for it in queue] == ["D", "B", "C", "A"], (
+            "expected priority items first (D=2GB then B=1GB largest-first within priority), "
+            "then non-priority by size (C=10GB then A=5GB)"
+        )
+
+    def test_no_priority_paths_falls_back_to_size_only(self):
+        """Sanity: empty priority set leaves the standard size-only sort."""
+        from pipeline.__main__ import _sort_full_gamut
+
+        queue = [
+            {"filepath": "A", "file_size_bytes": 5_000_000_000},
+            {"filepath": "B", "file_size_bytes": 1_000_000_000},
+            {"filepath": "C", "file_size_bytes": 10_000_000_000},
+        ]
+        _sort_full_gamut(queue, {"encode_queue_order": "largest_first"}, set())
+        assert [it["filepath"] for it in queue] == ["C", "A", "B"]
+
+    def test_smallest_first_order_preserved(self):
+        """The encode_queue_order=smallest_first override still works
+        within both the priority and non-priority groups."""
+        from pipeline.__main__ import _sort_full_gamut
+
+        queue = [
+            {"filepath": "A", "file_size_bytes": 5_000_000_000},  # priority
+            {"filepath": "B", "file_size_bytes": 1_000_000_000},
+            {"filepath": "C", "file_size_bytes": 2_000_000_000},  # priority
+            {"filepath": "D", "file_size_bytes": 8_000_000_000},
+        ]
+        _sort_full_gamut(queue, {"encode_queue_order": "smallest_first"}, {"A", "C"})
+        assert [it["filepath"] for it in queue] == ["C", "A", "B", "D"], (
+            "smallest_first within priority: C(2GB) then A(5GB); then non-priority B(1GB) then D(8GB)"
+        )
+
 
 class TestMergeNewFiles:
     def test_new_largest_file_lands_at_front_with_default_order(self, tmp_path):

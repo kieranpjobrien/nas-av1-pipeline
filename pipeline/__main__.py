@@ -60,6 +60,45 @@ def setup_logging(staging_dir: str):
     sys.stdout.reconfigure(line_buffering=True)
 
 
+def _build_full_gamut_item(entry: dict) -> dict:
+    """Project a media_report entry into the queue-item shape the GPU/fetch
+    workers consume. Pulled out of :func:`categorise_entry` so the AV1
+    force-reencode path can reuse it without duplicating field plucking.
+
+    Carries the full ``tmdb`` blob through so downstream consumers
+    (``derive_grade`` for content-grade CQ, ``finalize_upload``'s
+    standards-compliance verify for foreign-language audio, etc.) have
+    the genres / keywords / original_language data they need.
+
+    Pre-2026-05-08 the item dropped tmdb, which silently downgraded
+    every encode's grade to ``default`` — Avengers IW (blockbuster
+    target cq=25) re-encoded at the default cq=22, getting a 5%
+    shrink instead of the ~25% it should have. Same root cause
+    blocked verify on foreign-language films (Crouching Tiger 'chi',
+    Seven Samurai 'jpn') because verify's KEEP_LANGS check needs
+    original_language to know which non-English audio is legitimate.
+    """
+    video = entry.get("video", {}) or {}
+    codec_raw = video.get("codec_raw", "")
+    return {
+        "filepath": entry.get("filepath", ""),
+        "filename": entry.get("filename", ""),
+        "file_size_bytes": entry.get("file_size_bytes", 0),
+        "file_size_gb": entry.get("file_size_gb", 0),
+        "duration_seconds": entry.get("duration_seconds", 0),
+        "video_codec": video.get("codec", codec_raw),
+        "resolution": video.get("resolution_class", ""),
+        "bitrate_kbps": entry.get("overall_bitrate_kbps", 0) or 0,
+        "hdr": video.get("hdr", False),
+        "bit_depth": video.get("bit_depth", 8),
+        "audio_streams": entry.get("audio_streams", []),
+        "subtitle_streams": entry.get("subtitle_streams", []),
+        "subtitle_count": entry.get("subtitle_count", 0),
+        "library_type": entry.get("library_type", ""),
+        "tmdb": entry.get("tmdb") or {},
+    }
+
+
 def categorise_entry(
     entry: dict,
     config: dict,
@@ -80,6 +119,17 @@ def categorise_entry(
     Used at startup by :func:`build_queues` AND mid-session by the
     orchestrator's refresh worker so a Sonarr/Radarr drop-in becomes
     next-up automatically without waiting for a pipeline restart.
+
+    Force-reencode of already-AV1 files: when the user clicks "Queue for
+    re-encode" on the dashboard, the requeue endpoint sets
+    ``force_reencode=true`` in the row's ``extras`` JSON. Without that
+    flag the AV1 branch below would route to gap_filler/skip and the
+    user's queue action would be a silent no-op (the only thing it'd
+    achieve is flipping status to ``pending``, which is invisible to
+    the queue builder for AV1 files). The flag is cleared in
+    ``full_gamut`` on a successful DONE transition; if the encode
+    fails the flag stays set so the next queue-build pass picks it up
+    again automatically.
     """
     from pipeline.gap_filler import analyse_gaps
 
@@ -115,33 +165,71 @@ def categorise_entry(
         return ("skip", None)
 
     if codec_raw == "av1":
+        # User-initiated force re-encode wins over the codec check.
+        # Without this an already-AV1 file at the wrong CQ can never be
+        # re-encoded — the queue builder would route it to gap_filler
+        # (audio strip / sub stamp only) or skip outright.
+        if existing and existing.get("force_reencode"):
+            return ("full_gamut", _build_full_gamut_item(entry))
         gaps = analyse_gaps(entry, config)
         if gaps.needs_anything:
             return ("gap_filler", entry)
         return ("skip", None)
 
     # Non-AV1 → full re-encode
-    res = video.get("resolution_class", "")
-    codec = video.get("codec", codec_raw)
-    bitrate = entry.get("overall_bitrate_kbps", 0) or 0
+    return ("full_gamut", _build_full_gamut_item(entry))
 
-    item = {
-        "filepath": filepath,
-        "filename": entry["filename"],
-        "file_size_bytes": entry.get("file_size_bytes", 0),
-        "file_size_gb": entry.get("file_size_gb", 0),
-        "duration_seconds": entry.get("duration_seconds", 0),
-        "video_codec": codec,
-        "resolution": res,
-        "bitrate_kbps": bitrate,
-        "hdr": video.get("hdr", False),
-        "bit_depth": video.get("bit_depth", 8),
-        "audio_streams": entry.get("audio_streams", []),
-        "subtitle_streams": entry.get("subtitle_streams", []),
-        "subtitle_count": entry.get("subtitle_count", 0),
-        "library_type": entry.get("library_type", ""),
-    }
-    return ("full_gamut", item)
+
+def _read_priority_paths(staging_dir: str | None = None) -> set[str]:
+    """Return the set of paths in ``control/priority.json -> paths``.
+
+    Items whose filepath is in this set get bumped to the front of
+    ``full_gamut_queue`` regardless of size. Used for one-off test
+    runs (e.g. "encode these 30 specific files first overnight to
+    verify the fix actually shrinks them"). Empty list / missing
+    file = no bump (queue stays in its normal size order).
+
+    The 2026-05-08 incident review noted the old force-stack
+    mechanism was removed without a replacement. This is a lighter
+    replacement: read-once-at-build-time, no run-time IPC.
+    """
+    if staging_dir is None:
+        staging_dir = str(STAGING_DIR)
+    prio_path = os.path.join(staging_dir, "control", "priority.json")
+    if not os.path.exists(prio_path):
+        return set()
+    try:
+        with open(prio_path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return set()
+    return set(data.get("paths") or [])
+
+
+def _sort_full_gamut(queue: list, config: dict, priority_paths: set[str]) -> None:
+    """In-place sort of the full_gamut queue.
+
+    Order:
+      1. Priority paths (per ``control/priority.json -> paths``), among
+         themselves sorted by size in the configured direction.
+      2. Everything else, sorted by size in the configured direction.
+
+    Largest-first is the default (the user's 2026-05-02 ask) so big
+    files burn down the ETA first; smallest_first config override
+    is preserved for the legacy burn-through-quick-wins use case.
+    """
+    order = (config.get("encode_queue_order") or "largest_first").lower()
+    largest_first = order == "largest_first"
+
+    def _key(item: dict) -> tuple:
+        is_priority = 0 if item.get("filepath") in priority_paths else 1
+        size = item.get("file_size_bytes", 0)
+        # Sort by (priority_rank ASC, size in configured direction).
+        # Negate size for largest-first so the natural ascending tuple
+        # sort puts bigger files first within each priority class.
+        return (is_priority, -size if largest_first else size)
+
+    queue.sort(key=_key)
 
 
 def build_queues(report_path: str, config: dict, state: PipelineState, control: PipelineControl):
@@ -161,17 +249,14 @@ def build_queues(report_path: str, config: dict, state: PipelineState, control: 
         elif category == "gap_filler":
             gap_filler_queue.append(item)
 
-    # Largest-first by default: the big files dominate ETA, so processing
-    # them first makes the ETA visibly shrink rather than grow as the queue
-    # discovers untouched 30 GB 4K HDR titles. The user explicitly asked
-    # for this order on 2026-05-02 ("I'd rather that estimate get smaller
-    # than larger"). Override via config["encode_queue_order"]="smallest_first"
-    # if you want the old burn-through-quick-wins behaviour.
-    order = (config.get("encode_queue_order") or "largest_first").lower()
-    full_gamut_queue.sort(
-        key=lambda x: x["file_size_bytes"],
-        reverse=(order == "largest_first"),
-    )
+    priority_paths = _read_priority_paths()
+    _sort_full_gamut(full_gamut_queue, config, priority_paths)
+    if priority_paths:
+        n_prio = sum(1 for it in full_gamut_queue if it.get("filepath") in priority_paths)
+        logging.info(
+            f"Priority bump active: {n_prio} of {len(full_gamut_queue)} full_gamut "
+            f"items lifted to the front of the queue"
+        )
 
     # Gap filler: NAS-only work first (no fetch), then by size
     # needs_fetch is True only for audio transcode — everything else runs on NAS

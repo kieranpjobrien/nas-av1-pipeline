@@ -273,27 +273,17 @@ def get_library_completion() -> dict:
     counts["grade_too_high"] = 0    # encoded harsher than rule wants → manual review
     counts["grade_unknown"] = 0     # no stamp + no state row
     counts["grade_audited_at"] = None
-    try:
-        from paths import STAGING_DIR  # noqa: PLC0415
-        audit_path = STAGING_DIR / "audit_cq.json"
-        if audit_path.exists():
-            with audit_path.open(encoding="utf-8") as af:
-                audit = json.load(af)
-            buckets = audit.get("buckets") or {}
-            counts["grade_optimal"] = int(buckets.get("optimal", 0))
-            counts["grade_too_low"] = int(buckets.get("too_low", 0))
-            counts["grade_too_high"] = int(buckets.get("too_high", 0))
-            counts["grade_unknown"] = int(buckets.get("unknown", 0))
-            # Audited-at is the file's mtime — useful for the UI to show
-            # "audit is N hours old" and prompt a refresh.
-            try:
-                counts["grade_audited_at"] = audit_path.stat().st_mtime
-            except OSError:
-                pass
-    except Exception:
-        # Don't let an audit-sidecar bug knock the rest of the endpoint
-        # out — readers still want their core compliance numbers.
-        pass
+    # 2026-05-11: audit_cq.json sidecar removed. Audit results now live
+    # in media_report.json as a per-file ``audit`` field plus a top-level
+    # ``audit_summary``. Single source of truth — the dashboard can't show
+    # stale bucket data anymore because there's no parallel file to drift.
+    summary = data.get("audit_summary") or {}
+    buckets = summary.get("buckets") or {}
+    counts["grade_optimal"] = int(buckets.get("optimal", 0))
+    counts["grade_too_low"] = int(buckets.get("too_low", 0))
+    counts["grade_too_high"] = int(buckets.get("too_high", 0))
+    counts["grade_unknown"] = int(buckets.get("unknown", 0))
+    counts["grade_audited_at"] = summary.get("audited_at")
 
     grade_total_audited = (
         counts["grade_optimal"] + counts["grade_too_low"]
@@ -540,31 +530,41 @@ def get_completion_missing(category: str) -> dict:
 
 @router.get("/api/cq-audit")
 def get_cq_audit() -> dict:
-    """Return the audit sidecar produced by ``tools.audit_encode_cq``.
+    """Return the per-file audit data + summary from media_report.json.
+
+    Pre-2026-05-11 the audit lived in a sidecar (``audit_cq.json``). It
+    drifted from media_report and caused the dashboard to bulk-requeue
+    already-encoded files based on stale buckets. Now the audit results
+    are stored as a per-file ``audit`` field on each entry in
+    ``media_report.json.files[]`` plus a top-level ``audit_summary``;
+    this endpoint just projects those out into the response shape the
+    frontend expects.
 
     Frontend reads this when the user drills into the "Grade-Optimised"
     hero card so the file list can show only the bucket they care about
     (too_low / too_high / unknown / optimal).
-
-    Returns an empty payload + ``ready: False`` when no audit has been
-    run yet, so the frontend can render "audit pending — run
-    tools.audit_encode_cq" rather than crashing.
     """
-    from paths import STAGING_DIR
-
-    audit_path = STAGING_DIR / "audit_cq.json"
-    if not audit_path.exists():
-        return {"ready": False, "results": [], "buckets": {}}
-    try:
-        with audit_path.open(encoding="utf-8") as f:
-            audit = json.load(f)
-    except (OSError, json.JSONDecodeError):
+    from paths import MEDIA_REPORT
+    data = read_report_cached(MEDIA_REPORT) or {}
+    summary = data.get("audit_summary") or {}
+    if not summary:
         return {"ready": False, "results": [], "buckets": {}}
 
-    # Add ready=True + audited_at so the UI can show a "last audited" hint
-    try:
-        audit["audited_at"] = audit_path.stat().st_mtime
-    except OSError:
-        audit["audited_at"] = None
-    audit["ready"] = True
-    return audit
+    # Flatten per-file audit blobs back into the response shape
+    # downstream consumers expect (each row carries its filepath).
+    results = []
+    for f in data.get("files", []):
+        a = f.get("audit")
+        if not a:
+            continue
+        results.append({"filepath": f.get("filepath"), **a})
+
+    return {
+        "ready": True,
+        "audited_at": summary.get("audited_at"),
+        "scanned": summary.get("scanned", len(results)),
+        "buckets": summary.get("buckets") or {},
+        "grades": summary.get("grades") or {},
+        "sources": summary.get("sources") or {},
+        "results": results,
+    }

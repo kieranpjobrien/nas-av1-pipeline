@@ -211,6 +211,48 @@ export function Glance({ data, pipelineData, throughputPerDay, workersActive, wo
   const [completion, setCompletion] = useState(null);
   const [healthDeep, setHealthDeep] = useState(null);
   const [incidentsOpen, setIncidentsOpen] = useState(false);
+  // Pause/resume state for the In-flight panel button. Polls /api/control/status
+  // alongside the topbar so both stay in sync — no shared store, just two pollers.
+  const [pauseState, setPauseState] = useState("running");
+  const [pauseBusy, setPauseBusy] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    const tick = () => {
+      api
+        .getControlStatus()
+        .then((s) => !cancelled && setPauseState(s?.pause_state || "running"))
+        .catch(() => {});
+    };
+    tick();
+    const id = setInterval(tick, 2500);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, []);
+  const isPaused = pauseState !== "running";
+  const togglePause = async () => {
+    setPauseBusy(true);
+    try {
+      if (isPaused) {
+        await api.resume();
+        window.notify?.({ kind: "good", title: "Pipeline resumed",
+                          body: "pause flags cleared" });
+        setPauseState("running");
+      } else {
+        await api.pause("all");
+        window.notify?.({ kind: "warn", title: "Pipeline paused",
+                          body: "fetch + encode halted; in-flight encode finishes" });
+        setPauseState("paused_all");
+      }
+    } catch (e) {
+      window.notify?.({ kind: "bad",
+                        title: isPaused ? "Resume failed" : "Pause failed",
+                        body: String(e.message || e) });
+    } finally {
+      setTimeout(() => setPauseBusy(false), 600);
+    }
+  };
   useEffect(() => {
     let cancelled = false;
     api
@@ -823,12 +865,56 @@ export function Glance({ data, pipelineData, throughputPerDay, workersActive, wo
 
       <div className="two-col">
         <div className="card">
-          <h3>
+          <h3 style={{ display: "flex", alignItems: "center", gap: 8 }}>
             In flight
-            <span className="tag" style={{ marginLeft: 0 }}>live</span>
+            <span className="tag" style={{ marginLeft: 0 }}>{isPaused ? "paused" : "live"}</span>
             <span className="count">
               {encoding.length} encoding · {queued.length} queued · {fetching.length} fetching
             </span>
+            <button
+              onClick={togglePause}
+              disabled={pauseBusy}
+              title={
+                isPaused
+                  ? "Clear pause flags so the pipeline keeps going"
+                  : "Halt fetch + encode (in-flight encode finishes first)"
+              }
+              style={{
+                marginLeft: "auto",
+                padding: "4px 10px",
+                fontSize: 11,
+                fontWeight: 700,
+                fontFamily: "inherit",
+                letterSpacing: "0.04em",
+                textTransform: "uppercase",
+                cursor: pauseBusy ? "wait" : "pointer",
+                border: `1px solid ${isPaused ? "var(--warn)" : "var(--border)"}`,
+                background: isPaused ? "rgba(240,180,41,0.08)" : "transparent",
+                color: isPaused ? "var(--warn)" : "var(--ink-2)",
+                borderRadius: 4,
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 6,
+                opacity: pauseBusy ? 0.6 : 1,
+                transition: "all 0.15s",
+              }}
+            >
+              {isPaused ? (
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M6 4v16l14-8z" />
+                </svg>
+              ) : (
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor">
+                  <rect x="6" y="4" width="4" height="16" />
+                  <rect x="14" y="4" width="4" height="16" />
+                </svg>
+              )}
+              {pauseBusy
+                ? "…"
+                : isPaused
+                  ? `Resume (${pauseState.replace("paused_", "")})`
+                  : "Pause"}
+            </button>
           </h3>
           <div className="active-list">
             {encoding.length === 0 && queued.length === 0 && fetching.length === 0 && (

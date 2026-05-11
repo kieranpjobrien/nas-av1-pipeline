@@ -116,3 +116,102 @@ class TestControlEndpoints:
         data = resp.json()
         assert "pause_state" in data
         assert data["pause_state"] == "running"
+
+
+class TestRequeueEndpoint:
+    """POST /api/file/requeue and /api/files/requeue-batch must stamp
+    ``force_reencode=true`` in the row's extras JSON. Without it,
+    already-AV1 files queued via the dashboard would be silently
+    skipped by the orchestrator's queue builder (categorise_entry
+    routes AV1 files to gap_filler/skip based on codec, ignoring
+    pending status). Pin this so the wiring doesn't regress.
+    """
+
+    def _make_test_file(self, subdir: str = "movies", name: str = "GradeNonOptimal.mkv") -> str:
+        """Create a fake .mkv inside the test NAS dir so the endpoint's
+        os.path.exists + path-prefix checks pass. Also init the state DB
+        tables (the requeue endpoint uses raw sqlite3, not PipelineState,
+        so it doesn't auto-create the schema)."""
+        import os as _os
+
+        nas = _os.environ["NAS_MOVIES"] if subdir == "movies" else _os.environ["NAS_SERIES"]
+        path = _os.path.join(nas, name)
+        with open(path, "wb") as f:
+            f.write(b"x" * 1024)
+
+        # Ensure pipeline_files table exists for raw-sqlite endpoint writes.
+        from paths import PIPELINE_STATE_DB
+        from pipeline.state import PipelineState
+
+        state = PipelineState(str(PIPELINE_STATE_DB))
+        state.close()
+        return path
+
+    def _read_extras(self, path: str) -> dict:
+        import json as _json
+        import sqlite3 as _sqlite3
+
+        from paths import PIPELINE_STATE_DB
+
+        con = _sqlite3.connect(str(PIPELINE_STATE_DB))
+        try:
+            row = con.execute(
+                "SELECT extras FROM pipeline_files WHERE filepath = ?", (path,)
+            ).fetchone()
+        finally:
+            con.close()
+        if not row or not row[0]:
+            return {}
+        return _json.loads(row[0])
+
+    def test_single_requeue_sets_force_reencode_for_new_row(self, test_app):
+        """No existing row → INSERT path stamps force_reencode=true."""
+        path = self._make_test_file()
+        resp = test_app.post("/api/file/requeue", json={"path": path})
+        assert resp.status_code == 200, resp.text
+        extras = self._read_extras(path)
+        assert extras.get("force_reencode") is True
+
+    def test_single_requeue_sets_force_reencode_for_existing_done_row(self, test_app):
+        """Existing DONE row → UPDATE path preserves other extras AND adds
+        force_reencode=true. Simulates the realistic case: an already-
+        encoded AV1 file the user wants re-encoded at a new CQ."""
+        import sqlite3 as _sqlite3
+
+        from paths import PIPELINE_STATE_DB
+
+        path = self._make_test_file()
+        # Pre-seed a DONE row with some prior extras to ensure they survive.
+        con = _sqlite3.connect(str(PIPELINE_STATE_DB))
+        con.execute(
+            "INSERT OR REPLACE INTO pipeline_files (filepath, status, extras) "
+            "VALUES (?, 'done', ?)",
+            (path, '{"encode_params_used": {"cq": 32}}'),
+        )
+        con.commit()
+        con.close()
+
+        resp = test_app.post("/api/file/requeue", json={"path": path})
+        assert resp.status_code == 200, resp.text
+        extras = self._read_extras(path)
+        assert extras.get("force_reencode") is True
+        # Prior extras must survive — encode_params_used is the canonical
+        # carry-forward field, losing it would cause the next encode to
+        # forget the user's CQ override.
+        assert extras.get("encode_params_used") == {"cq": 32}
+
+    def test_batch_requeue_sets_force_reencode_on_all(self, test_app):
+        """Bulk endpoint stamps the flag on every row it touches."""
+        # Init schema + create files in one shot via the helper.
+        paths = [
+            self._make_test_file(name="BatchA.mkv"),
+            self._make_test_file(name="BatchB.mkv"),
+            self._make_test_file(name="BatchC.mkv"),
+        ]
+
+        resp = test_app.post("/api/files/requeue-batch", json={"paths": paths})
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["queued"] == len(paths)
+        for p in paths:
+            assert self._read_extras(p).get("force_reencode") is True
