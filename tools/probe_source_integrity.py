@@ -97,36 +97,51 @@ def _probe_duration(filepath: str, timeout: int = 30) -> float:
 
 
 def _decode_window(filepath: str, start_secs: float, length_secs: float = 60,
-                   timeout: int = 180) -> tuple[bool, list[str]]:
+                   timeout: int = 180, max_retries: int = 1) -> tuple[bool, list[str]]:
     """Decode ``length_secs`` of video starting at ``start_secs`` via
     ffmpeg's null muxer (no output). Return (ok, error_lines_sample).
 
     ``ok`` is True if no HARD_ERROR_PATTERN appeared in stderr; soft
     warnings ("Application provided invalid, non monotonically
-    increasing dts") are tolerated."""
+    increasing dts") are tolerated.
+
+    Timeouts are retried up to ``max_retries`` times before being
+    reported as failures — flaky SMB reads can cause a 60s decode
+    to overrun a 180s wall clock, and that's NOT bitstream corruption.
+    Up (2009) (2026-05-12) tripped the original no-retry version on a
+    transient timeout and got falsely flagged_corrupt. A retry on the
+    SAME window distinguishes real corruption (deterministic; both
+    attempts hit hard-error signatures) from network blips (first
+    attempt times out, second succeeds).
+    """
     cmd = [FFMPEG, "-v", "error", "-nostdin",
            "-ss", str(start_secs), "-i", filepath,
            "-t", str(length_secs),
-           "-c", "copy" if False else "rawvideo",   # force decode
            "-f", "null", "-"]
-    # Replace "rawvideo" — for null muxer we need DECODE, not stream copy.
-    cmd = [FFMPEG, "-v", "error", "-nostdin",
-           "-ss", str(start_secs), "-i", filepath,
-           "-t", str(length_secs),
-           "-f", "null", "-"]
-    try:
-        out = subprocess.run(cmd, capture_output=True, text=True,
-                             timeout=timeout, encoding="utf-8", errors="replace")
-    except subprocess.TimeoutExpired:
-        return False, [f"timeout after {timeout}s at ss={start_secs:.0f}s"]
-    stderr = out.stderr or ""
-    hits: list[str] = []
-    for line in stderr.splitlines():
-        if any(p.search(line) for p in HARD_ERROR_PATTERNS):
-            hits.append(line.strip()[:200])
-            if len(hits) >= 6:
-                break
-    return (not hits), hits
+    attempts = max_retries + 1
+    timeout_msgs: list[str] = []
+    for attempt in range(1, attempts + 1):
+        try:
+            out = subprocess.run(cmd, capture_output=True, text=True,
+                                 timeout=timeout, encoding="utf-8", errors="replace")
+        except subprocess.TimeoutExpired:
+            timeout_msgs.append(
+                f"timeout after {timeout}s at ss={start_secs:.0f}s (attempt {attempt}/{attempts})"
+            )
+            if attempt < attempts:
+                continue  # retry — could be flaky SMB
+            return False, timeout_msgs
+        # Real ffmpeg exit — examine stderr regardless of return code
+        stderr = out.stderr or ""
+        hits: list[str] = []
+        for line in stderr.splitlines():
+            if any(p.search(line) for p in HARD_ERROR_PATTERNS):
+                hits.append(line.strip()[:200])
+                if len(hits) >= 6:
+                    break
+        return (not hits), hits
+    # Unreachable in practice but keeps type checker happy.
+    return False, timeout_msgs
 
 
 def probe_file(filepath: str) -> ProbeResult:

@@ -195,6 +195,66 @@ def test_main_streams_progress_to_stderr_in_json_mode(monkeypatch, tmp_path, cap
     assert rc == 0
 
 
+def test_decode_window_retries_on_timeout(monkeypatch):
+    """A flaky-SMB timeout must NOT immediately fail — retry once. If the
+    second attempt succeeds, return (ok, []). This is the Up (2009) class:
+    the first attempt overran the 180s wall clock on a network blip, but
+    the file is fine on retry."""
+    import subprocess as _sp
+    call_count = {"n": 0}
+
+    def fake_run(cmd, capture_output=False, text=False, timeout=None, encoding=None, errors=None):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise _sp.TimeoutExpired(cmd, timeout or 180)
+        # Second call: clean decode
+        return _sp.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(psi.subprocess, "run", fake_run)
+    ok, errs = psi._decode_window("/fake.mkv", 0.0, 60)
+    assert ok is True
+    assert errs == []
+    assert call_count["n"] == 2, "expected exactly one retry after timeout"
+
+
+def test_decode_window_persistent_timeout_fails(monkeypatch):
+    """If BOTH attempts time out, the window is reported as failed.
+    Two-attempts-then-fail is the safety floor — we still flag persistent
+    flakiness as corruption rather than spinning forever."""
+    import subprocess as _sp
+    call_count = {"n": 0}
+
+    def always_timeout(cmd, **kw):
+        call_count["n"] += 1
+        raise _sp.TimeoutExpired(cmd, kw.get("timeout") or 180)
+
+    monkeypatch.setattr(psi.subprocess, "run", always_timeout)
+    ok, errs = psi._decode_window("/fake.mkv", 0.0, 60)
+    assert ok is False
+    assert len(errs) == 2
+    assert all("timeout" in e for e in errs)
+    assert call_count["n"] == 2
+
+
+def test_decode_window_hard_error_no_retry(monkeypatch):
+    """If the FIRST attempt completes with a hard-error stderr signature,
+    no retry — bitstream corruption is deterministic; re-decoding will hit
+    the same error and waste GPU time. Retry is only for timeouts."""
+    import subprocess as _sp
+    call_count = {"n": 0}
+
+    def first_call_returns_error(cmd, **kw):
+        call_count["n"] += 1
+        return _sp.CompletedProcess(cmd, 0, "",
+                                    "[hevc] Could not find ref with POC 7\n")
+
+    monkeypatch.setattr(psi.subprocess, "run", first_call_returns_error)
+    ok, errs = psi._decode_window("/fake.mkv", 0.0, 60)
+    assert ok is False
+    assert any("POC" in e for e in errs)
+    assert call_count["n"] == 1, "must NOT retry on hard decode errors"
+
+
 def test_main_streams_progress_to_stderr_in_text_mode(monkeypatch, tmp_path, capsys):
     """Without --json, stderr still gets per-file progress."""
     targets = [str(tmp_path / "x.mkv")]
