@@ -144,3 +144,69 @@ def test_probe_file_zero_duration_returns_fatal(monkeypatch, tmp_path):
     result = psi.probe_file(str(fp))
     assert result.healthy is False
     assert "duration" in (result.fatal or "")
+
+
+# --------------------------------------------------------------------------
+# Streaming output — bug we hit live in this session
+# --------------------------------------------------------------------------
+
+
+def test_main_streams_progress_to_stderr_in_json_mode(monkeypatch, tmp_path, capsys):
+    """In --json mode the tool MUST still write per-file progress to
+    stderr as each file finishes. Pre-2026-05-12 progress was suppressed
+    whenever --json was set, so a long-running probe looked dead. The
+    test pins:
+      * stderr emits one line per file with the basename
+      * stdout emits one JSONL record per file as it completes (not
+        a single dump at the end)
+      * a final summary JSONL line carries 'summary': true
+    """
+    import json as _json
+
+    # Two fake targets, both clean
+    targets = [str(tmp_path / "a.mkv"), str(tmp_path / "b.mkv")]
+    for fp in targets:
+        Path(fp).write_bytes(b"x")
+    monkeypatch.setattr(psi, "_files_from_state", lambda *a, **kw: targets)
+    monkeypatch.setattr(psi, "_probe_duration", lambda *a, **kw: 3600.0)
+    monkeypatch.setattr(psi.subprocess, "run",
+                        FakeRun([("-i ", 0, "")]))  # clean decode
+
+    rc = psi.main(["--from-state", "--json"])
+    captured = capsys.readouterr()
+
+    # Progress on stderr — one line per file with the basename
+    assert "[1/2] a.mkv" in captured.err
+    assert "[2/2] b.mkv" in captured.err
+
+    # JSONL on stdout — one record per file + a summary line
+    lines = [l for l in captured.out.splitlines() if l.strip()]
+    assert len(lines) == 3, (
+        f"expected 2 result + 1 summary JSONL line, got {len(lines)}: {lines}"
+    )
+    rec_a = _json.loads(lines[0])
+    rec_b = _json.loads(lines[1])
+    summary = _json.loads(lines[2])
+    assert rec_a["filepath"] == targets[0]
+    assert rec_b["filepath"] == targets[1]
+    assert summary.get("summary") is True
+    assert summary.get("probed") == 2
+    assert summary.get("broken") == 0
+    assert rc == 0
+
+
+def test_main_streams_progress_to_stderr_in_text_mode(monkeypatch, tmp_path, capsys):
+    """Without --json, stderr still gets per-file progress."""
+    targets = [str(tmp_path / "x.mkv")]
+    Path(targets[0]).write_bytes(b"x")
+    monkeypatch.setattr(psi, "_files_from_state", lambda *a, **kw: targets)
+    monkeypatch.setattr(psi, "_probe_duration", lambda *a, **kw: 3600.0)
+    monkeypatch.setattr(psi.subprocess, "run", FakeRun([("-i ", 0, "")]))
+
+    psi.main(["--from-state"])
+    captured = capsys.readouterr()
+    assert "[1/1] x.mkv" in captured.err
+    # Final summary on stderr too
+    assert "0/1 sources are corrupt" in captured.err
+    # stdout should NOT have JSONL records when --json not set
+    assert captured.out.strip() == ""

@@ -216,7 +216,9 @@ def main(argv: Optional[list[str]] = None) -> int:
                            help="probe all pending+error rows in pipeline_state.db")
     src_group.add_argument("--from-report", action="store_true",
                            help="probe all files in media_report.json (slow sweep)")
-    parser.add_argument("--json", action="store_true", help="emit results as JSON")
+    parser.add_argument("--json", action="store_true",
+                        help="emit each result as a JSONL line on stdout, "
+                             "final summary at end. Progress on stderr regardless.")
     parser.add_argument("--apply", action="store_true",
                         help="mark broken files as flagged_corrupt in state DB")
     parser.add_argument("--limit", type=int, default=0,
@@ -239,39 +241,55 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     results: list[ProbeResult] = []
     broken: list[ProbeResult] = []
+    sys.stderr.write(f"probing {len(targets)} sources (apply={args.apply})\n")
+    sys.stderr.flush()
     for i, fp in enumerate(targets, 1):
-        if not args.json:
-            sys.stderr.write(f"[{i}/{len(targets)}] {Path(fp).name}\n")
-            sys.stderr.flush()
+        sys.stderr.write(f"[{i}/{len(targets)}] {Path(fp).name} ... ")
+        sys.stderr.flush()
         r = probe_file(fp)
         results.append(r)
+        tag = "OK" if r.healthy else ("BROKEN " + (r.fatal or ",".join(r.windows_failed)))
+        sys.stderr.write(
+            f"{tag}  dur={r.duration_seconds:.0f}s  took={r.probe_time_secs:.1f}s\n"
+        )
+        sys.stderr.flush()
         if not r.healthy:
             broken.append(r)
             if args.apply and r.fatal is None:
                 try:
                     _flag_broken_in_state(fp, r)
+                    sys.stderr.write(f"  -> marked flagged_corrupt in state DB\n")
+                    sys.stderr.flush()
                 except Exception as e:  # noqa: BLE001
-                    sys.stderr.write(f"  apply failed for {fp}: {e}\n")
+                    sys.stderr.write(f"  -> apply failed: {e}\n")
+                    sys.stderr.flush()
+        # In --json mode, emit JSONL so callers can tail the stream.
+        # The final summary still appears at the end.
+        if args.json:
+            sys.stdout.write(json.dumps(r.to_dict()) + "\n")
+            sys.stdout.flush()
 
     if args.json:
-        payload = {
+        # Trailing summary line as JSONL so the final state is greppable.
+        sys.stdout.write(json.dumps({
+            "summary": True,
             "probed": len(results),
             "broken": len(broken),
-            "results": [r.to_dict() for r in results],
-        }
-        sys.stdout.write(json.dumps(payload, indent=2) + "\n")
-    else:
-        sys.stderr.write(f"\n=== {len(broken)}/{len(results)} sources are corrupt ===\n")
-        for r in broken:
-            sys.stderr.write(
-                f"  BROKEN  duration={r.duration_seconds:.0f}s  "
-                f"windows={','.join(r.windows_failed) or 'fatal'}  "
-                f"{Path(r.filepath).name}\n"
-            )
-            if r.fatal:
-                sys.stderr.write(f"    fatal: {r.fatal}\n")
-            for err in r.sample_errors[:2]:
-                sys.stderr.write(f"    {err}\n")
+        }) + "\n")
+        sys.stdout.flush()
+
+    sys.stderr.write(f"\n=== {len(broken)}/{len(results)} sources are corrupt ===\n")
+    for r in broken:
+        sys.stderr.write(
+            f"  BROKEN  duration={r.duration_seconds:.0f}s  "
+            f"windows={','.join(r.windows_failed) or 'fatal'}  "
+            f"{Path(r.filepath).name}\n"
+        )
+        if r.fatal:
+            sys.stderr.write(f"    fatal: {r.fatal}\n")
+        for err in r.sample_errors[:2]:
+            sys.stderr.write(f"    {err}\n")
+    sys.stderr.flush()
 
     # Exit 1 if any broken files were found (so CI / scripts can react).
     return 1 if broken else 0
