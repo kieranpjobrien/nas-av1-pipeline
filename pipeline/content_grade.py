@@ -48,18 +48,36 @@ ALL_GRADES = (
 )
 
 # Offset added to the base resolution-matrix CQ. Production-type signal.
+#
+# 2026-05-09 revision: animation offsets bumped substantially. The previous
+# tv_animation_long=+2 / tv_animation=+3 / cinema_animation=+0 calibration
+# was extrapolated from live-action sweet-spots and turned out to be far
+# too gentle for animated content — Bad Batch S03 at 4K HDR (base 24 + 2 =
+# 26) re-encoded with a 0.99 compression ratio (essentially no shrink at
+# the same CQ). Animation compresses dramatically better than live action
+# at the same CQ thanks to flat colours, simple motion vectors, smaller
+# detail surface area, and predictable gradient regions. Validated visually
+# at the new targets.
 _GRADE_BASE_OFFSET: dict[str, int] = {
     GRADE_SITCOM: 5,                    # talking-head, static, low motion → +5
-    GRADE_TV_ANIMATION: 3,              # flat colours, simple motion → +3
+    GRADE_TV_ANIMATION: 7,              # flat colours, simple motion → +7
+                                        # (was +3; user wanted Bluey/Bob's
+                                        # Burgers at higher CQ for the
+                                        # flat-frame compression headroom)
     # 3D CGI animation series (Clone Wars, Bad Batch, ATLA, anime-action).
-    # Compresses better than live-action drama but worse than flat-shaded
-    # comedy animation: detail-rich character models + dark space gradients
-    # need more bits than Bluey/Bob's Burgers but less than Breaking Bad.
-    # User-validated 2026-05-06: Bad Batch at CQ 32 (4K SDR base 30 + 2)
-    # is the sweet spot.
-    GRADE_TV_ANIMATION_LONG: 2,
+    # Compresses better than live-action drama. The previous +2 left Bad
+    # Batch S03 at 4K HDR target=26 — re-encoding from cq=24 source to
+    # cq=26 produced 0.99 ratio (no real shrink). +6 puts 4K HDR at 30,
+    # which gives proper compression headroom for action animation.
+    GRADE_TV_ANIMATION_LONG: 6,         # was +2
     GRADE_DEFAULT: 0,
-    GRADE_CINEMA_ANIMATION: 0,          # detail-rich CGI for cinema → no offset
+    GRADE_CINEMA_ANIMATION: 4,          # was +0; detail-rich CGI for cinema
+                                        # but still animation — flat regions
+                                        # + predictable motion absorbs +4
+                                        # without artifact (Pixar / Disney /
+                                        # Spider-Verse). Stays gentler than
+                                        # tv_animation (which has even simpler
+                                        # frames) by 3 CQ.
     GRADE_CLASSIC_FILM: 1,              # film grain doesn't need pristine bits at HD → +1
     # CGI-heavy spectacle compresses well — smooth gradients, predictable
     # motion vectors, masking from chaotic action scenes. The 4K HDR base

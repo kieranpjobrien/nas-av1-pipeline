@@ -192,7 +192,13 @@ def _select_audio_streams(item: dict, config: dict) -> list[int] | None:
     return kept
 
 
-def _map_subtitle_streams(cmd: list[str], item: dict, config: dict) -> None:
+def _map_subtitle_streams(
+    cmd: list[str],
+    item: dict,
+    config: dict,
+    *,
+    external_subs_present: bool = False,
+) -> None:
     """Add per-stream subtitle mappings, keeping only English/undefined tracks.
 
     If strip_non_english_subs is disabled, maps all subs with -map 0:s?.
@@ -200,6 +206,15 @@ def _map_subtitle_streams(cmd: list[str], item: dict, config: dict) -> None:
     Uses pipeline.streams.parse_sub_stream + is_hi_internal for HI detection.
     The HI rule is stricter than the old inline check (it also catches ``cc``
     and disposition flags) — see pipeline/streams.py for details.
+
+    ``external_subs_present`` (added 2026-05-10): when an English external
+    sidecar (.en.srt) is being muxed in alongside, skip the internal regular
+    English track to keep the policy "max 1 English sub". Pre-fix, The Office
+    S03E16 / Veep / Futurama outputs ended up with 2 English subs because
+    this function happily mapped an internal PGS/SubRip English while
+    ``external_subs`` was simultaneously muxed in the caller. Forced /
+    foreign-language subs are still mapped — they're not duplicates of the
+    external English sidecar.
     """
     if not config.get("strip_non_english_subs", True):
         cmd.extend(["-map", "0:s?"])
@@ -248,7 +263,11 @@ def _map_subtitle_streams(cmd: list[str], item: dict, config: dict) -> None:
     from pipeline.config import ENG_LANGS
 
     mapped = 0
-    found_regular_eng = False
+    # If an external English sidecar is being muxed in by the caller, treat
+    # the regular-English slot as already-claimed so we don't keep a second
+    # internal English. Forced / foreign subs are still mapped — they don't
+    # collide with the external English sidecar.
+    found_regular_eng = external_subs_present
     for i, sub in enumerate(parsed_subs):
         if sub.is_forced:
             cmd.extend(["-map", f"0:s:{i}?"])
@@ -258,8 +277,9 @@ def _map_subtitle_streams(cmd: list[str], item: dict, config: dict) -> None:
             mapped += 1
             found_regular_eng = True
 
-    if mapped == 0:
-        # No English subs found — map all to be safe (might have unlabelled ones)
+    if mapped == 0 and not external_subs_present:
+        # No English subs found AND no external sidecar — map all to be safe
+        # (the source might have unlabelled English subs).
         cmd.extend(["-map", "0:s?"])
     elif mapped < len(raw_subs):
         stripped = len(raw_subs) - mapped
@@ -515,7 +535,9 @@ def build_ffmpeg_cmd(
         cmd.extend(["-map", "0:a"])
 
     if include_subs:
-        _map_subtitle_streams(cmd, item, config)
+        _map_subtitle_streams(
+            cmd, item, config, external_subs_present=bool(external_subs)
+        )
 
     # Map external subtitle inputs (inputs 1, 2, 3, ...)
     if external_subs:

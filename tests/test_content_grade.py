@@ -232,7 +232,12 @@ def test_bad_batch_episode_runtime_drift_does_not_change_grade():
 
 
 def test_bad_batch_target_cq_at_4k_sdr():
-    """Pin the math the user signed off on: base 30 + 2 = CQ 32 at 4K SDR."""
+    """2026-05-09 revision: tv_animation_long offset bumped from +2 to +6
+    after Bad Batch S03 4K HDR re-encode at the old target produced 0.99
+    compression ratio (no real shrink). Animation compresses better than
+    live action at the same CQ — the old offset was extrapolated from
+    live-action sweet-spots and turned out far too gentle.
+    Base 30 + 6 = CQ 36 at 4K SDR."""
     e = _entry(
         "series",
         genres=["Action & Adventure", "Animation", "Sci-Fi & Fantasy"],
@@ -240,9 +245,9 @@ def test_bad_batch_target_cq_at_4k_sdr():
         episode_runtime=[24],
     )
     final, grade, offset = target_cq(30, e)
-    assert final == 32
+    assert final == 36
     assert grade == GRADE_TV_ANIMATION_LONG
-    assert offset == 2
+    assert offset == 6
 
 
 def test_breaking_bad_stays_default():

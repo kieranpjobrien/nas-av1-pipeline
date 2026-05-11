@@ -335,6 +335,59 @@ class TestSubtitleMapOptional:
             if tok == "-map" and cmd[i + 1].startswith("0:s:") and not cmd[i + 1].endswith("?"):
                 pytest.fail(f"hard sub map at index {i}: {cmd[i:i + 2]}")
 
+    def test_external_eng_sidecar_skips_internal_eng(self) -> None:
+        """2026-05-10 fix: when an external English sidecar is being muxed
+        in via ``external_subs``, the internal-sub mapper must NOT also
+        keep an internal regular English track. Pre-fix outputs had 2
+        English subs (The Office S03E16 PGS+SubRip; Veep S02E02 SubRip+
+        SubRip) because both code paths claimed the English slot.
+
+        Forced-flag internal subs are still kept — they're a different
+        slot from the regular English sidecar.
+        """
+        item = _base_item()
+        item["subtitle_streams"] = [
+            {"language": "eng", "title": "", "codec": "hdmv_pgs_subtitle"},
+        ]
+        cmd = build_ffmpeg_cmd(
+            input_path="in.mkv",
+            output_path="out.mkv",
+            item=item,
+            config=_base_config(),
+            external_subs=["/path/to/movie.en.srt"],
+        )
+        # No internal sub should be mapped — the external (input 1) covers it.
+        for i, tok in enumerate(cmd[:-1]):
+            if tok == "-map" and cmd[i + 1].startswith("0:s"):
+                pytest.fail(
+                    f"internal sub mapped despite external sidecar: {cmd[i:i + 2]}"
+                )
+        # The external sub must still be mapped.
+        assert "1:s" in cmd, "external sidecar must still be mapped"
+
+    def test_external_eng_keeps_internal_forced_sub(self) -> None:
+        """Internal *forced* sub tracks are kept even when an external
+        English sidecar is present — forced subs cover foreign-dialogue
+        snippets, not the regular dialogue the external English handles.
+        Two distinct slots."""
+        item = _base_item()
+        item["subtitle_streams"] = [
+            {"language": "eng", "title": "Forced", "codec": "subrip"},
+            {"language": "eng", "title": "", "codec": "subrip"},
+        ]
+        cmd = build_ffmpeg_cmd(
+            input_path="in.mkv",
+            output_path="out.mkv",
+            item=item,
+            config=_base_config(),
+            external_subs=["/path/to/movie.en.srt"],
+        )
+        # The forced (idx=0) is kept; the regular English (idx=1) is dropped.
+        assert "0:s:0?" in cmd, "forced internal sub must still be mapped"
+        # The regular English internal must NOT be mapped
+        idx_pairs = [(cmd[i], cmd[i + 1]) for i in range(len(cmd) - 1) if cmd[i] == "-map"]
+        assert ("-map", "0:s:1?") not in idx_pairs, "regular English internal not skipped"
+
     def test_stale_sub_metadata_survives(self) -> None:
         """Regression: item says 1 sub, input (hypothetically) has 0 — builder must not crash.
 
