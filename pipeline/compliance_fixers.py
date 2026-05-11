@@ -47,10 +47,20 @@ def _mkvmerge_drop_streams(
     Returns True on success. False if mkvmerge fails or the output looks
     truncated (≥50% of source size guard, mirrors mkv_tags._try_remux_in_place).
 
-    The drop_*_indices are 0-based as ffprobe sees them within their
-    stream type (so audio index 0 = first audio stream). mkvmerge's
-    ``--audio-tracks`` / ``--subtitle-tracks`` use ffprobe-style
-    indices when paired with explicit track-id list.
+    ``drop_*_indices`` are PER-TYPE indices as ffprobe sees them (sub index
+    0 = first subtitle stream). mkvmerge's ``--audio-tracks`` /
+    ``--subtitle-tracks`` flags however use **global** mkvmerge track IDs,
+    which include video + audio + subtitles in source-stream order. So a
+    file with 1 video + 4 audio + 26 subs has audio at IDs 1-4 and subs at
+    IDs 5-30; per-type sub index 25 maps to global track ID 30.
+
+    Pre-2026-05-12 this function passed per-type indices directly to
+    ``--subtitle-tracks`` and ``--audio-tracks``. mkvmerge interpreted them
+    as global IDs, kept the wrong tracks (or all of them on a no-match
+    fallback), and the compliance gate saw the same violations on every
+    re-encode — that's the GoodFellas / Mary Poppins / The Favourite /
+    Toni Erdmann / Blue Valentine / Jurassic World loop. The breaker
+    counter climbed but the underlying fix never worked.
     """
     if not drop_audio_indices and not drop_sub_indices:
         return True  # nothing to drop
@@ -58,33 +68,32 @@ def _mkvmerge_drop_streams(
     src_path = Path(src)
     tmp_out = str(src_path.parent / (src_path.name + ".compliance_tmp.mkv"))
 
+    # One probe for both audio + sub fixes — saves an SMB round-trip.
+    from pipeline.full_gamut import _probe_full
+    probe = _probe_full(src)
+    n_video = len(probe.get("video") or [])
+    n_audio = len(probe.get("audio") or [])
+    n_sub = len(probe.get("subs") or [])
+    audio_id_offset = n_video             # audio global IDs: [n_video, n_video+n_audio)
+    sub_id_offset = n_video + n_audio     # sub global IDs:   [offset, offset+n_sub)
+
     cmd = [MKVMERGE, "-o", tmp_out]
 
     if drop_audio_indices is not None:
-        # Need to KEEP audio tracks not in drop set. mkvmerge wants an
-        # absolute track-id list of what to keep — get those by probing
-        # how many audio tracks exist, then emit a CSV of kept indices.
-        # mkvmerge's "track-id" for audio is the per-stream-type index
-        # (matches ffprobe's stream index within the audio set).
-        # The simpler form: --audio-tracks <csv> keeps only those.
-        from pipeline.full_gamut import _probe_full
-        probe = _probe_full(src)
-        n_audio = len(probe.get("audio") or [])
-        keep_audio = [i for i in range(n_audio) if i not in drop_audio_indices]
-        if not keep_audio:
+        keep_audio_per_type = [i for i in range(n_audio) if i not in drop_audio_indices]
+        if not keep_audio_per_type:
             logging.error(
                 f"compliance fix refuses to drop ALL audio tracks (would produce zero-audio file): {src}"
             )
             return False
-        cmd.extend(["--audio-tracks", ",".join(str(i) for i in keep_audio)])
+        keep_audio_global = [audio_id_offset + i for i in keep_audio_per_type]
+        cmd.extend(["--audio-tracks", ",".join(str(i) for i in keep_audio_global)])
 
     if drop_sub_indices is not None:
-        from pipeline.full_gamut import _probe_full
-        probe = _probe_full(src)
-        n_sub = len(probe.get("subs") or [])
-        keep_sub = [i for i in range(n_sub) if i not in drop_sub_indices]
-        if keep_sub:
-            cmd.extend(["--subtitle-tracks", ",".join(str(i) for i in keep_sub)])
+        keep_sub_per_type = [i for i in range(n_sub) if i not in drop_sub_indices]
+        if keep_sub_per_type:
+            keep_sub_global = [sub_id_offset + i for i in keep_sub_per_type]
+            cmd.extend(["--subtitle-tracks", ",".join(str(i) for i in keep_sub_global)])
         else:
             cmd.append("--no-subtitles")
 
