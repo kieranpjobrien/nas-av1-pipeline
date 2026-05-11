@@ -193,6 +193,121 @@ def test_report_db_consistency_detects_mismatch(tmp_path):
 
 
 # --------------------------------------------------------------------------
+# no_elevated_breaker_counters — Ford v Ferrari / compliance-refuse cohort radar
+# --------------------------------------------------------------------------
+
+
+def _make_state_db_with_extras(tmp_path: Path,
+                                rows: list[tuple[str, str, dict]]) -> Path:
+    """Create a minimal pipeline_state.db with extras JSON populated.
+
+    Each row is ``(filepath, status, extras_dict)``.
+    """
+    db_path = tmp_path / "pipeline_state.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        """
+        CREATE TABLE pipeline_files (
+            filepath TEXT PRIMARY KEY,
+            status   TEXT NOT NULL DEFAULT 'pending',
+            mode     TEXT DEFAULT 'full_gamut',
+            added    TEXT, last_updated TEXT, tier TEXT,
+            local_path TEXT, output_path TEXT, dest_path TEXT,
+            error TEXT, stage TEXT, reason TEXT, res_key TEXT,
+            extras TEXT DEFAULT '{}'
+        )
+        """
+    )
+    conn.executemany(
+        "INSERT INTO pipeline_files (filepath, status, extras) VALUES (?, ?, ?)",
+        [(fp, st, json.dumps(ex)) for fp, st, ex in rows],
+    )
+    conn.commit()
+    conn.close()
+    return db_path
+
+
+def test_elevated_breaker_passes_when_all_clean(tmp_path):
+    """Pending row with zeroed counters → invariant passes."""
+    db_path = _make_state_db_with_extras(tmp_path, [
+        (r"\\NAS\Movies\Clean.mkv", "pending",
+         {"compliance_refuse_count": 0, "integrity_failure_count": 0}),
+    ])
+    result = invariants.check_no_elevated_breaker_counters(db_path=db_path)
+    assert result.passed is True
+    assert result.severity == "HIGH"
+    assert result.violations == []
+
+
+def test_elevated_breaker_fires_at_two(tmp_path):
+    """Pending row with refuse=2 (one cycle from terminal) → fires."""
+    offender = r"\\NAS\Movies\Near.mkv"
+    db_path = _make_state_db_with_extras(tmp_path, [
+        (offender, "pending", {"compliance_refuse_count": 2}),
+        (r"\\NAS\Movies\Clean.mkv", "pending", {"compliance_refuse_count": 0}),
+    ])
+    result = invariants.check_no_elevated_breaker_counters(db_path=db_path)
+    assert result.passed is False
+    assert offender in result.violations
+    # Details payload carries the counter so operators see the magnitude
+    detail_paths = {r["filepath"] for r in result.details["rows"]}
+    assert offender in detail_paths
+
+
+def test_elevated_breaker_ignores_terminal_rows(tmp_path):
+    """A flagged_corrupt row at count=99 (already at the breaker) must NOT
+    fire — the breaker has done its job. Only non-terminal rows are radar."""
+    db_path = _make_state_db_with_extras(tmp_path, [
+        # Terminal — should NOT be flagged
+        (r"\\NAS\Movies\Done.mkv",    "done",
+         {"compliance_refuse_count": 5}),
+        (r"\\NAS\Movies\Broken.mkv",  "flagged_corrupt",
+         {"compliance_refuse_count": 99, "integrity_failure_count": 99}),
+        (r"\\NAS\Movies\Flagged.mkv", "flagged_foreign_audio",
+         {"compliance_refuse_count": 3}),
+    ])
+    result = invariants.check_no_elevated_breaker_counters(db_path=db_path)
+    assert result.passed is True, (
+        f"terminal rows must be excluded from the radar, "
+        f"got violations: {result.violations}"
+    )
+
+
+def test_elevated_breaker_fires_on_integrity_failures(tmp_path):
+    """Same check covers integrity_failure_count (Ford v Ferrari class),
+    not only compliance_refuse_count."""
+    offender = r"\\NAS\Movies\Ford.mkv"
+    db_path = _make_state_db_with_extras(tmp_path, [
+        (offender, "pending", {"integrity_failure_count": 2}),
+    ])
+    result = invariants.check_no_elevated_breaker_counters(db_path=db_path)
+    assert result.passed is False
+    assert offender in result.violations
+    row = next(r for r in result.details["rows"] if r["filepath"] == offender)
+    assert row["integrity_failure_count"] == 2
+
+
+def test_elevated_breaker_handles_malformed_extras(tmp_path):
+    """A row with non-JSON extras must NOT crash the invariant — it's
+    skipped silently (the row is broken in a different way; handled by
+    other invariants)."""
+    db_path = _make_state_db_with_extras(tmp_path, [
+        (r"\\NAS\Movies\Bad.mkv", "pending", {}),  # empty
+    ])
+    # Manually corrupt the extras of one row
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "INSERT INTO pipeline_files (filepath, status, extras) VALUES (?, 'pending', ?)",
+        (r"\\NAS\Movies\Garbage.mkv", "not-json-at-all"),
+    )
+    conn.commit()
+    conn.close()
+    result = invariants.check_no_elevated_breaker_counters(db_path=db_path)
+    # No counter >= 2 anywhere — passes
+    assert result.passed is True
+
+
+# --------------------------------------------------------------------------
 # Orchestration smoke test
 # --------------------------------------------------------------------------
 
@@ -230,6 +345,7 @@ def test_run_all_invariants_smoke(tmp_path, monkeypatch):
         "no_audioless_av1",
         "no_done_with_deferred_reason",
         "no_done_with_error_reason",
+        "no_elevated_breaker_counters",
         "no_stale_tmp_on_nas",
         "no_zombie_mkvmerge",
         "no_ghost_python_processes",

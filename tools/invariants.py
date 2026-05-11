@@ -210,6 +210,85 @@ def check_no_done_with_error_reason(db_path: Optional[Path] = None) -> Invariant
 
 
 # --------------------------------------------------------------------------
+# HIGH - elevated circuit-breaker counters
+#
+# Early-warning radar for the Ford v Ferrari / compliance-refuse cohort
+# class. The breaker only fires AT threshold (3); this check surfaces
+# files at counter >= 2 so the operator (and the dashboard) can see a
+# pattern after 2 cycles rather than after 10. Prevents a silent fixer
+# bug from silently growing a cohort.
+# --------------------------------------------------------------------------
+
+
+def check_no_elevated_breaker_counters(db_path: Optional[Path] = None) -> InvariantResult:
+    """Files where integrity_failure_count or compliance_refuse_count >= 2.
+
+    A non-terminal row with counter >= 2 means we've already burned at
+    least 2 encode cycles on this file and are one cycle from terminal.
+    That's the threshold for human inspection — if 20 files all spike to
+    counter=2 in the same hour, something is wrong with a fixer or the
+    encoder, not 20 individual files.
+    """
+    name = "no_elevated_breaker_counters"
+    severity: Severity = "HIGH"
+    conn = _open_state_db(db_path)
+    if conn is None:
+        return InvariantResult(name, severity, True, "pipeline_state.db not present - skipped")
+    try:
+        # Terminal rows are by design at counter=99 (manual flag) or simply
+        # done. Only flag pending/error/processing rows whose extras JSON
+        # carries an elevated counter.
+        rows = conn.execute(
+            "SELECT filepath, status, extras FROM pipeline_files "
+            "WHERE extras IS NOT NULL AND extras != '{}' "
+            "  AND LOWER(status) NOT IN ('done', 'flagged_corrupt', "
+            "      'flagged_foreign_audio', 'flagged_undetermined', 'flagged_manual')"
+        ).fetchall()
+    except sqlite3.Error as e:
+        return InvariantResult(
+            name, severity, False,
+            f"DB query failed: {e}",
+        )
+    finally:
+        conn.close()
+
+    elevated: list[tuple[str, str, int, int]] = []
+    for r in rows:
+        try:
+            ex = json.loads(r["extras"] or "{}")
+        except (TypeError, json.JSONDecodeError):
+            continue
+        i = int(ex.get("integrity_failure_count") or 0)
+        c = int(ex.get("compliance_refuse_count") or 0)
+        if i >= 2 or c >= 2:
+            elevated.append((r["filepath"], r["status"], i, c))
+    elevated.sort(key=lambda t: -(t[2] + t[3]))
+
+    offenders = [fp for fp, _, _, _ in elevated]
+    passed = not offenders
+    message = (
+        f"{len(offenders)} non-terminal row(s) at breaker counter >= 2 "
+        f"(one cycle from terminal)"
+        if offenders
+        else "no non-terminal rows near the breaker threshold"
+    )
+    return InvariantResult(
+        name,
+        severity,
+        passed,
+        message,
+        violations=offenders,
+        details={
+            "rows": [
+                {"filepath": fp, "status": st, "integrity_failure_count": i,
+                 "compliance_refuse_count": c}
+                for fp, st, i, c in elevated[:20]
+            ],
+        },
+    )
+
+
+# --------------------------------------------------------------------------
 # HIGH - stale tmp files on NAS (SSH)
 # --------------------------------------------------------------------------
 
@@ -952,6 +1031,7 @@ def _invariant_runners(skip_ssh: bool) -> list[Callable[[], InvariantResult]]:
         check_no_done_with_deferred_reason,
         check_no_done_with_error_reason,
         check_no_done_with_foreign_audio,
+        check_no_elevated_breaker_counters,
         lambda: check_no_stale_tmp_on_nas(skip_ssh=skip_ssh),
         lambda: check_no_zombie_mkvmerge(skip_ssh=skip_ssh),
         check_no_ghost_python_processes,
