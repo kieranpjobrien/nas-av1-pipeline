@@ -302,6 +302,28 @@ class PipelineState:
                     "FileStatus.DONE with deferred/skipped reason is forbidden — "
                     f"use ERROR instead. filepath={filepath!r} reason={reason!r}"
                 )
+            # On terminal success, scrub stale failure fields from the
+            # previous attempt. Otherwise DONE rows keep error= and
+            # reason= text from the run that errored before the reset,
+            # which trips the no_done_with_error_reason invariant and
+            # generally looks like a Rule-1 violation. Callers can still
+            # set their own reason — kwargs win over scrub defaults.
+            kwargs.setdefault("error", None)
+            kwargs.setdefault("stage", None)
+            # If the caller did not pass a fresh reason AND the existing
+            # row has a stale error-flavoured reason, clear it. We don't
+            # blindly wipe — a "compression ratio 18.4%" reason from the
+            # actual encode is useful audit history.
+            if "reason" not in kwargs:
+                kwargs["__scrub_stale_reason"] = True
+            # Successful encode means the file is no longer "one cycle
+            # from terminal" — reset breaker counters so future failures
+            # of an unrelated kind get a fresh consecutive count.
+            kwargs.setdefault("integrity_failure_count", 0)
+            kwargs.setdefault("compliance_refuse_count", 0)
+
+        # Pop our internal sentinel before normal merge — handled below.
+        _scrub_stale_reason = kwargs.pop("__scrub_stale_reason", False)
 
         with self._lock:
             now = datetime.now().isoformat()
@@ -326,6 +348,24 @@ class PipelineState:
                     if k in old and old[k] is not None:
                         direct[k] = old[k]
                 extras = old_extras
+
+            # Scrub stale failure text on DONE transition. The previous
+            # row's ``reason`` often carries forward from an earlier
+            # error or manual reset ("reset 2026-05-12: error was
+            # WinError 59..."); leaving it on the DONE row tripped the
+            # no_done_with_error_reason invariant. Caller can opt out
+            # by passing an explicit reason= kwarg (handled by the
+            # setdefault in the DONE pre-block).
+            if _scrub_stale_reason:
+                # Heuristic: if existing reason contains failure-flavoured
+                # keywords, clear it. Otherwise leave it alone (might be
+                # legit audit history like "compression 18.4%").
+                old_reason = (direct.get("reason") or "").lower()
+                if any(kw in old_reason for kw in (
+                    "error", "fail", "winerror", "stuck", "reset",
+                    "compliance unfixed", "refuse", "broken",
+                )):
+                    direct["reason"] = None
 
             # Apply new values
             for k, v in all_data.items():

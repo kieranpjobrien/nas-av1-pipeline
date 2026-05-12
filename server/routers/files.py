@@ -389,11 +389,18 @@ def file_requeue(req: dict) -> dict:
             # Preserve any extras (encode_params_used, detected_audio, ...) so
             # the next encode reuses them. Add force_reencode=true on top so
             # categorise_entry routes AV1 files to full_gamut instead of skip.
+            # 2026-05-13: reset breaker counters too — user-initiated retry
+            # means "give it a clean shot, the issue is fixed". Otherwise a
+            # file at refuse_count=2 sits one cycle from terminal forever,
+            # the no_elevated_breaker_counters invariant fires forever, and
+            # the user has no way to clear it without poking the DB by hand.
             try:
                 extras = _json.loads(row[1] or "{}")
             except (TypeError, ValueError, _json.JSONDecodeError):
                 extras = {}
             extras["force_reencode"] = True
+            extras["compliance_refuse_count"] = 0
+            extras["integrity_failure_count"] = 0
             cur.execute(
                 "UPDATE pipeline_files SET status='pending', stage=NULL, error=NULL, "
                 "reason=?, extras=? WHERE filepath = ?",
@@ -485,7 +492,10 @@ def files_requeue_batch(req: dict) -> dict:
                 extras = _json.loads(row[1] or "{}")
             except (TypeError, ValueError, _json.JSONDecodeError):
                 extras = {}
+            # Same reset as single requeue — see file_requeue for rationale.
             extras["force_reencode"] = True
+            extras["compliance_refuse_count"] = 0
+            extras["integrity_failure_count"] = 0
             cur.execute(
                 "UPDATE pipeline_files SET status='pending', stage=NULL, error=NULL, "
                 "reason=?, extras=? WHERE filepath = ?",

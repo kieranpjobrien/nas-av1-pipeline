@@ -204,6 +204,13 @@ class ProcessManager:
 
         killed: list[int] = []
         my_pid = os.getpid()
+        # Collect target python pids first so we can find their ffmpeg
+        # children afterwards. Pre-2026-05-13 force_kill only killed
+        # the python supervisor; orphaned ffmpegs kept holding fetch
+        # files open and the next pipeline run got "stale fetch file
+        # locked" errors. From Russia with Love (2026-05-13 06:50)
+        # was this.
+        target_pids: list[int] = []
         try:
             for proc_info in psutil.process_iter(["pid", "name", "cmdline"]):
                 info = proc_info.info
@@ -213,17 +220,46 @@ class ProcessManager:
                 if "python" not in pname:
                     continue
                 cmdline = info.get("cmdline") or []
-                # Require both "-m" and the module_flag to match — avoids killing
-                # unrelated python processes that happen to mention the module name.
                 if "-m" not in cmdline or module_flag not in cmdline:
                     continue
-                try:
-                    proc_info.terminate()
-                    killed.append(info["pid"])
-                except (psutil.NoSuchProcess, psutil.AccessDenied):
-                    pass
+                target_pids.append(info["pid"])
         except Exception as e:
             return {"ok": False, "error": f"psutil scan failed: {e}"}
+
+        # Find ffmpeg / mkvmerge / mkvpropedit children of those python
+        # supervisors — only meaningful when killing the pipeline, but
+        # cheap to do for any module since the parent-pid check filters.
+        child_pids: list[int] = []
+        if target_pids:
+            try:
+                for proc_info in psutil.process_iter(["pid", "name", "ppid"]):
+                    info = proc_info.info
+                    pname = (info.get("name") or "").lower()
+                    if pname not in ("ffmpeg.exe", "mkvmerge.exe", "mkvpropedit.exe",
+                                     "ffmpeg", "mkvmerge", "mkvpropedit"):
+                        continue
+                    if info.get("ppid") in target_pids:
+                        child_pids.append(info["pid"])
+            except Exception:
+                pass  # best-effort — primary kill is the python supervisor
+
+        # Kill children FIRST so they release file handles before the
+        # supervisor exits (otherwise the supervisor's shutdown path can
+        # block waiting on ffmpeg.wait()).
+        for pid in child_pids:
+            try:
+                psutil.Process(pid).kill()
+                killed.append(pid)
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+
+        # Then the supervisors themselves.
+        for pid in target_pids:
+            try:
+                psutil.Process(pid).terminate()
+                killed.append(pid)
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
 
         # Also clean up our tracked process if it matches
         with self._lock:
