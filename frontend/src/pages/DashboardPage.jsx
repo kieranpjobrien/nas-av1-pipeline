@@ -1173,6 +1173,7 @@ export function DashboardPage({ onFileClick }) {
                 workersTotal={workers.total}
                 onNavigate={setView}
                 onDrillTo={navigateWithDrill}
+                onFileClick={onFileClick}
               />
             )}
             {view === "library" && (

@@ -160,9 +160,39 @@ function LangDetectProgress() {
   );
 }
 
-function ActiveRow({ f }) {
+function ActiveRow({ f, onFileClick }) {
+  const clickable = typeof onFileClick === "function" && f.filepath;
+  const baseStyle = f.stale ? { borderColor: "rgba(240,180,41,0.35)" } : undefined;
+  const clickableStyle = clickable
+    ? { cursor: "pointer", transition: "background 120ms ease" }
+    : undefined;
   return (
-    <div className="active" style={f.stale ? { borderColor: "rgba(240,180,41,0.35)" } : undefined}>
+    <div
+      className="active"
+      style={{ ...(baseStyle || {}), ...(clickableStyle || {}) }}
+      role={clickable ? "button" : undefined}
+      tabIndex={clickable ? 0 : undefined}
+      onClick={clickable ? () => onFileClick(f.filepath) : undefined}
+      onKeyDown={
+        clickable
+          ? (e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                onFileClick(f.filepath);
+              }
+            }
+          : undefined
+      }
+      onMouseEnter={
+        clickable
+          ? (e) => (e.currentTarget.style.background = "rgba(255,255,255,0.03)")
+          : undefined
+      }
+      onMouseLeave={
+        clickable ? (e) => (e.currentTarget.style.background = "") : undefined
+      }
+      title={clickable ? `${f.filename}\nClick for details` : f.filename}
+    >
       <div className="active-top">
         <div className="active-title" title={f.filename}>
           {prettyTitle(f.filename)}
@@ -206,7 +236,7 @@ function ActiveRow({ f }) {
   );
 }
 
-export function Glance({ data, pipelineData, throughputPerDay, workersActive, workersTotal, onNavigate, onDrillTo }) {
+export function Glance({ data, pipelineData, throughputPerDay, workersActive, workersTotal, onNavigate, onDrillTo, onFileClick }) {
   const [historySummary, setHistorySummary] = useState(null);
   const [completion, setCompletion] = useState(null);
   const [healthDeep, setHealthDeep] = useState(null);
@@ -944,7 +974,7 @@ export function Glance({ data, pipelineData, throughputPerDay, workersActive, wo
               </div>
             )}
             {encoding.map((f, i) => (
-              <ActiveRow key={`e${i}`} f={f} tone="accent" />
+              <ActiveRow key={`e${i}`} f={f} tone="accent" onFileClick={onFileClick} />
             ))}
             {queued.length > 0 && (
               <div
@@ -960,7 +990,7 @@ export function Glance({ data, pipelineData, throughputPerDay, workersActive, wo
               </div>
             )}
             {queued.slice(0, 10).map((f, i) => (
-              <ActiveRow key={`q${i}`} f={f} tone="ink-2" />
+              <ActiveRow key={`q${i}`} f={f} tone="ink-2" onFileClick={onFileClick} />
             ))}
             {queued.length > 10 && (
               <div
@@ -990,7 +1020,7 @@ export function Glance({ data, pipelineData, throughputPerDay, workersActive, wo
               </div>
             )}
             {fetching.map((f, i) => (
-              <ActiveRow key={`f${i}`} f={f} tone="blue" />
+              <ActiveRow key={`f${i}`} f={f} tone="blue" onFileClick={onFileClick} />
             ))}
             {workersTotal != null &&
               activeSample.length > 0 &&

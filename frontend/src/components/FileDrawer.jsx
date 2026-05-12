@@ -151,9 +151,20 @@ export function FileDrawer({ path, onClose }) {
             {pipeline && (
               <Section title="Encode Status">
                 <Row label="Status" value={pipeline.status} colour={
-                  pipeline.status === "replaced" ? PALETTE.green :
-                  pipeline.status === "error" ? PALETTE.red : PALETTE.accent
+                  pipeline.status === "replaced" || pipeline.status === "done" ? PALETTE.green :
+                  pipeline.status === "error" ? PALETTE.red :
+                  pipeline.status?.startsWith?.("flagged") ? PALETTE.red : PALETTE.accent
                 } />
+                {pipeline.stage && <Row label="Stage" value={pipeline.stage} />}
+                {pipeline.mode && <Row label="Mode" value={pipeline.mode} />}
+                {pipeline.progress_pct != null && (
+                  <Row
+                    label="Progress"
+                    value={`${pipeline.progress_pct}%${pipeline.speed ? ` · ${pipeline.speed}` : ""}${pipeline.fps ? ` · ${pipeline.fps} fps` : ""}`}
+                    colour={PALETTE.accent}
+                  />
+                )}
+                {pipeline.eta_text && <Row label="ETA" value={pipeline.eta_text} colour={PALETTE.accent} />}
                 {pipeline.encode_time_secs > 0 && <Row label="Encode time" value={fmtDur(pipeline.encode_time_secs)} />}
                 {pipeline.fetch_time_secs > 0 && <Row label="Fetch time" value={fmtDur(pipeline.fetch_time_secs)} />}
                 {pipeline.upload_time_secs > 0 && <Row label="Upload time" value={fmtDur(pipeline.upload_time_secs)} />}
@@ -162,8 +173,110 @@ export function FileDrawer({ path, onClose }) {
                 {pipeline.output_size_bytes > 0 && <Row label="Output size" value={fmt(pipeline.output_size_bytes)} />}
                 {pipeline.input_size_bytes > 0 && <Row label="Input size" value={fmt(pipeline.input_size_bytes)} />}
                 {pipeline.tier && <Row label="Tier" value={pipeline.tier} />}
+                {pipeline.reason && <Row label="Reason" value={pipeline.reason} />}
                 {pipeline.error && <Row label="Error" value={pipeline.error} colour={PALETTE.red} />}
                 {pipeline.last_updated && <Row label="Last updated" value={new Date(pipeline.last_updated).toLocaleString()} />}
+              </Section>
+            )}
+
+            {/* Encode params actually used */}
+            {pipeline?.encode_params_used && (
+              <Section title="Encoder settings">
+                {pipeline.encode_params_used.cq != null && (
+                  <Row label="CQ" value={String(pipeline.encode_params_used.cq)} />
+                )}
+                {pipeline.encode_params_used.content_grade && (
+                  <Row label="Grade" value={pipeline.encode_params_used.content_grade} />
+                )}
+                {pipeline.encode_params_used.res_key && (
+                  <Row label="Resolution tier" value={pipeline.encode_params_used.res_key} />
+                )}
+                {pipeline.encode_params_used.preset && (
+                  <Row label="NVENC preset" value={pipeline.encode_params_used.preset} />
+                )}
+                {pipeline.encode_params_used.multipass && (
+                  <Row label="Multipass" value={pipeline.encode_params_used.multipass} />
+                )}
+                {pipeline.encode_params_used.maxrate && (
+                  <Row label="Max bitrate" value={pipeline.encode_params_used.maxrate} />
+                )}
+                {pipeline.encode_params_used.lookahead != null && (
+                  <Row label="Lookahead" value={String(pipeline.encode_params_used.lookahead)} />
+                )}
+              </Section>
+            )}
+
+            {/* Compliance failures + breaker counters — surfaces the
+                'what is non-compliant' answer the user asked for. */}
+            {pipeline && (
+              pipeline.compliance_violations?.length > 0 ||
+              pipeline.corruption_signatures?.length > 0 ||
+              (pipeline.compliance_refuse_count ?? 0) > 0 ||
+              (pipeline.integrity_failure_count ?? 0) > 0
+            ) && (
+              <Section title="Compliance / corruption">
+                {(pipeline.compliance_refuse_count ?? 0) > 0 && (
+                  <Row
+                    label="Compliance refuses"
+                    value={String(pipeline.compliance_refuse_count)}
+                    colour={pipeline.compliance_refuse_count >= 3 ? PALETTE.red : PALETTE.accentWarm}
+                  />
+                )}
+                {(pipeline.integrity_failure_count ?? 0) > 0 && (
+                  <Row
+                    label="Integrity failures"
+                    value={String(pipeline.integrity_failure_count)}
+                    colour={pipeline.integrity_failure_count >= 3 ? PALETTE.red : PALETTE.accentWarm}
+                  />
+                )}
+                {pipeline.compliance_violations?.length > 0 && (
+                  <div style={{ marginTop: 8 }}>
+                    <div style={{ color: PALETTE.textMuted, fontSize: 11, marginBottom: 4 }}>
+                      Violations
+                    </div>
+                    {pipeline.compliance_violations.map((v, i) => (
+                      <div
+                        key={i}
+                        style={{
+                          fontSize: 11,
+                          color: PALETTE.red,
+                          padding: "4px 8px",
+                          background: PALETTE.bg,
+                          borderRadius: 4,
+                          marginBottom: 4,
+                          fontFamily: "'JetBrains Mono', monospace",
+                          wordBreak: "break-word",
+                        }}
+                      >
+                        {String(v).slice(0, 280)}
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {pipeline.corruption_signatures?.length > 0 && (
+                  <div style={{ marginTop: 8 }}>
+                    <div style={{ color: PALETTE.textMuted, fontSize: 11, marginBottom: 4 }}>
+                      Decoder errors
+                    </div>
+                    {pipeline.corruption_signatures.map((v, i) => (
+                      <div
+                        key={i}
+                        style={{
+                          fontSize: 11,
+                          color: PALETTE.red,
+                          padding: "4px 8px",
+                          background: PALETTE.bg,
+                          borderRadius: 4,
+                          marginBottom: 4,
+                          fontFamily: "'JetBrains Mono', monospace",
+                          wordBreak: "break-word",
+                        }}
+                      >
+                        {String(v).slice(0, 280)}
+                      </div>
+                    ))}
+                  </div>
+                )}
               </Section>
             )}
 
