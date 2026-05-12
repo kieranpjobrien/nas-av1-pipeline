@@ -135,19 +135,56 @@ const drillLabel = {
   grade_optimal: "CQ ≠ grade target",
 };
 
+// Codec/resolution drills come from clicking a Codec distribution or
+// Resolutions row on the Glance page. They're filter pre-sets, not
+// compliance failures — Library treats them by populating filters.codec
+// / filters.res rather than running a drillFailures predicate.
+const CODEC_DRILL_LABEL = {
+  "codec:av1":  "AV1 video",
+  "codec:hevc": "HEVC video",
+  "codec:h264": "H.264 video",
+};
+const RES_DRILL_LABEL = {
+  "res:4k":    "4K resolution",
+  "res:1080p": "1080p resolution",
+  "res:720p":  "720p resolution",
+};
+function parseCodecResDrill(key) {
+  if (!key) return null;
+  if (key.startsWith("codec:")) return { kind: "codec", value: key.slice(6) };
+  if (key.startsWith("res:")) return { kind: "res", value: key.slice(4) };
+  return null;
+}
+
 export function Library({ data, pipelineData, onFileOpen, drillKey, onClearDrill }) {
   const all = data.files || data.topTargets;
   const [selIdx, setSelIdx] = useState(0);
   const [query, setQuery] = useState("");
+  // If the drillKey is a codec/resolution drill, seed the matching filter
+  // on initial mount so the rows are immediately filtered. The user can
+  // change or clear it via the existing filter chips.
+  const initialDrill = parseCodecResDrill(drillKey);
   const [filters, setFilters] = useState({
-    codec: null,
-    res: null,
+    codec: initialDrill?.kind === "codec" ? initialDrill.value : null,
+    res: initialDrill?.kind === "res" ? initialDrill.value : null,
     hdr: false,
     atmos: false,
     foreignSubs: false,
     status: null, // null | "needs_encode" | "errored"
     library: null, // null | "movie" | "series"
   });
+  // Subsequent drillKey changes (user navigates Glance again without
+  // unmounting Library) update the filter rather than re-seeding from
+  // useState initial value.
+  useEffect(() => {
+    const parsed = parseCodecResDrill(drillKey);
+    if (!parsed) return;
+    setFilters((prev) => ({
+      ...prev,
+      codec: parsed.kind === "codec" ? parsed.value : prev.codec,
+      res: parsed.kind === "res" ? parsed.value : prev.res,
+    }));
+  }, [drillKey]);
   // CQ audit results — only fetched when the user drills into Grade-Optimised.
   // Map from filepath -> bucket; we annotate `f.cq_audit_bucket` in-place so
   // the drillFailures.grade_optimal predicate can filter on it.
@@ -444,8 +481,18 @@ export function Library({ data, pipelineData, onFileOpen, drillKey, onClearDrill
             DRILL-IN
           </span>
           <span style={{ fontSize: 13 }}>
-            Showing only files that fail: <b>{drillLabel[drillKey] || drillKey}</b> ({fmtNum(rows.length)} of{" "}
-            {fmtNum(all.length)})
+            {CODEC_DRILL_LABEL[drillKey] || RES_DRILL_LABEL[drillKey] ? (
+              <>
+                Showing only files with{" "}
+                <b>{CODEC_DRILL_LABEL[drillKey] || RES_DRILL_LABEL[drillKey]}</b>{" "}
+                ({fmtNum(rows.length)} of {fmtNum(all.length)})
+              </>
+            ) : (
+              <>
+                Showing only files that fail:{" "}
+                <b>{drillLabel[drillKey] || drillKey}</b> ({fmtNum(rows.length)} of {fmtNum(all.length)})
+              </>
+            )}
           </span>
           <button
             onClick={onClearDrill}

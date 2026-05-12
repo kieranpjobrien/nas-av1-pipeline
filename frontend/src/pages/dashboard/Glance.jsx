@@ -1043,19 +1043,47 @@ export function Glance({ data, pipelineData, throughputPerDay, workersActive, wo
             Codec distribution <span className="count">{fmtNum(total)} files</span>
           </h3>
           <div>
-            {segs.map((seg) => (
-              <div key={seg.k} className="codec-row">
-                <div className="codec-name">{seg.k}</div>
-                <div className="codec-bar-wrap">
-                  <div
-                    className="codec-bar"
-                    style={{ width: total > 0 ? (seg.n / total) * 100 + "%" : "0%", background: seg.c }}
-                  />
+            {segs.map((seg) => {
+              // Map Glance codec label to Library filter key.
+              // "Other" isn't a Library filter — leave it non-clickable.
+              const codecFilterKey = {
+                "AV1": "av1",
+                "HEVC": "hevc",
+                "H.264": "h264",
+              }[seg.k];
+              const clickable = codecFilterKey && !!onDrillTo && seg.n > 0;
+              return (
+                <div
+                  key={seg.k}
+                  className="codec-row"
+                  role={clickable ? "button" : undefined}
+                  tabIndex={clickable ? 0 : undefined}
+                  onClick={clickable ? () => onDrillTo("library", `codec:${codecFilterKey}`) : undefined}
+                  onKeyDown={
+                    clickable
+                      ? (e) => {
+                          if (e.key === "Enter" || e.key === " ") {
+                            e.preventDefault();
+                            onDrillTo("library", `codec:${codecFilterKey}`);
+                          }
+                        }
+                      : undefined
+                  }
+                  style={clickable ? { cursor: "pointer" } : undefined}
+                  title={clickable ? `Show ${seg.k} files in Library` : undefined}
+                >
+                  <div className="codec-name">{seg.k}</div>
+                  <div className="codec-bar-wrap">
+                    <div
+                      className="codec-bar"
+                      style={{ width: total > 0 ? (seg.n / total) * 100 + "%" : "0%", background: seg.c }}
+                    />
+                  </div>
+                  <div className="codec-count">{fmtNum(seg.n)} files</div>
+                  <div className="codec-pct">{fmtPct(total > 0 ? seg.n / total : 0, 1)}</div>
                 </div>
-                <div className="codec-count">{fmtNum(seg.n)} files</div>
-                <div className="codec-pct">{fmtPct(total > 0 ? seg.n / total : 0, 1)}</div>
-              </div>
-            ))}
+              );
+            })}
           </div>
 
           <h3 style={{ marginTop: 20 }}>Resolutions</h3>
@@ -1063,19 +1091,44 @@ export function Glance({ data, pipelineData, throughputPerDay, workersActive, wo
             {Object.entries(resolutions)
               .sort((a, b) => b[1] - a[1])
               .slice(0, 4)
-              .map(([k, n]) => (
-                <div key={k} className="codec-row">
-                  <div className="codec-name">{k}</div>
-                  <div className="codec-bar-wrap">
-                    <div
-                      className="codec-bar"
-                      style={{ width: total > 0 ? (n / total) * 100 + "%" : "0%", background: "var(--ink-3)" }}
-                    />
+              .map(([k, n]) => {
+                // Map Glance resolution label to Library filter key.
+                // "480p" isn't a Library filter chip — leave it non-clickable.
+                const resKey = String(k).toLowerCase();
+                const resFilterKey = { "4k": "4k", "1080p": "1080p", "720p": "720p" }[resKey];
+                const clickable = resFilterKey && !!onDrillTo && n > 0;
+                return (
+                  <div
+                    key={k}
+                    className="codec-row"
+                    role={clickable ? "button" : undefined}
+                    tabIndex={clickable ? 0 : undefined}
+                    onClick={clickable ? () => onDrillTo("library", `res:${resFilterKey}`) : undefined}
+                    onKeyDown={
+                      clickable
+                        ? (e) => {
+                            if (e.key === "Enter" || e.key === " ") {
+                              e.preventDefault();
+                              onDrillTo("library", `res:${resFilterKey}`);
+                            }
+                          }
+                        : undefined
+                    }
+                    style={clickable ? { cursor: "pointer" } : undefined}
+                    title={clickable ? `Show ${k} files in Library` : undefined}
+                  >
+                    <div className="codec-name">{k}</div>
+                    <div className="codec-bar-wrap">
+                      <div
+                        className="codec-bar"
+                        style={{ width: total > 0 ? (n / total) * 100 + "%" : "0%", background: "var(--ink-3)" }}
+                      />
+                    </div>
+                    <div className="codec-count">{fmtNum(n)} files</div>
+                    <div className="codec-pct">{fmtPct(total > 0 ? n / total : 0, 1)}</div>
                   </div>
-                  <div className="codec-count">{fmtNum(n)} files</div>
-                  <div className="codec-pct">{fmtPct(total > 0 ? n / total : 0, 1)}</div>
-                </div>
-              ))}
+                );
+              })}
           </div>
         </div>
       </div>
