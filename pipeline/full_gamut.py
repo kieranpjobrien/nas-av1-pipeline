@@ -978,7 +978,12 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
     logging.info(f"  Uploading: {final_name} ({format_bytes(output_size)})")
     upload_start = time.time()
     try:
-        shutil.copy2(output_path, dest_path)
+        # robust_copy retries on WinError 59 / 64 / 53 / 67 / 121 / 1231
+        # — the SMB transient class. Pre-2026-05-12 a single shutil.copy2
+        # blip on these errors landed the file in ERROR with no retry
+        # budget (Snatch 2026-05-12 12:44 was this).
+        from pipeline.transfer import robust_copy
+        robust_copy(output_path, dest_path)
     except Exception as e:
         state.set_file(filepath, FileStatus.ERROR, error=f"upload failed: {e}", stage="upload")
         return False

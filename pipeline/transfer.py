@@ -19,6 +19,80 @@ from pipeline.ffmpeg import format_bytes, format_duration
 from pipeline.state import FileStatus, PipelineState
 
 
+# Windows OSError.winerror codes that mean "SMB transport hiccupped, try again".
+# Source: WinError.h.
+#   59  ERROR_UNEXP_NET_ERR              — "an unexpected network error occurred"
+#   64  ERROR_NETNAME_DELETED            — "the specified network name is no longer available"
+#   53  ERROR_BAD_NETPATH                — "the network path was not found"
+#   67  ERROR_BAD_NET_NAME               — "the network name cannot be found"
+#   121 ERROR_SEM_TIMEOUT                — "the semaphore timeout period has expired"
+#   1231 ERROR_NETWORK_UNREACHABLE       — "the network location cannot be reached"
+# All of these have been observed on this NAS during normal operation and
+# resolve on retry in seconds. Pre-2026-05-12 the fetch/upload paths
+# wrapped a single ``shutil.copy2`` call with no retry — every blip
+# became an ERROR row that the user had to retry from the Errors page.
+_RETRYABLE_WINERRORS = frozenset({53, 59, 64, 67, 121, 1231})
+
+
+def _is_retryable_smb_error(exc: BaseException) -> bool:
+    """True if ``exc`` looks like a transient SMB network failure."""
+    winerror = getattr(exc, "winerror", None)
+    if winerror is not None and int(winerror) in _RETRYABLE_WINERRORS:
+        return True
+    # Some shutil errors are wrapped in shutil.Error with the underlying
+    # OSError as the cause/context.
+    cause = getattr(exc, "__cause__", None) or getattr(exc, "__context__", None)
+    if cause is not None and cause is not exc:
+        return _is_retryable_smb_error(cause)
+    return False
+
+
+def robust_copy(src: str, dst: str, max_retries: int = 3,
+                backoff_secs: float = 2.0) -> None:
+    """``shutil.copy2`` with retry on transient SMB/network errors.
+
+    Retries are linear: 2s, 4s, 8s by default — total ~14s of patience
+    across 3 attempts. Permanent failures (file not found, permission
+    denied, etc.) are NOT retried — they propagate on the first hit so
+    the caller can handle them properly.
+
+    Used by fetch (NAS -> staging) and upload (staging -> NAS). Both
+    directions can hit the same SMB blips since the same SMB session
+    carries both halves.
+    """
+    last_exc: Optional[BaseException] = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            shutil.copy2(src, dst)
+            return
+        except OSError as e:
+            last_exc = e
+            if not _is_retryable_smb_error(e):
+                # Permanent failure (ENOENT, EACCES, disk-full, etc.)
+                # — don't waste retry budget.
+                raise
+            if attempt >= max_retries:
+                break
+            wait = backoff_secs * attempt
+            logging.warning(
+                f"  SMB transient (WinError {getattr(e, 'winerror', '?')}): "
+                f"retrying copy in {wait:.0f}s [attempt {attempt}/{max_retries}]"
+            )
+            # Drop any partial file so the retry starts clean.
+            try:
+                if os.path.exists(dst):
+                    os.remove(dst)
+            except OSError:
+                pass
+            time.sleep(wait)
+    # Exhausted retries — re-raise the last exception so the caller sees
+    # the original WinError.
+    if last_exc is not None:
+        raise last_exc
+    # Defensive: max_retries == 0 would land here.
+    raise RuntimeError("robust_copy: no attempt made")
+
+
 def get_staging_usage(staging_dir: str) -> int:
     """Get total bytes used in staging directory."""
     total = 0
@@ -109,7 +183,7 @@ def fetch_file(item: dict, staging_dir: str, config: dict, state: PipelineState,
 
     try:
         start = time.time()
-        shutil.copy2(source, local_path)
+        robust_copy(source, local_path)
         elapsed = time.time() - start
         # Verify copy is complete (catch truncated fetches)
         local_size = os.path.getsize(local_path)
