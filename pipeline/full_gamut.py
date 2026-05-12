@@ -1316,14 +1316,62 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
                 )
             return False
 
-        # Fixable violations — run each fixer, then re-check.
+        # Fixable violations — collect mkvmerge drop tags into a single
+        # call before running other fixers. Pre-2026-05-13 each drop
+        # tag (foreign_subs, extra_eng_subs, foreign_audio, commentary_audio)
+        # called mkvmerge independently using indices computed against
+        # the ORIGINAL output layout. The first drop modified the file;
+        # the second saw stale indices and either kept the wrong tracks
+        # or asked for indices that no longer existed. Happy Gilmore 2 /
+        # Heads of State / Wild Robot all stuck because of this.
+        #
+        # Merging into one call means: indices stay valid (we operate on
+        # the original layout in a single pass), one SMB write instead
+        # of four, and one proof-of-work check.
+        from pipeline.compliance_fixers import _mkvmerge_drop_streams
+
+        merged_audio_drop: list[int] = []
+        merged_sub_drop: list[int] = []
+        handled_drop_tags: set[str] = set()
         for v in grouped[Category.FIXABLE]:
+            if v.tag in ("foreign_audio", "commentary_audio"):
+                merged_audio_drop.extend(v.data.get("indices") or [])
+                handled_drop_tags.add(v.tag)
+            elif v.tag in ("foreign_subs", "extra_eng_subs"):
+                merged_sub_drop.extend(v.data.get("indices") or [])
+                handled_drop_tags.add(v.tag)
+        if merged_audio_drop or merged_sub_drop:
+            # De-duplicate (foreign_audio and commentary_audio CAN refer
+            # to the same track if a foreign-language commentary track
+            # exists — drop it once, not twice).
+            merged_audio_drop = sorted(set(merged_audio_drop))
+            merged_sub_drop = sorted(set(merged_sub_drop))
+            logging.info(
+                f"  compliance fix (merged): drop audio={merged_audio_drop} "
+                f"sub={merged_sub_drop}"
+            )
+            try:
+                ok = _mkvmerge_drop_streams(
+                    dest_path,
+                    drop_audio_indices=merged_audio_drop or None,
+                    drop_sub_indices=merged_sub_drop or None,
+                )
+            except Exception as e:
+                logging.error(f"  merged drop fixer raised: {e!r}")
+                ok = False
+            if not ok:
+                logging.error("  merged drop fixer failed")
+
+        # Run the remaining (non-drop) fixers individually — they don't
+        # share state the way the drop fixers do.
+        for v in grouped[Category.FIXABLE]:
+            if v.tag in handled_drop_tags:
+                continue
             fixer = FIXERS.get(v.tag)
             if not fixer:
                 logging.warning(f"  no fixer registered for {v.tag} — leaving violation")
                 continue
             logging.info(f"  compliance fix: {v.tag} — {v.message}")
-            # Each fixer takes (filepath, violation) plus optional context kwargs.
             try:
                 if v.tag in ("missing_encode_tags", "cq_mismatch", "grade_mismatch"):
                     ok = fixer(dest_path, v, encode_params=encode_params_used)

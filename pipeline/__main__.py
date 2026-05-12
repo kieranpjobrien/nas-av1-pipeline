@@ -191,6 +191,61 @@ def categorise_entry(
     return ("full_gamut", _build_full_gamut_item(entry))
 
 
+def _prune_done_from_priority(staging_dir: str | None = None,
+                              state: "PipelineState | None" = None) -> int:
+    """Remove DONE / flagged_* rows from ``control/priority.json -> paths``.
+
+    Priority is "lift these to the front" — once a file's been encoded
+    (or terminally flagged) it has no business on the list anymore. The
+    pre-2026-05-13 behaviour was append-only: the list grew forever and
+    the operator had no signal of progress through it.
+
+    Called at every queue rebuild so the list is self-pruning. Returns
+    the number of entries removed.
+    """
+    if staging_dir is None:
+        staging_dir = str(STAGING_DIR)
+    prio_path = os.path.join(staging_dir, "control", "priority.json")
+    if not os.path.exists(prio_path):
+        return 0
+    try:
+        with open(prio_path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return 0
+    paths = data.get("paths") or []
+    if not paths or state is None:
+        return 0
+    # Anything terminal — done OR any flagged_* — drops off.
+    TERMINAL = {"done", "flagged_corrupt", "flagged_foreign_audio",
+                "flagged_undetermined", "flagged_manual"}
+    kept = []
+    removed = 0
+    for fp in paths:
+        row = state.get_file(fp)
+        if row and (row.get("status") or "").lower() in TERMINAL:
+            removed += 1
+            continue
+        kept.append(fp)
+    if removed > 0:
+        data["paths"] = kept
+        # Atomic rewrite: write to .tmp + replace, so a crash mid-write
+        # doesn't leave a truncated file.
+        tmp = prio_path + ".tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+            os.replace(tmp, prio_path)
+        except OSError:
+            try:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+            except OSError:
+                pass
+            return 0
+    return removed
+
+
 def _read_priority_paths(staging_dir: str | None = None) -> set[str]:
     """Return the set of paths in ``control/priority.json -> paths``.
 
@@ -203,6 +258,9 @@ def _read_priority_paths(staging_dir: str | None = None) -> set[str]:
     The 2026-05-08 incident review noted the old force-stack
     mechanism was removed without a replacement. This is a lighter
     replacement: read-once-at-build-time, no run-time IPC.
+
+    Note: this READS only — pruning of completed entries is handled
+    by ``_prune_done_from_priority`` which runs alongside.
     """
     if staging_dir is None:
         staging_dir = str(STAGING_DIR)
@@ -260,6 +318,11 @@ def build_queues(report_path: str, config: dict, state: PipelineState, control: 
         elif category == "gap_filler":
             gap_filler_queue.append(item)
 
+    # Drop terminal-status entries from priority.json so the list is a
+    # live view of "still to do", not a ledger of every add ever made.
+    pruned = _prune_done_from_priority(state=state)
+    if pruned:
+        logging.info(f"Priority prune: dropped {pruned} done/flagged entries from priority.json")
     priority_paths = _read_priority_paths()
     _sort_full_gamut(full_gamut_queue, config, priority_paths)
     if priority_paths:

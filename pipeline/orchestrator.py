@@ -1492,8 +1492,18 @@ class Orchestrator:
             # default + rationale (largest-first to make the ETA shrink),
             # plus priority-paths bump (paths in control/priority.json
             # get lifted to the front).
-            from pipeline.__main__ import _read_priority_paths, _sort_full_gamut
+            from pipeline.__main__ import (
+                _prune_done_from_priority,
+                _read_priority_paths,
+                _sort_full_gamut,
+            )
 
+            # Drop terminal-status entries from priority.json before reading
+            # — keeps the list a live view of "what's still to do", not a
+            # ledger of every priority add ever made.
+            pruned = _prune_done_from_priority(state=self.state)
+            if pruned:
+                logging.info(f"Priority prune: dropped {pruned} done/flagged entries from priority.json")
             priority_paths = _read_priority_paths()
             _sort_full_gamut(full_gamut_queue, self.config, priority_paths)
 

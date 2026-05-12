@@ -98,7 +98,21 @@ def get_priority() -> dict:
 
 @router.put("/api/control/priority")
 def set_priority(req: PriorityRequest) -> dict:
-    """Set the priority queue configuration."""
+    """Set the priority queue configuration.
+
+    2026-05-13: also synchronously seeds pipeline_state.db with pending
+    rows for any newly-added priority path that doesn't have one yet.
+    Pre-fix, 96 of 198 priority paths sat NOT_IN_STATE — the queue
+    builder only inserts media_report files at periodic rebuilds, so a
+    fresh priority add wouldn't appear in the queue until the next
+    rebuild (could be hours). Now the API call is the action — set it
+    and it's immediately visible to the queue builder.
+    """
+    import json as _json
+    import sqlite3 as _sqlite3
+
+    from paths import NAS_MOVIES, NAS_SERIES, PIPELINE_STATE_DB
+
     current = read_json_safe(CONTROL_DIR / "priority.json") or {}
     merged = {
         "force": req.force if req.force else current.get("force", []),
@@ -106,11 +120,50 @@ def set_priority(req: PriorityRequest) -> dict:
         "patterns": req.patterns if req.patterns else current.get("patterns", []),
     }
     drop_file("priority.json", merged)
+
+    # Seed state DB for any priority path that isn't there yet. Keep
+    # this best-effort: a DB error doesn't fail the priority set
+    # (which we already wrote to disk above).
+    seeded = 0
+    if merged["paths"]:
+        nas_movies = os.path.normpath(str(NAS_MOVIES))
+        nas_series = os.path.normpath(str(NAS_SERIES))
+        try:
+            con = _sqlite3.connect(str(PIPELINE_STATE_DB))
+            cur = con.cursor()
+            for raw_path in merged["paths"]:
+                if not isinstance(raw_path, str) or not raw_path:
+                    continue
+                # Safety: only seed NAS-rooted paths so a malformed
+                # priority entry can't pollute the DB.
+                norm = os.path.normpath(raw_path)
+                if not (norm.startswith(nas_movies) or norm.startswith(nas_series)):
+                    continue
+                # Don't insert ghosts — file must actually exist on NAS.
+                if not os.path.exists(norm):
+                    continue
+                row = cur.execute(
+                    "SELECT 1 FROM pipeline_files WHERE filepath = ?", (raw_path,)
+                ).fetchone()
+                if row is None:
+                    cur.execute(
+                        "INSERT INTO pipeline_files (filepath, status, extras, reason) "
+                        "VALUES (?, 'pending', ?, ?)",
+                        (raw_path, _json.dumps({"force_reencode": True}),
+                         "auto-seeded by priority API"),
+                    )
+                    seeded += 1
+            con.commit()
+            con.close()
+        except _sqlite3.Error:
+            pass  # the priority list was set; seeding is best-effort
+
     return {
         "ok": True,
         "force": len(merged["force"]),
         "paths": len(merged["paths"]),
         "patterns": len(merged["patterns"]),
+        "seeded": seeded,
     }
 
 

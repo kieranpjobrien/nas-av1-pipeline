@@ -287,15 +287,30 @@ def check_compliance(
     # files — does its own TMDb tag check separately.
 
     # === Filename ===
+    # Compare basename WITHOUT extension. An extension change (.mp4 -> .mkv,
+    # .ts -> .mkv) is a normal and CORRECT consequence of transcoding —
+    # the encoder always outputs .mkv, the atomic replace lands the new
+    # file at the .mkv target, and the source's old extension stays only
+    # on the .original.bak backup. Pre-2026-05-13 this check compared
+    # full basenames including extension; .mp4 sources flagged every
+    # time (Miller's Girl / Trainspotting / The Menu on 2026-05-13) and
+    # the fixer couldn't rename the SOURCE while the encoder was still
+    # using it — the violation re-fired forever.
+    #
+    # The check still catches typo'd source filenames ("Crisismkv" vs
+    # "Crisis.mkv") because the basename-without-ext differs there.
     expected_filename = item.get("final_name") or item.get("filename")
     actual_filename = os.path.basename(filepath)
-    if expected_filename and expected_filename != actual_filename:
-        violations.append(Violation(
-            tag="filename_mismatch",
-            message=f"filename is {actual_filename!r}, expected {expected_filename!r}",
-            category=Category.FIXABLE,
-            data={"expected": expected_filename, "actual": actual_filename},
-        ))
+    if expected_filename:
+        exp_stem, _exp_ext = os.path.splitext(expected_filename)
+        act_stem, _act_ext = os.path.splitext(actual_filename)
+        if exp_stem != act_stem:
+            violations.append(Violation(
+                tag="filename_mismatch",
+                message=f"filename is {actual_filename!r}, expected {expected_filename!r}",
+                category=Category.FIXABLE,
+                data={"expected": expected_filename, "actual": actual_filename},
+            ))
 
     # === AV1→AV1 growth threshold ===
     # Only enforce on AV1 sources. HEVC/H.264 → AV1 first-encodes can
