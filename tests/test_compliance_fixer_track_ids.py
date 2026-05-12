@@ -45,12 +45,27 @@ def _setup_fixer_mocks(monkeypatch, video=1, audio=4, subs=26,
     returns the SAME shape as the source (mkvmerge silently kept all
     tracks). The proof-of-work guard must fail in that case.
     """
-    src_probe = {"video": [{}] * video, "audio": [{}] * audio, "subs": [{}] * subs}
+    # _probe_full returns video as a SINGLE DICT (the first video stream),
+    # not a list. Audio and subs are lists. Mirroring this shape exactly is
+    # critical — the bug fixed on 2026-05-12 was that the fixer called
+    # ``len(probe.get("video"))`` and a dict's len is its KEY COUNT (~9
+    # fields), so the audio/sub offsets were 9-too-big. Tests must use the
+    # same shape as production or the bug class is invisible.
+    def _video_block(n):
+        # Real shape: dict with codec/width/height/etc when present, empty
+        # dict or missing when not. n=0 means no video stream.
+        return {"codec": "av1", "width": 1920, "height": 1080} if n > 0 else None
+
+    src_probe = {
+        "video": _video_block(video),
+        "audio": [{}] * audio,
+        "subs":  [{}] * subs,
+    }
     if simulate_drop_failure:
         out_probe = src_probe
     else:
         out_probe = {
-            "video": [{}] * video,
+            "video": _video_block(video),
             "audio": [{}] * max(0, audio - drop_audio_count),
             "subs":  [{}] * max(0, subs - drop_sub_count),
         }
@@ -224,3 +239,70 @@ def test_proof_of_work_accepts_correct_drop(monkeypatch):
         drop_sub_indices=list(range(25)),
     )
     assert ok is True
+
+
+def test_probe_video_is_dict_not_list(monkeypatch):
+    """Regression test for the 2026-05-12 bug class: ``_probe_full``
+    returns ``video`` as a single dict, not a list. ``len(dict)`` returns
+    the KEY COUNT (~9), not 1, which made every global track ID 8 too
+    big and mkvmerge errored rc=1 with empty stderr (silent failure).
+
+    This test verifies the fixer correctly counts video=1 even when the
+    video probe block is a populated dict. If someone reverts the
+    1-if-non-empty-else-0 normalisation, the assertions on global IDs
+    will catch it.
+    """
+    fake_probe = {
+        "video": {  # NOT a list — dict with multiple fields
+            "codec": "av1",
+            "width": 3840,
+            "height": 2160,
+            "pix_fmt": "yuv420p10le",
+            "r_frame_rate": "24000/1001",
+            "color_transfer": "smpte2084",
+            "color_space": "bt2020nc",
+            "bit_rate_kbps": 25000,
+            "profile": "Main 10",
+        },
+        "audio": [{}, {}],   # 2 audio streams
+        "subs":  [{}, {}, {}, {}],  # 4 sub streams
+    }
+    monkeypatch.setattr("pipeline.full_gamut._probe_full", lambda _src: fake_probe)
+    monkeypatch.setattr(cf.os.path, "getsize",
+                        lambda p: int(30 * 1024**3 * (0.95 if "compliance_tmp" in p else 1.0)))
+    monkeypatch.setattr(cf.os.path, "exists", lambda p: True)
+    monkeypatch.setattr(cf.os, "replace", lambda a, b: None)
+    monkeypatch.setattr(cf.os, "remove", lambda p: None)
+
+    # After mkvmerge succeeds, the same probe is hit for proof-of-work.
+    # Simulate correct drop output (1 sub remains after dropping 3).
+    call_count = {"n": 0}
+    def probe_with_output(_src):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            return fake_probe
+        # Output: 1 video, 2 audio, 1 sub (dropped 3 of 4)
+        return {**fake_probe, "subs": [{}]}
+    monkeypatch.setattr("pipeline.full_gamut._probe_full", probe_with_output)
+
+    captured = {"cmd": None}
+    class FakeCompleted:
+        returncode = 0
+        stderr = b""
+    monkeypatch.setattr(cf.subprocess, "run",
+                        lambda cmd, **kw: (captured.__setitem__("cmd", cmd), FakeCompleted())[1])
+
+    # 1 video + 2 audio + 4 subs, keep sub per-type index 3 (last)
+    # Pre-fix: n_video = len(dict) = 9 → sub_id_offset = 11 → global ID 14 (doesn't exist)
+    # Post-fix: n_video = 1 → sub_id_offset = 3 → global ID 6 (correct: last sub)
+    ok = cf._mkvmerge_drop_streams(
+        "//nas/movie.mkv",
+        drop_sub_indices=[0, 1, 2],
+    )
+    assert ok is True
+    cmd = captured["cmd"]
+    i = cmd.index("--subtitle-tracks")
+    assert cmd[i + 1] == "6", (
+        f"global ID 6 expected (video=1 + audio=2 + sub_idx=3 = 6). "
+        f"If you see 14, the n_video=len(dict)=9 regression is back: {cmd[i + 1]!r}"
+    )

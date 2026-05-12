@@ -71,7 +71,14 @@ def _mkvmerge_drop_streams(
     # One probe for both audio + sub fixes — saves an SMB round-trip.
     from pipeline.full_gamut import _probe_full
     probe = _probe_full(src)
-    n_video = len(probe.get("video") or [])
+    # ``_probe_full`` returns ``video`` as a SINGLE DICT (the first video
+    # stream), not a list. ``len(dict)`` returns the key count (~9 fields),
+    # not 1 — pre-2026-05-12 that's exactly the bug that made mkvmerge
+    # silently return rc=1 with empty stderr for every compliance fix
+    # against an encoded output. The Wild Robot / Happy Gilmore 2 /
+    # Superbad / From Russia with Love wave was this. Truth: video is
+    # 1 if the dict is non-empty, else 0. audio / subs ARE lists.
+    n_video = 1 if probe.get("video") else 0
     n_audio = len(probe.get("audio") or [])
     n_sub = len(probe.get("subs") or [])
     audio_id_offset = n_video             # audio global IDs: [n_video, n_video+n_audio)
