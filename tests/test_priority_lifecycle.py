@@ -241,6 +241,106 @@ def test_set_priority_skips_non_nas_paths(tmp_path, monkeypatch):
     assert result["seeded"] == 0, "non-NAS paths must NOT be seeded into the DB"
 
 
+# --------------------------------------------------------------------------
+# set_file prunes priority on terminal transition (real-time path)
+# --------------------------------------------------------------------------
+
+
+def _priority_paths(prio_path):
+    return json.loads(prio_path.read_text(encoding="utf-8"))["paths"]
+
+
+def _seed_priority(staging_dir, paths):
+    """Write a priority.json containing the given paths."""
+    control = staging_dir / "control"
+    control.mkdir(exist_ok=True)
+    p = control / "priority.json"
+    p.write_text(
+        json.dumps({"force": [], "paths": list(paths), "patterns": []}),
+        encoding="utf-8",
+    )
+    return p
+
+
+def _redirect_staging_dir(monkeypatch, tmp_path):
+    """Point paths.STAGING_DIR at tmp_path so _remove_from_priority_json
+    (which reads STAGING_DIR lazily) operates on the test fixture file."""
+    import paths as paths_mod
+    monkeypatch.setattr(paths_mod, "STAGING_DIR", tmp_path)
+
+
+def test_set_file_done_removes_from_priority(tmp_path, monkeypatch):
+    """The MOMENT a file transitions to DONE in the state DB, its path
+    must come off priority.json. No waiting for the next queue rebuild.
+    """
+    from pipeline.state import PipelineState, FileStatus
+
+    _redirect_staging_dir(monkeypatch, tmp_path)
+    db_path = tmp_path / "state.db"
+    fp_done = r"\\NAS\Movies\Done.mkv"
+    fp_pending = r"\\NAS\Movies\Pending.mkv"
+    prio_path = _seed_priority(tmp_path, [fp_done, fp_pending])
+
+    state = PipelineState(str(db_path))
+    state.set_file(fp_done, FileStatus.DONE)
+
+    remaining = _priority_paths(prio_path)
+    assert fp_done not in remaining, "DONE transition must drop the path from priority.json"
+    assert fp_pending in remaining, "other entries left alone"
+
+
+def test_set_file_flagged_corrupt_removes_from_priority(tmp_path, monkeypatch):
+    """Same hook fires for flagged_* terminal states — Ford-v-Ferrari
+    class files belong off the priority list too."""
+    from pipeline.state import PipelineState, FileStatus
+
+    _redirect_staging_dir(monkeypatch, tmp_path)
+    db_path = tmp_path / "state.db"
+    fp = r"\\NAS\Movies\Broken.mkv"
+    prio_path = _seed_priority(tmp_path, [fp])
+
+    state = PipelineState(str(db_path))
+    state.set_file(fp, FileStatus.FLAGGED_CORRUPT)
+
+    assert fp not in _priority_paths(prio_path)
+
+
+def test_set_file_pending_does_NOT_remove_from_priority(tmp_path, monkeypatch):
+    """Status transitions to non-terminal states (pending, processing,
+    fetching, uploading) must leave priority.json intact. The path
+    should stay on the list until it's terminal."""
+    from pipeline.state import PipelineState, FileStatus
+
+    _redirect_staging_dir(monkeypatch, tmp_path)
+    db_path = tmp_path / "state.db"
+    fp = r"\\NAS\Movies\InFlight.mkv"
+    prio_path = _seed_priority(tmp_path, [fp])
+
+    state = PipelineState(str(db_path))
+    state.set_file(fp, FileStatus.PROCESSING)
+    state.set_file(fp, FileStatus.FETCHING)
+    state.set_file(fp, FileStatus.UPLOADING)
+
+    assert fp in _priority_paths(prio_path), (
+        "non-terminal transitions must NOT prune from priority"
+    )
+
+
+def test_remove_from_priority_atomic_on_concurrent_failure(tmp_path):
+    """If the .tmp write fails, priority.json must be left untouched
+    (not truncated). Hard to simulate write failure; pin idempotency
+    instead — calling the helper twice in a row produces the same
+    final state."""
+    from pipeline.state import _remove_from_priority_json
+
+    prio_path = _seed_priority(tmp_path, [r"\\NAS\a.mkv", r"\\NAS\b.mkv"])
+    r1 = _remove_from_priority_json(r"\\NAS\a.mkv", staging_dir=str(tmp_path))
+    r2 = _remove_from_priority_json(r"\\NAS\a.mkv", staging_dir=str(tmp_path))
+    assert r1 is True
+    assert r2 is False  # not present anymore — no-op
+    assert _priority_paths(prio_path) == [r"\\NAS\b.mkv"]
+
+
 def test_set_priority_skips_missing_files(tmp_path, monkeypatch):
     """A priority entry for a file that doesn't exist on disk is a
     ghost — don't seed it (would be a never-fetchable pending row)."""

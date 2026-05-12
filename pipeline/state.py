@@ -99,6 +99,51 @@ def is_flagged(status: str | FileStatus) -> bool:
     return status in FLAGGED_STATUSES
 
 
+def _remove_from_priority_json(filepath: str, staging_dir: str | None = None) -> bool:
+    """Drop ``filepath`` from ``control/priority.json -> paths`` if present.
+
+    Called by ``set_file`` whenever a file transitions to a terminal
+    status (done / flagged_*) so the priority list stays a live "still
+    to do" view rather than an append-only log.
+
+    Atomic write (``.tmp`` + ``os.replace``) so a concurrent reader
+    never sees a truncated priority.json. Best-effort: errors are
+    swallowed because the state DB write has already committed; the
+    queue-rebuild prune in ``pipeline.__main__._prune_done_from_priority``
+    acts as a safety net to catch anything this misses.
+    """
+    import os as _os
+    if staging_dir is None:
+        # Import lazily to avoid circular import on module load
+        from paths import STAGING_DIR
+        staging_dir = str(STAGING_DIR)
+    prio_path = _os.path.join(staging_dir, "control", "priority.json")
+    if not _os.path.exists(prio_path):
+        return False
+    try:
+        with open(prio_path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return False
+    paths = data.get("paths") or []
+    if filepath not in paths:
+        return False
+    data["paths"] = [p for p in paths if p != filepath]
+    tmp = prio_path + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        _os.replace(tmp, prio_path)
+    except OSError:
+        try:
+            if _os.path.exists(tmp):
+                _os.remove(tmp)
+        except OSError:
+            pass
+        return False
+    return True
+
+
 def is_terminal(status: str | FileStatus) -> bool:
     """True if ``status`` means 'no more pipeline work needed'."""
     if isinstance(status, str):
@@ -305,6 +350,17 @@ class PipelineState:
                     f"INSERT OR REPLACE INTO pipeline_files ({', '.join(cols)}) VALUES ({placeholders})", vals
                 )
                 self._conn.commit()
+
+        # Terminal transition → prune from priority.json immediately so the
+        # list reflects "still to do", not "every add we ever made". The
+        # queue-rebuild prune still runs as a safety net; this is the
+        # primary real-time path. Best-effort: any failure is swallowed
+        # because the DB write has already committed.
+        if is_terminal(status):
+            try:
+                _remove_from_priority_json(filepath)
+            except Exception:
+                pass
 
     def get_files_by_status(self, status: FileStatus) -> list[str]:
         """Return list of filepaths matching a status."""
