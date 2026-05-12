@@ -444,9 +444,37 @@ export function Library({ data, pipelineData, onFileOpen, drillKey, onClearDrill
               fontWeight: 600,
               fontSize: 12,
             }}
-            title="Mark every selected file as pending so the encoder picks them up"
+            title="Mark every selected file as pending so the encoder picks them up in normal queue order (largest-first)"
           >
             Queue {fmtNum(selectedPaths.size)} for re-encode ↵
+          </button>
+          <button
+            onClick={async () => {
+              const paths = Array.from(selectedPaths);
+              try {
+                const total = await bulkAddToPriority(paths);
+                window.notify?.({
+                  kind: "good",
+                  title: `Added ${fmtNum(paths.length)} to priority`,
+                  body: `Priority queue now ${total} files — these jump the queue on the next build pass.`,
+                });
+              } catch (e) {
+                window.notify?.({ kind: "bad", title: "Add failed", body: String(e.message || e) });
+              }
+            }}
+            style={{
+              padding: "6px 14px",
+              background: "transparent",
+              color: "var(--accent)",
+              border: "1px solid var(--accent)",
+              borderRadius: 4,
+              cursor: "pointer",
+              fontWeight: 600,
+              fontSize: 12,
+            }}
+            title="Append every selected file to priority.json so the queue builder lifts them to the front of the next pass. Pairs well with Queue for re-encode."
+          >
+            Add {fmtNum(selectedPaths.size)} to priority
           </button>
           <button
             onClick={clearSelection}
@@ -868,6 +896,8 @@ export function Library({ data, pipelineData, onFileOpen, drillKey, onClearDrill
             setPanel={setPanel}
             onFileOpen={onFileOpen}
             onAuditPatch={updateAuditRow}
+            selectedPaths={selectedPaths}
+            clearSelection={clearSelection}
           />
         )}
       </div>
@@ -1214,7 +1244,27 @@ function FileManagerPanel({ sel, onClose }) {
   );
 }
 
-function Inspector({ sel, panel, setPanel, onFileOpen, onAuditPatch }) {
+// Add a list of paths to the existing priority.json "paths" list (merge,
+// not replace). The priority API replaces the full paths list each call,
+// so we read-modify-write rather than nuking the rest of the user's
+// priority cohort. Returns the post-merge count.
+async function bulkAddToPriority(paths) {
+  const current = await api.getPriority().catch(() => ({ paths: [] }));
+  const merged = Array.from(new Set([...(current.paths || []), ...paths]));
+  const r = await api.setPriority(merged);
+  return r?.paths ?? merged.length;
+}
+
+function Inspector({ sel, panel, setPanel, onFileOpen, onAuditPatch, selectedPaths, clearSelection }) {
+  // When the user has a multi-selection active, the Inspector's action
+  // buttons target the WHOLE selection (not just the focused row). Falls
+  // back to [sel.filepath] when only one row is in play.
+  const isBulk = (selectedPaths?.size || 0) > 1;
+  const targetPaths = isBulk ? Array.from(selectedPaths) : [sel.filepath];
+  const targetCount = targetPaths.length;
+  const targetLabel = isBulk
+    ? `${fmtNum(targetCount)} files`
+    : prettyTitle(sel.filename);
   const issues = detectIssues(sel);
   const hasIssues = issues.length > 0;
   const videoIssue = issues.find((i) => i.scope === "video");
@@ -1541,22 +1591,33 @@ function Inspector({ sel, panel, setPanel, onFileOpen, onAuditPatch }) {
           className={`ins-btn primary ${hasIssues ? "wrong" : ""}`}
           onClick={async () => {
             try {
-              const r = await api.addForce(sel.filepath);
+              // Force-stack add: bulk = loop addForce (no bulk endpoint
+              // for force_stack); single = one call. Force stack is the
+              // hard top of the queue (LIFO).
+              let lastCount = "?";
+              for (const fp of targetPaths) {
+                const r = await api.addForce(fp);
+                lastCount = r?.force_count ?? lastCount;
+              }
               window.notify?.({
-                kind: hasIssues ? "good" : "good",
-                title: hasIssues
-                  ? `Force-queued to fix ${issues.length} issue${issues.length === 1 ? "" : "s"}`
-                  : "Force-queued for encoding",
-                body: `${prettyTitle(sel.filename)} · now first in the force stack (${r.force_count ?? "?"} total)`,
+                kind: "good",
+                title: isBulk
+                  ? `Force-queued ${targetCount} file${targetCount === 1 ? "" : "s"}`
+                  : hasIssues
+                    ? `Force-queued to fix ${issues.length} issue${issues.length === 1 ? "" : "s"}`
+                    : "Force-queued for encoding",
+                body: `${targetLabel} · top of the force stack (${lastCount} total)`,
               });
             } catch (e) {
               window.notify?.({ kind: "bad", title: "Queue failed", body: String(e.message || e) });
             }
           }}
         >
-          {hasIssues
-            ? `Fix ${issues.length} issue${issues.length === 1 ? "" : "s"} · queue encode`
-            : "Queue encode now"}{" "}
+          {isBulk
+            ? `Force-queue ${fmtNum(targetCount)} file${targetCount === 1 ? "" : "s"}`
+            : hasIssues
+              ? `Fix ${issues.length} issue${issues.length === 1 ? "" : "s"} · queue encode`
+              : "Queue encode now"}{" "}
           <span className="k">↵</span>
         </button>
         <button className="ins-btn" onClick={() => onFileOpen?.(sel.filepath)}>
@@ -1564,22 +1625,24 @@ function Inspector({ sel, panel, setPanel, onFileOpen, onAuditPatch }) {
         </button>
         <button
           className="ins-btn"
+          title="Add file(s) to priority.json — the queue builder lifts these to the front of the next pass. Soft priority: still sorts by size within the lifted group, NOT a force-stack interrupt."
           onClick={async () => {
             try {
-              const current = await api.getPriority().catch(() => ({ paths: [] }));
-              const paths = Array.from(new Set([...(current.paths || []), sel.filepath]));
-              const r = await api.setPriority(paths);
+              const total = await bulkAddToPriority(targetPaths);
               window.notify?.({
                 kind: "good",
-                title: "Added to batch",
-                body: `${prettyTitle(sel.filename)} · priority queue now ${r?.paths ?? paths.length} files`,
+                title: `Added ${fmtNum(targetCount)} to priority`,
+                body: `${targetLabel} · priority queue now ${total} files`,
               });
             } catch (e) {
               window.notify?.({ kind: "bad", title: "Add failed", body: String(e.message || e) });
             }
           }}
         >
-          Add to batch <span className="k">B</span>
+          {isBulk
+            ? `Add ${fmtNum(targetCount)} to priority`
+            : "Add to priority"}{" "}
+          <span className="k">P</span>
         </button>
         <button
           className="ins-btn"
@@ -1601,21 +1664,36 @@ function Inspector({ sel, panel, setPanel, onFileOpen, onAuditPatch }) {
             color: "var(--accent)",
             borderColor: "var(--accent)",
           }}
-          title="Reset this file's pipeline status to pending so the encoder picks it up. Use for files that should re-encode (too_low CQ, EAC-3 audio fixup, etc.)."
+          title="Reset pipeline status to pending — the encoder picks it up in normal queue order (largest-first, OR priority order if also in priority.json). For an immediate jump, use Add to priority."
           onClick={async () => {
             try {
-              const r = await api.requeueFile(sel.filepath, "manual requeue from Inspector");
-              window.notify?.({
-                kind: "good",
-                title: "Queued for re-encode",
-                body: `${prettyTitle(sel.filename)} · ${r.status}`,
-              });
+              if (isBulk) {
+                const r = await api.requeueBatch(targetPaths, "bulk requeue from Inspector");
+                window.notify?.({
+                  kind: "good",
+                  title: `Queued ${r.queued} for re-encode`,
+                  body:
+                    r.skipped > 0
+                      ? `${r.skipped} skipped (in flight or flagged_corrupt)`
+                      : `${targetCount} file${targetCount === 1 ? "" : "s"} reset to pending`,
+                });
+              } else {
+                const r = await api.requeueFile(sel.filepath, "manual requeue from Inspector");
+                window.notify?.({
+                  kind: "good",
+                  title: "Queued for re-encode",
+                  body: `${prettyTitle(sel.filename)} · ${r.status}`,
+                });
+              }
             } catch (e) {
               window.notify?.({ kind: "bad", title: "Queue failed", body: String(e.message || e) });
             }
           }}
         >
-          Queue re-encode <span className="k">R</span>
+          {isBulk
+            ? `Queue ${fmtNum(targetCount)} for re-encode`
+            : "Queue re-encode"}{" "}
+          <span className="k">R</span>
         </button>
         <button
           className="ins-btn"
