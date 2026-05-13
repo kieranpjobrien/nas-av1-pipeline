@@ -15,6 +15,7 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -190,6 +191,39 @@ def _append_history_jsonl(path, entry: dict) -> None:
             pass
 
 
+# Per-filepath in-process locks. The orchestrator's ``_pick_for_prep``
+# claim mechanism prevents two prep workers from picking the same file,
+# but it doesn't cover the GPU worker's _encode_only → prepare_for_encode
+# fallback path. Both can converge on the same file when prep_data is
+# stale (e.g. after a pipeline restart reaps the fetch artefact). When
+# they race, both call _mkvmerge_drop_streams_to_path against the same
+# sibling target — observed 2026-05-14 06:21 on Resident Alien S01E07:
+# the first call succeeded (1.74 GB sibling written), the second got
+# rc=2 and marked the row ERROR, even though the strip output was sat
+# on disk. The lock makes prepare_for_encode mutually-exclusive per
+# filepath across all callers — once one worker enters the function,
+# others wait, and the idempotence check at the top short-circuits
+# them out as soon as prep_done is set.
+_prep_locks_registry: dict[str, threading.Lock] = {}
+_prep_locks_registry_lock = threading.Lock()
+
+
+def _get_prep_lock(filepath: str) -> threading.Lock:
+    """Return the per-filepath prep lock, creating it on first request.
+
+    Locks live for the process lifetime — there are only as many keys as
+    files in the queue, and a Lock is ~56 bytes; the registry never grows
+    enough to matter. Cleanup would invite TOCTOU races between "the
+    registry doesn't have this key" and "we're about to acquire it".
+    """
+    with _prep_locks_registry_lock:
+        lock = _prep_locks_registry.get(filepath)
+        if lock is None:
+            lock = threading.Lock()
+            _prep_locks_registry[filepath] = lock
+        return lock
+
+
 def prepare_for_encode(
     filepath: str,
     item: dict,
@@ -226,7 +260,31 @@ def prepare_for_encode(
     so a subsequent ``full_gamut()`` call short-circuits past the prep.
 
     Idempotent: re-running on a file with prep_done=True returns the
-    cached prep_data without redoing work.
+    cached prep_data without redoing work. The per-filepath lock makes
+    this idempotence safe against concurrent callers — the second one
+    in queues on the lock, then short-circuits on prep_done when the
+    first finishes.
+    """
+    # Serialise per-filepath. Other callers (a parallel prep worker, or
+    # _encode_only's stale-prep fallback) queue on the same Lock; the
+    # idempotence check immediately below the lock short-circuits the
+    # one(s) that woke up second.
+    with _get_prep_lock(filepath):
+        return _prepare_for_encode_locked(filepath, item, config, state, staging_dir)
+
+
+def _prepare_for_encode_locked(
+    filepath: str,
+    item: dict,
+    config: dict,
+    state: PipelineState,
+    staging_dir: str,
+) -> dict | None:
+    """Body of prepare_for_encode, called under the per-filepath lock.
+
+    Kept as a separate function so a future caller that already holds
+    the lock (or wants to skip it for testing) can reach the same code
+    path without nested lock acquisition.
     """
     filename = item["filename"]
     library_type = item.get("library_type", "")

@@ -155,6 +155,114 @@ class TestPrepareForEncodeContract:
         result = prepare_for_encode(nas_path, item, {}, orch.state, str(tmp_path))
         assert result == cached_prep
 
+    def test_concurrent_callers_serialise_via_per_filepath_lock(self, tmp_path):
+        """Pin the 2026-05-14 06:21 Resident Alien S01E07 prep race.
+
+        Pre-fix, a real prep worker and the GPU worker's
+        ``_encode_only`` stale-prep fallback could both reach
+        ``prepare_for_encode`` for the same filepath concurrently
+        (the orchestrator's ``_pick_for_prep`` claim mechanism only
+        covered prep-worker-vs-prep-worker, not GPU-fallback). Both
+        called ``_mkvmerge_drop_streams_to_path`` against the same
+        sibling target; the second got rc=2 and wrote ERROR over
+        the first's success — observed live, status row was marked
+        error with the 1.74 GB stripped file already sitting on
+        disk from the winning worker.
+
+        Post-fix: a per-filepath in-process Lock makes the function
+        mutually-exclusive across all callers. The second worker
+        blocks on entry, and by the time it acquires the lock the
+        first has set ``prep_done=True`` so the top-of-function
+        idempotence check returns the cached prep_data — no second
+        mkvmerge call, no rc=2.
+
+        We exercise this with two parallel threads that each call
+        ``prepare_for_encode`` for the same filepath. Only the first
+        thread should execute the qualify/strip work; the second
+        should short-circuit on the cached prep_data the first wrote.
+        """
+        import threading
+        from unittest.mock import patch
+
+        from pipeline.full_gamut import prepare_for_encode
+
+        orch = _orch(tmp_path)
+        nas_path, local_path = _file_in_disk_state(tmp_path, "Race.mkv")
+        orch.state.set_file(nas_path, FileStatus.PROCESSING, local_path=local_path)
+
+        item_template = {
+            "filepath": nas_path,
+            "filename": "Race.mkv",
+            "library_type": "movie",
+            "audio_streams": [{"codec_raw": "eac3", "language": "eng"}],
+            "subtitle_streams": [],
+            "tmdb": {"original_language": "en", "title": "Race"},
+        }
+
+        # Count how many times qualify_file actually runs. A correct
+        # locking implementation runs it exactly once across the two
+        # callers; without the lock, both threads pass the idempotence
+        # check before either writes prep_done=True and qualify fires
+        # twice.
+        qualify_call_count = {"n": 0}
+        qualify_call_count_lock = threading.Lock()
+
+        def slow_qualify(item, config, **kw):
+            from pipeline.qualify import QualifyOutcome, QualifyResult
+
+            with qualify_call_count_lock:
+                qualify_call_count["n"] += 1
+            # Sleep so the second thread, if not blocked by the prep
+            # lock, has plenty of time to also reach qualify.
+            import time as _t
+            _t.sleep(0.5)
+            return QualifyResult(
+                outcome=QualifyOutcome.QUALIFIED,
+                rationale="ok",
+                audio_keep_indices=[0],
+                sub_keep_indices=[],
+                detected_audio_languages={},
+                original_language="en",
+                enriched_entry=item,
+            )
+
+        results: list = [None, None]
+
+        def call_prep(slot: int):
+            with patch("pipeline.full_gamut.detect_all_languages", side_effect=lambda i, **k: i), \
+                 patch("pipeline.filename.clean_filename", return_value=None), \
+                 patch("pipeline.full_gamut._find_external_subs", return_value=[]), \
+                 patch("pipeline.qualify.qualify_file", side_effect=slow_qualify):
+                results[slot] = prepare_for_encode(
+                    nas_path, dict(item_template), {}, orch.state, str(tmp_path)
+                )
+
+        t0 = threading.Thread(target=call_prep, args=(0,))
+        t1 = threading.Thread(target=call_prep, args=(1,))
+        t0.start()
+        t1.start()
+        t0.join(timeout=10)
+        t1.join(timeout=10)
+
+        assert not t0.is_alive(), "thread 0 deadlocked"
+        assert not t1.is_alive(), "thread 1 deadlocked"
+
+        # Both threads see the same prep_data — the winning one's.
+        assert results[0] is not None
+        assert results[1] is not None
+        assert results[0] == results[1], (
+            f"both threads must return the same cached prep_data; "
+            f"got {results[0]!r} vs {results[1]!r}"
+        )
+        # Heavy work runs exactly once. The second thread short-circuits
+        # on the idempotence check after the first releases the lock.
+        assert qualify_call_count["n"] == 1, (
+            f"qualify must run once total — concurrent callers should "
+            f"serialise via the per-filepath lock and the second one "
+            f"should short-circuit on prep_done=True. "
+            f"Got {qualify_call_count['n']} calls."
+        )
+
     def test_flagged_foreign_returns_none(self, tmp_path):
         """When qualify says FLAGGED_FOREIGN, prep_data is None and state shows the flag."""
         from pipeline.full_gamut import prepare_for_encode
