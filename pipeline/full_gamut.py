@@ -583,12 +583,31 @@ def full_gamut(
                 )
                 return True
 
-        # If a prep worker has already done steps 1-5, short-circuit past
-        # the entire prep block and go straight to encode. The GPU thread
-        # is precious — every second it spends on CPU prep is a second of
-        # NVENC idle.
-        if existing_pre and existing_pre.get("prep_done") and existing_pre.get("prep_data"):
-            return _encode_only(filepath, item, config, state, staging_dir, gpu_semaphore)
+        # Always route through _encode_only — it short-circuits when
+        # prep_done=True (the fast path the prep worker pre-paved) and
+        # falls back to prepare_for_encode when prep hasn't completed
+        # yet (line ~936). prepare_for_encode is the ONLY caller of
+        # strip_streams_locally; routing everything through it is what
+        # guarantees the encoder consumes a stripped input.
+        #
+        # Pre-2026-05-14 there was a parallel inline encode path below
+        # (kept reachable by a `prep_done` branch here) that built the
+        # ffmpeg command directly against the fetched source — no
+        # pre-encode strip. For any file where the GPU worker beat the
+        # prep worker (most consistently: the first file after every
+        # pipeline restart), that inline path produced wrong-sub
+        # outputs. Resident Alien S01E07 was the canary: the only
+        # English sub was titled "İngilizce [CC]", the legacy
+        # _map_subtitle_streams selector flagged it is_hi (the CC
+        # token), and a forced Turkish sub got mapped in its place —
+        # post-encode compliance saw a foreign sub and refused the
+        # file. The same class would bite any file whose only English
+        # sub is HI/SDH/CC-titled AND has a forced foreign sub on
+        # the side.
+        return _encode_only(filepath, item, config, state, staging_dir, gpu_semaphore)
+        # The inline STEP 1-5 block below is dead by construction —
+        # left in place pending a follow-up cleanup commit so the diff
+        # for this fix stays focused on the routing change.
 
         # === STEP 1: Fetch ===
         # Wait for network worker to fetch this file (it should be pre-fetching ahead).

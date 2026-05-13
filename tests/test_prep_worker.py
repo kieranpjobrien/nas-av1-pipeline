@@ -242,6 +242,72 @@ class TestEncodeOnlyShortCircuit:
         assert called["encode_only"] is True, "must short-circuit to _encode_only"
         assert called["prepare"] is False, "must NOT re-run prep when prep_done is cached"
 
+    def test_full_gamut_routes_through_encode_only_even_without_prep_done(self, tmp_path):
+        """Pin the 2026-05-14 Resident Alien S01E07 race fix.
+
+        Pre-fix, when the GPU worker reached a file before the prep
+        worker had a chance to run (most consistently: the very first
+        file after every pipeline restart), ``full_gamut`` fell through
+        to an inline STEP 1-5 block that built the ffmpeg command
+        directly against the un-stripped fetched source. That inline
+        block did NOT call ``strip_streams_locally`` — so the legacy
+        ``_map_subtitle_streams`` selector saw the full source layout,
+        ran title-based is_hi detection on every English track, and
+        for files like Resident Alien S01E07 (only English sub titled
+        ``İngilizce [CC]``) skipped the eng sub as HI/CC and instead
+        mapped the source's forced Turkish sub. Output: foreign-sub
+        PREP MISS on every cold-start file.
+
+        Post-fix: ``full_gamut`` unconditionally delegates to
+        ``_encode_only``, which has its own ``prep_data`` stale-guard
+        + ``prepare_for_encode`` fallback. The strip step always runs.
+        """
+        from pipeline import full_gamut as fg
+
+        orch = _orch(tmp_path)
+        nas_path, local_path = _file_in_disk_state(tmp_path, "First-After-Restart.mkv")
+        # Crucial setup: no prep_done flag, no prep_data — exactly the
+        # state a freshly-fetched row sits in when the GPU worker beats
+        # the prep worker to it.
+        orch.state.set_file(
+            nas_path,
+            FileStatus.PROCESSING,
+            local_path=local_path,
+        )
+
+        item = {
+            "filepath": nas_path,
+            "filename": "First-After-Restart.mkv",
+            "library_type": "series",
+            "audio_streams": [{"codec_raw": "eac3", "language": "eng"}],
+            "subtitle_streams": [
+                # The exact S01E07 shape: only-English sub with a
+                # CC-titled-in-Turkish track, plus a forced foreign sub.
+                {"codec": "subrip", "language": "eng", "title": "İngilizce [CC]"},
+                {"codec": "subrip", "language": "tur",
+                 "title": "Turkish [ForcedNarrative]"},
+            ],
+            "tmdb": {"original_language": "en"},
+        }
+
+        called = {"encode_only": False}
+
+        def fake_encode_only(*a, **kw):
+            called["encode_only"] = True
+            return True
+
+        with patch("pipeline.full_gamut._encode_only", side_effect=fake_encode_only):
+            ok = fg.full_gamut(nas_path, item, {}, orch.state, str(tmp_path))
+
+        assert ok is True
+        assert called["encode_only"] is True, (
+            "even without prep_done cached, full_gamut MUST go through "
+            "_encode_only — the inline encode path skipped strip and "
+            "raced the prep worker. Routing everything through "
+            "_encode_only is what guarantees the encoder consumes a "
+            "stripped input."
+        )
+
 
 class TestPrepWorkerPicker:
     """Prep worker picks fetched-but-not-prepped files via _pick_for_prep."""
