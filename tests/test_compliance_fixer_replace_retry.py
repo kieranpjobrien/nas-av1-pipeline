@@ -88,7 +88,11 @@ def test_replace_retries_on_permission_error(monkeypatch, tmp_path):
 
 def test_replace_exhausts_retries_then_fails(monkeypatch, tmp_path):
     """If EVERY attempt hits PermissionError, give up cleanly and
-    return False after the retry budget. Don't loop forever."""
+    return False after the retry budget. Don't loop forever.
+
+    Post-2026-05-13 the retry budget went from 4 attempts (7.5s
+    patience) to 8 attempts (~91s patience) after Into the Woods
+    exhausted the shorter budget on a real run."""
     src, _ = _setup_minimal_mocks(monkeypatch, tmp_path)
     call_count = {"n": 0}
     def always_locked(a, b):
@@ -101,8 +105,10 @@ def test_replace_exhausts_retries_then_fails(monkeypatch, tmp_path):
 
     ok = cf._mkvmerge_drop_streams(src, drop_sub_indices=[0, 1])
     assert ok is False
-    # 4 attempts per the retry loop
-    assert call_count["n"] == 4
+    assert call_count["n"] == 8, (
+        f"expected 8 attempts (extended budget for slow antivirus / "
+        f"file-cache flush), got {call_count['n']}"
+    )
 
 
 def test_replace_does_not_retry_on_enoent(monkeypatch, tmp_path):

@@ -115,7 +115,13 @@ def _mkvmerge_drop_streams(
     # 18 files stuck in "compliance unfixed" today because of this single
     # hardcoded bound. Formula: 60 s overhead + 1 s per 10 MB of source ≈
     # 100 MB/s amortised. 30 GB → 60 + 3000 = ~50 min ceiling, plenty.
-    timeout_secs = max(600, 60 + int(src_size / (10 * 1024 * 1024)))
+    # mkvmerge stream-copy throughput observed on this rig: ~5-10 MB/s
+    # for big files on local F:\ (NOT a fast SSD; antivirus scanning
+    # the just-written tmp adds overhead). 2026-05-13 Dark Knight Rises
+    # (27.5 GB) timed out at the previous 10 MB/s formula (2880 s).
+    # Drop the assumed throughput to 4 MB/s so worst-case files get
+    # enough rope. Floor still 10 min for small files.
+    timeout_secs = max(600, 60 + int(src_size / (4 * 1024 * 1024)))
     try:
         out = subprocess.run(cmd, capture_output=True, timeout=timeout_secs)
     except Exception as e:
@@ -195,22 +201,28 @@ def _mkvmerge_drop_streams(
     # The destination ``src`` file is briefly locked during the
     # rename window — likely the antivirus scanning the freshly-
     # written ``.compliance_tmp.mkv``, possibly another worker
-    # holding a read handle. The lock resolves in 1-3 seconds. Same
-    # transient class as the SMB WinError 59 case ``robust_copy``
-    # handles; same fix pattern (short backoff, retry, give up after
-    # a few attempts so a real permission bug still surfaces).
+    # holding a read handle.
+    #
+    # Initial fix (4 attempts, 0.5s/1s/2s/4s = 7.5s patience) wasn't
+    # enough — ``Into the Woods (2014)`` exhausted that budget at
+    # 19:37. Extended to 8 attempts with exponential backoff
+    # (0.5s, 1s, 2s, 4s, 8s, 16s, 30s, 30s = ~91s total). 90 seconds
+    # covers a slow antivirus scan + a slow Windows file-cache
+    # flush; if it still fails after that, it's a genuine permission
+    # bug worth surfacing rather than retrying forever.
     last_exc: Exception | None = None
-    for attempt in range(1, 5):  # 4 attempts total: 0.5s, 1s, 2s, 4s
+    backoffs = [0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 30.0, 30.0]
+    for attempt, wait in enumerate(backoffs, start=1):
         try:
             os.replace(tmp_out, src)
             return True
         except PermissionError as e:
             last_exc = e
-            wait = 0.5 * (2 ** (attempt - 1))
             logging.warning(
                 f"compliance fix atomic replace transient lock "
                 f"(WinError {getattr(e, 'winerror', '?')}): retrying in "
-                f"{wait:.1f}s [attempt {attempt}/4] — {os.path.basename(src)}"
+                f"{wait:.1f}s [attempt {attempt}/{len(backoffs)}] — "
+                f"{os.path.basename(src)}"
             )
             time.sleep(wait)
         except OSError as e:
