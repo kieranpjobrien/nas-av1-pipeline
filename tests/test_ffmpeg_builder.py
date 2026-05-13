@@ -335,6 +335,54 @@ class TestSubtitleMapOptional:
             if tok == "-map" and cmd[i + 1].startswith("0:s:") and not cmd[i + 1].endswith("?"):
                 pytest.fail(f"hard sub map at index {i}: {cmd[i:i + 2]}")
 
+    def test_kept_forced_sub_gets_disposition_and_title_restamped(self) -> None:
+        """Pin the 2026-05-14 Slow Horses S05E03/S05E05 fix.
+
+        Source: [eng "Forced", eng "" regular, eng "SDH"]. Encoder keeps
+        sub 0 (forced) + sub 1 (regular), drops sub 2 (HI). Without an
+        explicit ``-disposition:s:0 forced`` + ``-metadata:s:s:0 title=Forced``
+        on the output, ``-map_metadata -1`` nukes the source metadata and
+        the post-encode compliance gate sees two untitled English subs
+        with no forced/HI flags — and refuses with ``extra_eng_subs``.
+        """
+        item = _base_item()
+        item["subtitle_streams"] = [
+            {"language": "eng", "title": "Forced", "codec": "subrip"},
+            {"language": "eng", "title": "", "codec": "subrip"},
+            {"language": "eng", "title": "SDH", "codec": "subrip"},
+        ]
+        cmd = build_ffmpeg_cmd(
+            input_path="in.mkv",
+            output_path="out.mkv",
+            item=item,
+            config=_base_config(),
+        )
+        # Forced + regular kept; SDH dropped.
+        assert "0:s:0?" in cmd, "forced sub must be mapped"
+        assert "0:s:1?" in cmd, "regular eng sub must be mapped"
+        idx_pairs = [(cmd[i], cmd[i + 1]) for i in range(len(cmd) - 1) if cmd[i] == "-map"]
+        assert ("-map", "0:s:2?") not in idx_pairs, "SDH must be dropped"
+
+        # The OUTPUT must declare sub 0 as forced (so post-encode compliance
+        # excludes it from the regular-English count).
+        assert "-disposition:s:0" in cmd, "kept forced sub must have disposition re-stamped"
+        disp_idx = cmd.index("-disposition:s:0")
+        assert cmd[disp_idx + 1] == "forced"
+
+        # Title re-stamp is the defense-in-depth path (title regex match).
+        # Search for the matching -metadata:s:s:0 title= pair.
+        title_stamped = False
+        for i in range(len(cmd) - 1):
+            if cmd[i] == "-metadata:s:s:0" and cmd[i + 1].lower().startswith("title="):
+                title_stamped = True
+                break
+        assert title_stamped, "kept forced sub must have title re-stamped"
+
+        # Sub 1 (regular English) must NOT carry forced disposition.
+        if "-disposition:s:1" in cmd:
+            idx = cmd.index("-disposition:s:1")
+            assert cmd[idx + 1] != "forced", "regular eng must not be marked forced"
+
     def test_external_eng_sidecar_skips_internal_eng(self) -> None:
         """2026-05-10 fix: when an external English sidecar is being muxed
         in via ``external_subs``, the internal-sub mapper must NOT also

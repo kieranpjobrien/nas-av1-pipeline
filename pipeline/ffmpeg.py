@@ -757,6 +757,24 @@ def build_ffmpeg_cmd(
             lang = (track.get("language") or "").strip().lower()
             if lang and lang not in ("und", "unk"):
                 cmd.extend([f"-metadata:s:s:{out_idx}", f"language={lang}"])
+            # Preserve forced disposition + title so compliance can tell the
+            # forced track apart from the regular English track. -map_metadata -1
+            # nukes everything from source — without re-stamping here, a kept
+            # forced sub looks identical to a regular sub at the post-encode
+            # gate and trips extra_eng_subs. Slow Horses S05E03/S05E05 hit
+            # exactly this on 2026-05-14 (source had [Forced, "", SDH] eng;
+            # encoder kept [0,1], stripped metadata, compliance saw 2 untitled
+            # eng → refuse). parse_sub_stream is the source of truth for
+            # is_forced (title regex + disposition.forced).
+            from pipeline.streams import parse_sub_stream
+            sub_obj = parse_sub_stream(track, index=in_idx)
+            if sub_obj.is_forced:
+                cmd.extend([f"-disposition:s:{out_idx}", "forced"])
+                # Re-stamp a canonical title so the compliance title-regex
+                # path also catches it (defense-in-depth — disposition alone
+                # is enough today but title gives a human-readable signal
+                # in mediainfo / mkvinfo output too).
+                cmd.extend([f"-metadata:s:s:{out_idx}", "title=Forced"])
 
     # Set language metadata for EXTERNAL subtitle streams (Bazarr sidecars
     # we mapped as additional inputs above). Output index continues after
