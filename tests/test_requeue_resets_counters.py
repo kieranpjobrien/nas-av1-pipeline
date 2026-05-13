@@ -111,6 +111,47 @@ def test_batch_requeue_clears_breaker_counters(tmp_path, monkeypatch):
         assert extras["force_reencode"] is True
 
 
+def test_requeue_clears_stale_prep_done(tmp_path, monkeypatch):
+    """The 2026-05-14 bug: prepare_for_encode short-circuits past the
+    new local-strip + source-integrity flow when ``prep_done=True``
+    is cached on the row. Any Given Sunday hit this — pre-architecture
+    prep_done from an earlier attempt let the encoder skip the new
+    strip step, foreign subs survived, post-encode PREP MISS.
+
+    Fix: requeue clears both ``prep_done`` and ``prep_data`` so the
+    next encode always re-runs the full prep flow."""
+    from server.routers.files import file_requeue
+
+    nas_movies = tmp_path / "NAS" / "Movies"
+    nas_movies.mkdir(parents=True)
+    fp = nas_movies / "stale-prep.mkv"
+    fp.write_bytes(b"x")
+    db_path = _make_db(tmp_path, [
+        (str(fp), "error", {
+            "compliance_refuse_count": 2,
+            "prep_done": True,
+            "prep_data": {"actual_input": "/tmp/old.mkv", "output_path": "/tmp/out.mkv"},
+        }),
+    ])
+
+    import paths as paths_mod
+    monkeypatch.setattr(paths_mod, "PIPELINE_STATE_DB", db_path)
+    monkeypatch.setattr(paths_mod, "NAS_MOVIES", nas_movies)
+    monkeypatch.setattr(paths_mod, "NAS_SERIES", tmp_path / "NAS" / "Series")
+
+    file_requeue({"path": str(fp)})
+    extras = _read_extras(db_path, str(fp))
+
+    assert extras.get("prep_done") is False, (
+        "stale prep_done must be cleared so the next encode re-runs the "
+        "full prep flow (local strip + source-integrity probe)"
+    )
+    assert "prep_data" not in extras, (
+        "stale prep_data must be removed too — encoder shouldn't read a "
+        "cached actual_input that points at a file that no longer exists"
+    )
+
+
 def test_requeue_preserves_other_extras(tmp_path, monkeypatch):
     """Counter reset is targeted — other extras (encode_params_used,
     detected_audio, etc.) must survive so the next encode reuses the

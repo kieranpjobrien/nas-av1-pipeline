@@ -401,6 +401,15 @@ def file_requeue(req: dict) -> dict:
             extras["force_reencode"] = True
             extras["compliance_refuse_count"] = 0
             extras["integrity_failure_count"] = 0
+            # Clear prep cache: prepare_for_encode short-circuits past
+            # the new prep flow when prep_done=True. Stale prep_done
+            # from a pre-architectural-fix attempt (2026-05-12 / earlier)
+            # means the new local-strip / source-integrity steps NEVER
+            # run — Any Given Sunday hit this at 01:29:02 (PREP MISS,
+            # 5 foreign subs survived). Force a fresh prep on every
+            # requeue.
+            extras["prep_done"] = False
+            extras.pop("prep_data", None)
             cur.execute(
                 "UPDATE pipeline_files SET status='pending', stage=NULL, error=NULL, "
                 "reason=?, extras=? WHERE filepath = ?",
@@ -496,6 +505,8 @@ def files_requeue_batch(req: dict) -> dict:
             extras["force_reencode"] = True
             extras["compliance_refuse_count"] = 0
             extras["integrity_failure_count"] = 0
+            extras["prep_done"] = False
+            extras.pop("prep_data", None)
             cur.execute(
                 "UPDATE pipeline_files SET status='pending', stage=NULL, error=NULL, "
                 "reason=?, extras=? WHERE filepath = ?",
