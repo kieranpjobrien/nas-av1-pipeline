@@ -35,8 +35,12 @@ def test_prepare_for_encode_flags_broken_source_as_flagged_corrupt():
     transition to FLAGGED_CORRUPT (terminal — user must re-acquire
     the source via Sonarr/Radarr before retry)."""
     src = inspect.getsource(fg)
-    # Locate the prepare_for_encode body
-    start = src.find("def prepare_for_encode")
+    # Locate the prep-flow body. As of 2026-05-14 prepare_for_encode is a
+    # thin lock wrapper around _prepare_for_encode_locked — the actual
+    # source-integrity branch lives in the latter. Check the locked body
+    # if it exists, otherwise the legacy single-function body.
+    locked_marker = "def _prepare_for_encode_locked"
+    start = src.find(locked_marker) if locked_marker in src else src.find("def prepare_for_encode")
     end = src.find("\ndef ", start + 10)
     body = src[start:end if end > 0 else len(src)]
 

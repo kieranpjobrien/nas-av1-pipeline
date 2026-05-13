@@ -85,11 +85,31 @@ def _probe_full(path: str) -> dict:
                 "channel_layout": s.get("channel_layout"),
                 "bit_rate_kbps": int(s["bit_rate"]) // 1000 if str(s.get("bit_rate", "")).isdigit() else None,
                 "language": (s.get("tags") or {}).get("language"),
+                "title": (s.get("tags") or {}).get("title", "") or "",
             })
         elif st == "subtitle":
+            # Include title + disposition so downstream consumers
+            # (compliance.check_compliance, streams.is_hi_internal,
+            # the forced/SDH counters in both layers) can classify
+            # the track. Pre-2026-05-14 this dict only carried codec
+            # + language, so compliance read ``s.get("title")`` as
+            # None and ``s.get("disposition")`` as None for every
+            # output sub — its "forced" detection on the post-encode
+            # probe always evaluated ``"forced" in ""`` and counted
+            # every eng sub as regular. Slow Horses S05E03 / S05E05
+            # tripped this: source had 1 forced + 1 regular + 1 SDH,
+            # the encoder correctly mapped forced + regular into the
+            # output, compliance probed the output, saw 2 eng subs
+            # with no title or disposition info, counted BOTH as
+            # regular, and refused as extra_eng_subs. Same call
+            # downstream of the title/disposition-aware compliance
+            # carve-out for SDH won't see the SDH unless we hand
+            # over the data here.
             subs.append({
                 "codec": s.get("codec_name"),
                 "language": (s.get("tags") or {}).get("language"),
+                "title": (s.get("tags") or {}).get("title", "") or "",
+                "disposition": dict(s.get("disposition") or {}),
             })
 
     return {
