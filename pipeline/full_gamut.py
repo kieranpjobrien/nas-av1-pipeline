@@ -1372,8 +1372,20 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
                 fresh_size = os.path.getsize(dest_path)
             except OSError:
                 fresh_size = 0
+            # 2026-05-13: pass final_path (canonical NAS destination) — not
+            # the source ``filepath``. The filename-mismatch check in
+            # compliance.py compares ``os.path.basename(filepath)`` to the
+            # expected canonical name; the source basename may be the
+            # uncanonicalised form (e.g. "Arrested Development - S01E18 -
+            # Missing Kitty.mkv") which differs from the canonical
+            # "Arrested Development S01E18 Missing Kitty.mkv". The atomic
+            # replace will land the new file at final_path, so that's the
+            # name the compliance gate should be checking. Pre-fix the
+            # nine Arrested Development files in the 2026-05-13 mixed
+            # batch all errored "compliance unfixed: filename is …" because
+            # the source basename couldn't be repaired by renaming dest_path.
             return check_compliance(
-                filepath=filepath,
+                filepath=final_path,
                 item=compliance_item,
                 encode_params=encode_params_used,
                 output_probe=fresh_probe,
