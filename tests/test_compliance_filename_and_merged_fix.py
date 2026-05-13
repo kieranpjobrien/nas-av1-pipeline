@@ -162,17 +162,17 @@ def test_merged_drop_indices_refer_to_original_layout(monkeypatch):
     assert merged == [2, 4]
 
 
-def test_full_gamut_imports_merged_fixer_helper():
-    """Defence-in-depth: confirm full_gamut.py's compliance loop
-    imports the underlying ``_mkvmerge_drop_streams`` helper. If
-    someone reverts the merge refactor to per-fixer calls, this test
-    will at least surface the structural change."""
-    import pipeline.full_gamut as fg
-    src = open(fg.__file__, encoding="utf-8").read()
-    # The merge block uses _mkvmerge_drop_streams directly.
-    assert "_mkvmerge_drop_streams" in src, (
-        "full_gamut.py must use _mkvmerge_drop_streams directly for the merged drop call"
+def test_prep_streams_owns_merged_drop_call():
+    """Phase 2 of the 2026-05-13 refactor moved the merged-drop work
+    to prep_streams (pre-encode). full_gamut.py no longer imports
+    ``_mkvmerge_drop_streams`` for post-encode fixing — drops happen
+    LOCAL before the GPU. This test pins the new home, replacing the
+    old check that confirmed full_gamut owned the merged drop call.
+    """
+    import pipeline.prep_streams as ps
+    src = open(ps.__file__, encoding="utf-8").read()
+    # prep_streams calls the underlying mkvmerge helper.
+    assert "from pipeline.compliance_fixers import _mkvmerge_drop_streams" in src, (
+        "prep_streams must call _mkvmerge_drop_streams directly so a "
+        "single helper drives every track drop in the pipeline"
     )
-    # And the merge variable names exist
-    assert "merged_audio_drop" in src
-    assert "merged_sub_drop" in src

@@ -376,6 +376,41 @@ def prepare_for_encode(
             if remuxed_path:
                 actual_input = remuxed_path
 
+        # === STEP 5c0: Source-corruption probe (2026-05-13 phase 3) ===
+        # Catch Ford-v-Ferrari class broken sources BEFORE the GPU
+        # spins up. The post-encode integrity check used to find these
+        # at ~13% into a 90-min encode; cheaper to probe the local
+        # fetched file in ~10-20s and never start the encode.
+        from tools.probe_source_integrity import probe_file as _probe_source
+
+        probe_result = _probe_source(actual_input)
+        if not probe_result.healthy:
+            broken_summary = (
+                probe_result.fatal
+                or f"decode errors in windows={','.join(probe_result.windows_failed)}"
+            )
+            logging.error(
+                f"  prep: source-integrity probe FAILED — {broken_summary}. "
+                f"Sample: {(probe_result.sample_errors[0] if probe_result.sample_errors else '')[:160]}"
+            )
+            state.set_file(
+                filepath,
+                FileStatus.FLAGGED_CORRUPT,
+                error=f"source corruption (prep-time probe): {broken_summary}",
+                stage="prep_source_integrity",
+                source_corrupt=True,
+                source_probe_at=__import__("time").time(),
+                source_probe_windows=probe_result.windows_failed,
+                source_probe_errors=probe_result.sample_errors[:3],
+                force_reencode=False,
+            )
+            _cleanup(local_path, remuxed_path, None)
+            return None
+        logging.info(
+            f"  prep: source-integrity OK (probed {probe_result.duration_seconds:.0f}s "
+            f"in {probe_result.probe_time_secs:.1f}s)"
+        )
+
         # === STEP 5c: Pre-encode stream strip (2026-05-13) ===
         # Run mkvmerge against the LOCAL file to drop foreign audio,
         # commentary tracks, foreign subs, and extra English subs
@@ -1387,57 +1422,65 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
                 )
             return False
 
-        # Fixable violations — collect mkvmerge drop tags into a single
-        # call before running other fixers. Pre-2026-05-13 each drop
-        # tag (foreign_subs, extra_eng_subs, foreign_audio, commentary_audio)
-        # called mkvmerge independently using indices computed against
-        # the ORIGINAL output layout. The first drop modified the file;
-        # the second saw stale indices and either kept the wrong tracks
-        # or asked for indices that no longer existed. Happy Gilmore 2 /
-        # Heads of State / Wild Robot all stuck because of this.
-        #
-        # Merging into one call means: indices stay valid (we operate on
-        # the original layout in a single pass), one SMB write instead
-        # of four, and one proof-of-work check.
-        from pipeline.compliance_fixers import _mkvmerge_drop_streams
-
-        merged_audio_drop: list[int] = []
-        merged_sub_drop: list[int] = []
-        handled_drop_tags: set[str] = set()
-        for v in grouped[Category.FIXABLE]:
-            if v.tag in ("foreign_audio", "commentary_audio"):
-                merged_audio_drop.extend(v.data.get("indices") or [])
-                handled_drop_tags.add(v.tag)
-            elif v.tag in ("foreign_subs", "extra_eng_subs"):
-                merged_sub_drop.extend(v.data.get("indices") or [])
-                handled_drop_tags.add(v.tag)
-        if merged_audio_drop or merged_sub_drop:
-            # De-duplicate (foreign_audio and commentary_audio CAN refer
-            # to the same track if a foreign-language commentary track
-            # exists — drop it once, not twice).
-            merged_audio_drop = sorted(set(merged_audio_drop))
-            merged_sub_drop = sorted(set(merged_sub_drop))
-            logging.info(
-                f"  compliance fix (merged): drop audio={merged_audio_drop} "
-                f"sub={merged_sub_drop}"
-            )
-            try:
-                ok = _mkvmerge_drop_streams(
-                    dest_path,
-                    drop_audio_indices=merged_audio_drop or None,
-                    drop_sub_indices=merged_sub_drop or None,
+        # Phase 2 of the 2026-05-13 architectural refactor: prep strips
+        # foreign_audio / commentary_audio / foreign_subs / extra_eng_subs
+        # on the LOCAL file before the encoder runs. If any of those
+        # violations show up here POST-encode, prep missed something —
+        # surface it loudly and REFUSE rather than try to patch the
+        # uploaded .av1.tmp over slow SMB. The post-encode fixer for
+        # drops is gone by design; the post-encode gate is now a thin
+        # verifier with nothing to repair for the drop class.
+        drop_violations = [
+            v for v in grouped[Category.FIXABLE]
+            if v.tag in ("foreign_audio", "commentary_audio",
+                         "foreign_subs", "extra_eng_subs")
+        ]
+        if drop_violations:
+            for v in drop_violations:
+                logging.error(
+                    f"  PREP MISS — drop violation survived pre-encode strip: "
+                    f"{v.tag} | {v.message}"
                 )
-            except Exception as e:
-                logging.error(f"  merged drop fixer raised: {e!r}")
-                ok = False
-            if not ok:
-                logging.error("  merged drop fixer failed")
+            try:
+                os.remove(dest_path)
+            except OSError:
+                pass
+            # Treat as REFUSE — increment the breaker counter using the
+            # same path as the up-front refuse block.
+            COMPLIANCE_REFUSE_BREAKER = 3
+            prev_extras = state.get_file(filepath) or {}
+            refuse_count = int(prev_extras.get("compliance_refuse_count", 0) or 0) + 1
+            err_msg = (
+                f"prep miss: {drop_violations[0].tag} survived pre-encode strip — "
+                f"{drop_violations[0].message[:160]}"
+            )
+            if refuse_count >= COMPLIANCE_REFUSE_BREAKER:
+                state.set_file(
+                    filepath,
+                    FileStatus.FLAGGED_CORRUPT,
+                    error=f"{refuse_count} prep misses: {drop_violations[0].message}",
+                    stage="verify",
+                    compliance_violations=[v.message for v in drop_violations],
+                    compliance_refuse_count=refuse_count,
+                    force_reencode=False,
+                )
+            else:
+                state.set_file(
+                    filepath,
+                    FileStatus.ERROR,
+                    error=err_msg,
+                    stage="verify",
+                    compliance_violations=[v.message for v in drop_violations],
+                    compliance_refuse_count=refuse_count,
+                )
+            return False
 
-        # Run the remaining (non-drop) fixers individually — they don't
-        # share state the way the drop fixers do.
+        # Run the remaining (non-drop) fixers individually — these are
+        # tag stamps (missing_encode_tags / cq_mismatch / grade_mismatch),
+        # TMDb metadata write, and filename rename. They operate via
+        # mkvpropedit on the encoded output and address encoder-side
+        # post-conditions, not source-layout issues — keeping them.
         for v in grouped[Category.FIXABLE]:
-            if v.tag in handled_drop_tags:
-                continue
             fixer = FIXERS.get(v.tag)
             if not fixer:
                 logging.warning(f"  no fixer registered for {v.tag} — leaving violation")

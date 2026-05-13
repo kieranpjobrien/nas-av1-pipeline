@@ -12,9 +12,39 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from pipeline.control import PipelineControl
 from pipeline.orchestrator import Orchestrator
 from pipeline.state import FileStatus, PipelineState
+
+
+@pytest.fixture(autouse=True)
+def _mock_prep_external_calls(monkeypatch):
+    """Autouse: stub the heavy I/O that the prep flow runs against the
+    LOCAL fetched file. Tests use synthetic byte-blob files that
+    aren't real videos, so the source-integrity probe (added
+    2026-05-13 phase 3) and the local stream-strip helper would
+    fail against them. We're not testing those layers here — the
+    integration suite exercises real probes.
+    """
+    # Healthy probe stub
+    from tools.probe_source_integrity import ProbeResult
+
+    def _probe_healthy(filepath):
+        return ProbeResult(
+            filepath=filepath,
+            duration_seconds=7200.0,
+            healthy=True,
+            probe_time_secs=0.1,
+        )
+    monkeypatch.setattr("tools.probe_source_integrity.probe_file", _probe_healthy)
+
+    # Strip no-op stub — nothing to drop on a synthetic file
+    monkeypatch.setattr(
+        "pipeline.prep_streams.strip_streams_locally",
+        lambda path, item, config: (True, "no streams to strip"),
+    )
 
 
 def _orch(tmp_path) -> Orchestrator:
