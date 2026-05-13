@@ -535,12 +535,39 @@ class PipelineState:
             return {row["filepath"]: self._row_to_dict(row) for row in rows}
 
     def _row_to_dict(self, row: sqlite3.Row) -> dict:
-        """Convert a SQLite row to the dict format callers expect."""
+        """Convert a SQLite row to the dict format callers expect.
+
+        ``extras`` is a JSON blob carrying derived/cached fields (prep_data,
+        fetch timings, etc.). If a crash mid-write leaves it malformed,
+        ``json.loads`` would raise and take the whole pipeline down on the
+        next restart — exactly what happened on 2026-05-14 07:24, when a
+        Python access-violation (0xc0000005) left the Six Feet Under
+        S03E07 row with ``"force_reencode"E-AC-3true, ...`` instead of
+        valid JSON. Subsequent ``python -m pipeline`` startups crashed
+        in ``build_queues`` before reset_non_terminal could run.
+
+        Authoritative state (status, error, paths) lives in real columns,
+        so dropping a corrupt extras blob loses only derived data. Log
+        loudly and continue rather than letting one poisoned row block
+        every other file in the queue.
+        """
         d = dict(row)
-        d.pop("filepath", None)
-        # Merge extras into the main dict
+        filepath = d.pop("filepath", None)
         extras_raw = d.pop("extras", "{}")
-        extras = json.loads(extras_raw) if extras_raw else {}
+        if extras_raw:
+            try:
+                extras = json.loads(extras_raw)
+            except (json.JSONDecodeError, TypeError) as exc:
+                logging.error(
+                    "Corrupt extras JSON for %s (%s); treating as empty. "
+                    "Raw head: %r",
+                    filepath,
+                    exc,
+                    extras_raw[:120],
+                )
+                extras = {}
+        else:
+            extras = {}
         d.update(extras)
         # Remove None values for clean output
         return {k: v for k, v in d.items() if v is not None}

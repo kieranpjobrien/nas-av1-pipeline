@@ -62,6 +62,59 @@ class TestPipelineStateBasics:
         assert entry["number"] == 42
         state.close()
 
+    def test_corrupt_extras_does_not_crash_reader(self, tmp_state_db, caplog):
+        """A row with malformed extras JSON must not blow up the whole pipeline.
+
+        Regression for 2026-05-14: a Python access-violation crash (0xc0000005)
+        left a single row's extras blob with ``"force_reencode"E-AC-3true,...``
+        (colons replaced with the string ``E-AC-3``). On the next start,
+        ``json.loads`` raised in ``build_queues`` and crashed the pipeline
+        before reset_non_terminal could heal the row. One corrupt row should
+        log loud and degrade to empty extras for that file, not poison every
+        other file in the queue.
+        """
+        import logging as _logging
+        import sqlite3
+
+        state = PipelineState(tmp_state_db)
+        fp_good = r"\\KieranNAS\Media\Movies\Good.mkv"
+        fp_bad = r"\\KieranNAS\Media\Movies\Bad.mkv"
+        state.set_file(fp_good, FileStatus.PROCESSING, prep_data="ok")
+        state.set_file(fp_bad, FileStatus.PROCESSING, prep_data="ok")
+        state.close()
+
+        # Directly poison the extras column on disk to simulate the crash.
+        con = sqlite3.connect(tmp_state_db)
+        con.execute(
+            "UPDATE pipeline_files SET extras = ? WHERE filepath = ?",
+            ('{"force_reencode"E-AC-3true', fp_bad),
+        )
+        con.commit()
+        con.close()
+
+        state = PipelineState(tmp_state_db)
+        with caplog.at_level(_logging.ERROR):
+            # Healthy row still loads correctly.
+            good_entry = state.get_file(fp_good)
+            assert good_entry["status"] == FileStatus.PROCESSING.value
+            assert good_entry["prep_data"] == "ok"
+
+            # Corrupt row loads with degraded extras instead of crashing.
+            bad_entry = state.get_file(fp_bad)
+            assert bad_entry is not None
+            assert bad_entry["status"] == FileStatus.PROCESSING.value
+            assert "prep_data" not in bad_entry  # extras dropped
+
+            # Bulk reader survives too (the original crash site).
+            all_files = state.get_all_files()
+            assert fp_good in all_files
+            assert fp_bad in all_files
+
+        assert any("Corrupt extras" in r.message for r in caplog.records), (
+            "corruption must be logged loud, not silently swallowed"
+        )
+        state.close()
+
 class TestStatusTransitions:
     """Verify the pipeline state machine transitions work correctly."""
 
