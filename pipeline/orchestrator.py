@@ -14,7 +14,7 @@ from typing import Optional
 from pipeline.circuit_breaker import CircuitBreaker, CircuitBreakerOpen
 from pipeline.ffmpeg import format_bytes
 from pipeline.full_gamut import finalize_upload, full_gamut
-from pipeline.state import FileStatus, PipelineState, is_terminal
+from pipeline.state import ACTIVE_STATUSES, FileStatus, PipelineState, is_terminal
 from pipeline.transfer import fetch_file
 
 # Filename suffixes written by the pipeline's tmp-mux / staging steps.
@@ -1191,7 +1191,17 @@ class Orchestrator:
                 if local and os.path.exists(local):
                     return item
 
-        # Second pass: pick next pending file (will need fetching)
+        # Second pass: pick next pending file (will need fetching).
+        # Skip anything ACTIVE (qualifying/fetching/processing/uploading) —
+        # ACTIVE means another worker (fetch / prep / upload) is handling
+        # it. Pre-2026-05-14 the leftover `_dispatched` entry kept these
+        # invisible by accident; with that fix in place (33a07d2) we need
+        # an explicit status filter or the GPU worker grabs UPLOADING
+        # files mid-handoff and tries to re-encode their (now-deleted)
+        # fetch buffer. Slow Horses S05E03 hit this at 08:37:19 today:
+        # encode finished, status flipped to UPLOADING, _dispatched
+        # discard fired, next iteration's pick saw UPLOADING and grabbed
+        # the same file again, ffmpeg ENOENT on the cleaned fetch buffer.
         for item in queue:
             fp = item["filepath"]
             if fp in self._dispatched:
@@ -1200,9 +1210,8 @@ class Orchestrator:
                 continue
             existing = self.state.get_file(fp)
             status = existing["status"] if existing else None
-            # Skip currently-mid-flight + terminal (DONE / FLAGGED_*) + ERROR
             if status and (
-                status == FileStatus.PROCESSING.value
+                status in (s.value for s in ACTIVE_STATUSES)
                 or status == FileStatus.ERROR.value
                 or is_terminal(status)
             ):

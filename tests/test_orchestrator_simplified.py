@@ -122,6 +122,43 @@ class TestGpuWorkerInlineUpload:
 
         assert finalize_called == []
 
+    def test_uploading_status_not_repicked(self, tmp_path, monkeypatch):
+        """After _dispatched.discard, _pick_next_locked must still skip UPLOADING.
+
+        Before the 2026-05-14 _dispatched leak fix (33a07d2), an UPLOADING
+        file was implicitly skipped because its path stayed in _dispatched
+        forever. After the fix, an UPLOADING file falls through the
+        second-pass status filter (which previously listed PROCESSING +
+        ERROR + terminal — not UPLOADING) and the GPU worker grabs it again.
+        Slow Horses S05E03 hit this at 08:37:19: encode finished, status
+        flipped to UPLOADING, second pick grabbed it, ffmpeg ENOENT'd
+        because the fetch buffer had been cleaned.
+        """
+        from pipeline.state import FileStatus
+
+        orch = _bare_orchestrator(tmp_path)
+        fp = str(tmp_path / "uploading.mkv")
+        (tmp_path / "uploading.mkv").write_bytes(b"0")
+        # Status=UPLOADING — encode just finished, upload worker hasn't
+        # claimed it yet. _dispatched is empty (post-fix).
+        orch.state.set_file(fp, FileStatus.UPLOADING, local_path=fp, stage="pending_upload")
+        queue = [{"filepath": fp, "filename": "uploading.mkv", "file_size_bytes": 0, "video": {}}]
+        picked = orch._pick_next(queue)
+        assert picked is None, (
+            "UPLOADING must be skipped by _pick_next_locked, otherwise the "
+            "GPU worker re-grabs files mid-handoff to the upload worker"
+        )
+
+    def test_fetching_status_not_repicked(self, tmp_path, monkeypatch):
+        """FETCHING is also active — the fetch worker owns it."""
+        from pipeline.state import FileStatus
+
+        orch = _bare_orchestrator(tmp_path)
+        fp = str(tmp_path / "fetching.mkv")
+        orch.state.set_file(fp, FileStatus.FETCHING)
+        queue = [{"filepath": fp, "filename": "fetching.mkv", "file_size_bytes": 0, "video": {}}]
+        assert orch._pick_next(queue) is None
+
     def test_dispatched_set_cleared_after_each_iteration(self, tmp_path, monkeypatch):
         """_dispatched must be cleared after full_gamut returns.
 
