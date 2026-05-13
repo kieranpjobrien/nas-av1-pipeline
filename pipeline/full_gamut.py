@@ -376,6 +376,66 @@ def prepare_for_encode(
             if remuxed_path:
                 actual_input = remuxed_path
 
+        # === STEP 5c: Pre-encode stream strip (2026-05-13) ===
+        # Run mkvmerge against the LOCAL file to drop foreign audio,
+        # commentary tracks, foreign subs, and extra English subs
+        # BEFORE the GPU encode. The encoder then consumes a
+        # compliance-clean input and the post-encode gate has nothing
+        # to refuse. Pre-fix the post-encode fixer ran against the
+        # uploaded .av1.tmp on NAS — slow SMB, prone to stale-probe
+        # and sequential-index bugs, cost ~10h of GPU per day on
+        # encodes that ultimately got refused.
+        from pipeline.prep_streams import strip_streams_locally
+
+        strip_ok, strip_msg = strip_streams_locally(actual_input, item, config)
+        if not strip_ok:
+            logging.error(f"  prep: local stream strip failed — {strip_msg}")
+            state.set_file(
+                filepath,
+                FileStatus.ERROR,
+                error=f"pre-encode strip: {strip_msg}",
+                stage="prep_strip",
+            )
+            _cleanup(local_path, remuxed_path, None)
+            return None
+        if strip_msg != "no streams to strip":
+            # Re-probe so item.audio_streams / subtitle_streams reflect
+            # the now-stripped input. The encoder's stream selector
+            # will see the trimmed lists and won't need to re-strip.
+            try:
+                fresh_probe = _probe_full(actual_input)
+                if not fresh_probe.get("error"):
+                    # Build minimal stream dicts matching the shape
+                    # ffmpeg.py / compliance.py expect.
+                    new_audio = [
+                        {
+                            "codec": (a.get("codec") or "").upper(),
+                            "codec_raw": a.get("codec"),
+                            "channels": a.get("channels"),
+                            "channel_layout": a.get("channel_layout"),
+                            "bitrate_kbps": a.get("bit_rate_kbps"),
+                            "language": a.get("language"),
+                            "title": "",
+                        }
+                        for a in (fresh_probe.get("audio") or [])
+                    ]
+                    new_subs = [
+                        {
+                            "codec": s.get("codec"),
+                            "language": s.get("language"),
+                            "title": "",
+                        }
+                        for s in (fresh_probe.get("subs") or [])
+                    ]
+                    item["audio_streams"] = new_audio
+                    item["subtitle_streams"] = new_subs
+                    logging.info(
+                        f"  prep: post-strip layout — {len(new_audio)} audio, "
+                        f"{len(new_subs)} sub"
+                    )
+            except Exception as e:
+                logging.warning(f"  prep: post-strip re-probe failed (non-fatal): {e}")
+
         # === Compute output path so the encode worker doesn't have to ===
         encode_dir = os.path.join(staging_dir, "encoded")
         os.makedirs(encode_dir, exist_ok=True)
