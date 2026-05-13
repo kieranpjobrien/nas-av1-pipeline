@@ -388,6 +388,120 @@ class TestSubtitleMapOptional:
         idx_pairs = [(cmd[i], cmd[i + 1]) for i in range(len(cmd) - 1) if cmd[i] == "-map"]
         assert ("-map", "0:s:1?") not in idx_pairs, "regular English internal not skipped"
 
+    def test_foreign_language_forced_sub_dropped(self) -> None:
+        """Pin the 2026-05-14 Resident Alien S01E07 forced-policy fix.
+
+        Pre-fix, ``_map_subtitle_streams`` mapped every forced sub
+        unconditionally on the (mostly-true) theory that forced subs
+        are language-agnostic helpers for non-dialogue content.
+        Foreign-region releases break that theory: the S01E07 source
+        carried ``language=tur title="Turkish [ForcedNarrative]"``,
+        which the encoder kept and ``compliance.check_compliance``
+        then refused as ``foreign_subs`` — three-attempt breaker
+        loops every time the file went through the un-stripped path.
+
+        Post-fix, the encoder gates forced subs by KEEP_LANGS, the
+        same set ``compliance.py`` line 218 uses. Foreign forced
+        narratives are dropped at map time so compliance never sees
+        them.
+        """
+        item = _base_item()
+        item["subtitle_streams"] = [
+            # Forced Turkish narrative — must be dropped.
+            {"language": "tur", "title": "Turkish [ForcedNarrative]", "codec": "subrip"},
+            # Regular English — kept as the dialogue slot.
+            {"language": "eng", "title": "English", "codec": "subrip"},
+        ]
+        cmd = build_ffmpeg_cmd(
+            input_path="in.mkv",
+            output_path="out.mkv",
+            item=item,
+            config=_base_config(),
+        )
+        idx_pairs = [(cmd[i], cmd[i + 1]) for i in range(len(cmd) - 1) if cmd[i] == "-map"]
+        assert ("-map", "0:s:0?") not in idx_pairs, (
+            "foreign-language forced sub (tur) must NOT be mapped — "
+            "compliance.py:218 refuses it as foreign_subs, so the "
+            "encoder must drop it at map time to avoid PREP MISS loops"
+        )
+        assert ("-map", "0:s:1?") in idx_pairs, "regular English sub must be mapped"
+
+    def test_english_forced_sub_kept(self) -> None:
+        """The legitimate case — an English forced narrative on an
+        English source. KEEP_LANGS covers eng so the forced track is
+        mapped alongside the regular English."""
+        item = _base_item()
+        item["subtitle_streams"] = [
+            {"language": "eng", "title": "Forced", "codec": "subrip"},
+            {"language": "eng", "title": "", "codec": "subrip"},
+        ]
+        cmd = build_ffmpeg_cmd(
+            input_path="in.mkv",
+            output_path="out.mkv",
+            item=item,
+            config=_base_config(),
+        )
+        idx_pairs = [(cmd[i], cmd[i + 1]) for i in range(len(cmd) - 1) if cmd[i] == "-map"]
+        assert ("-map", "0:s:0?") in idx_pairs, "forced English narrative must be mapped"
+        assert ("-map", "0:s:1?") in idx_pairs, "regular English must be mapped"
+
+    def test_und_present_defers_strip_per_inviolate_rule(self) -> None:
+        """The 2026-04-29 inviolate rule trumps the forced-language gate.
+        If any sub is tagged ``und`` with no whisper-detected language,
+        the encoder must defer the entire strip and map all subs via
+        the catch-all ``-map 0:s?`` — including any foreign forced.
+        Whisper resolves the und in a later pass; strip happens then.
+        We pin this here so the language-gating fix doesn't accidentally
+        start dropping unresolved tracks."""
+        item = _base_item()
+        item["subtitle_streams"] = [
+            {"language": "und", "title": "Forced", "codec": "subrip"},
+            {"language": "eng", "title": "", "codec": "subrip"},
+        ]
+        cmd = build_ffmpeg_cmd(
+            input_path="in.mkv",
+            output_path="out.mkv",
+            item=item,
+            config=_base_config(),
+        )
+        idx_pairs = [(cmd[i], cmd[i + 1]) for i in range(len(cmd) - 1) if cmd[i] == "-map"]
+        assert ("-map", "0:s?") in idx_pairs, (
+            "und-present subs must trigger the inviolate-rule defer to "
+            "-map 0:s? (catch-all), not per-index maps"
+        )
+        # And no per-index sub map should have been emitted for the deferred case.
+        per_index = [v for k, v in idx_pairs if k == "-map" and v.startswith("0:s:")]
+        assert per_index == [], (
+            f"expected zero per-index sub maps in the deferred case; got {per_index}"
+        )
+
+    def test_jpn_origin_film_jpn_forced_still_dropped(self) -> None:
+        """Even for a Japanese-origin film we drop a ``jpn`` forced
+        track. ``compliance.py`` uses KEEP_LANGS-only for the sub
+        foreign-language check (no ``original_language`` expansion,
+        unlike the audio check), so the encoder must match — keeping
+        a ``jpn`` sub here would just produce a file the gate then
+        refuses. The English dialogue sub remains the user-facing
+        track for foreign-origin films."""
+        item = _base_item()
+        item["tmdb"] = {"original_language": "ja"}
+        item["subtitle_streams"] = [
+            {"language": "jpn", "title": "Japanese forced narrative", "codec": "subrip"},
+            {"language": "eng", "title": "", "codec": "subrip"},
+        ]
+        cmd = build_ffmpeg_cmd(
+            input_path="in.mkv",
+            output_path="out.mkv",
+            item=item,
+            config=_base_config(),
+        )
+        idx_pairs = [(cmd[i], cmd[i + 1]) for i in range(len(cmd) - 1) if cmd[i] == "-map"]
+        assert ("-map", "0:s:0?") not in idx_pairs, (
+            "jpn forced sub must be dropped — compliance refuses it as "
+            "foreign_subs (KEEP_LANGS-only, no original_language expansion)"
+        )
+        assert ("-map", "0:s:1?") in idx_pairs, "regular English must be mapped"
+
     def test_stale_sub_metadata_survives(self) -> None:
         """Regression: item says 1 sub, input (hypothetically) has 0 — builder must not crash.
 

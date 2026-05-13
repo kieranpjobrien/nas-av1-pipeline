@@ -260,18 +260,40 @@ def _map_subtitle_streams(
     # (CLAUDE.md rule 10). Audio is mandatory — a silent audio drop is the
     # incident we wrote discipline rules around. Subs are optional — silent
     # skip is the desired behaviour.
-    from pipeline.config import ENG_LANGS
+    from pipeline.config import ENG_LANGS, KEEP_LANGS
+
+    # Allowed languages for FORCED subs. Pre-2026-05-14 this branch
+    # mapped every forced track regardless of language, on the theory
+    # that forced subs are "language-agnostic helpers" for non-dialogue
+    # content (signs, brief alien-language passages). That's right for
+    # English-region releases — but foreign-region sources ship forced
+    # narrative tracks meant for *their* audience (Resident Alien
+    # S01E07 had ``language=tur title="Turkish [ForcedNarrative]"``).
+    # Mapping that into our English-target output is exactly what
+    # compliance.py and prep_streams.py both refuse.
+    #
+    # Policy: gate forced subs by KEEP_LANGS (eng/en/und/zxx) — same
+    # set compliance.check_compliance uses for foreign_subs at
+    # compliance.py:218. Compliance does NOT expand the sub-keep set
+    # by original_language the way it does for audio; the encoder
+    # mirrors that so a Japanese-origin film's ``jpn`` forced
+    # narrative is dropped here AND refused at the gate, not kept
+    # here and refused at the gate (which would loop forever).
+    allowed_forced_langs: set[str] = set(KEEP_LANGS)
 
     mapped = 0
     # If an external English sidecar is being muxed in by the caller, treat
     # the regular-English slot as already-claimed so we don't keep a second
-    # internal English. Forced / foreign subs are still mapped — they don't
-    # collide with the external English sidecar.
+    # internal English. Forced subs in an allowed language are still mapped
+    # — they don't collide with the external English sidecar.
     found_regular_eng = external_subs_present
     for i, sub in enumerate(parsed_subs):
         if sub.is_forced:
-            cmd.extend(["-map", f"0:s:{i}?"])
-            mapped += 1
+            if sub.language in allowed_forced_langs:
+                cmd.extend(["-map", f"0:s:{i}?"])
+                mapped += 1
+            # else: foreign-language forced narrative — drop, matching
+            # prep_streams.compute_sub_drop_indices and compliance.py.
         elif sub.language in ENG_LANGS and not sub.is_hi and not found_regular_eng:
             cmd.extend(["-map", f"0:s:{i}?"])
             mapped += 1
