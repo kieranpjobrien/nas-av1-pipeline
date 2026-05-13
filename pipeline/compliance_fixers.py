@@ -27,6 +27,7 @@ import logging
 import os
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 from pipeline.compliance import Violation
@@ -186,9 +187,48 @@ def _mkvmerge_drop_streams(
             pass
         return False
 
-    # Atomic replace.
-    os.replace(tmp_out, src)
-    return True
+    # Atomic replace with retry on Windows transient locks.
+    #
+    # Background (2026-05-13): observed in pipeline.log
+    #   prep: local stream strip failed — PermissionError:
+    #     [WinError 5] Access is denied
+    # The destination ``src`` file is briefly locked during the
+    # rename window — likely the antivirus scanning the freshly-
+    # written ``.compliance_tmp.mkv``, possibly another worker
+    # holding a read handle. The lock resolves in 1-3 seconds. Same
+    # transient class as the SMB WinError 59 case ``robust_copy``
+    # handles; same fix pattern (short backoff, retry, give up after
+    # a few attempts so a real permission bug still surfaces).
+    last_exc: Exception | None = None
+    for attempt in range(1, 5):  # 4 attempts total: 0.5s, 1s, 2s, 4s
+        try:
+            os.replace(tmp_out, src)
+            return True
+        except PermissionError as e:
+            last_exc = e
+            wait = 0.5 * (2 ** (attempt - 1))
+            logging.warning(
+                f"compliance fix atomic replace transient lock "
+                f"(WinError {getattr(e, 'winerror', '?')}): retrying in "
+                f"{wait:.1f}s [attempt {attempt}/4] — {os.path.basename(src)}"
+            )
+            time.sleep(wait)
+        except OSError as e:
+            # Non-transient OS error (ENOENT, disk-full, etc.) — don't
+            # waste retry budget.
+            last_exc = e
+            break
+    # Exhausted retries OR hit a non-PermissionError. Log + clean up tmp.
+    logging.error(
+        f"compliance fix atomic replace failed after retries: {last_exc!r} — "
+        f"src={os.path.basename(src)}"
+    )
+    try:
+        if os.path.exists(tmp_out):
+            os.remove(tmp_out)
+    except OSError:
+        pass
+    return False
 
 
 def fix_extra_eng_subs(filepath: str, v: Violation) -> bool:
