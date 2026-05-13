@@ -122,6 +122,68 @@ class TestGpuWorkerInlineUpload:
 
         assert finalize_called == []
 
+    def test_dispatched_set_cleared_after_each_iteration(self, tmp_path, monkeypatch):
+        """_dispatched must be cleared after full_gamut returns.
+
+        Regression for the 2026-05-14 Resident Alien S01E07 stuck-forever
+        case: file hit PREP MISS, was requeued (status reset), prep ran
+        again — but the GPU worker never picked it up because its path
+        stayed in ``_dispatched`` from the first attempt. ``_pick_next_locked``
+        filters out anything in ``_dispatched``, so the file sat at
+        status=processing/stage=prepped indefinitely.
+        """
+        from pipeline.state import FileStatus
+
+        orch = _bare_orchestrator(tmp_path)
+
+        fp_success = str(tmp_path / "ok.mkv")
+        fp_fail = str(tmp_path / "fail.mkv")
+        for p in (fp_success, fp_fail):
+            (tmp_path).joinpath(p.rsplit("\\", 1)[-1].rsplit("/", 1)[-1]).write_bytes(b"0")
+
+        # Pre-seed state so _pick_next_locked's first pass finds them ready.
+        for p in (fp_success, fp_fail):
+            orch.state.set_file(p, FileStatus.PROCESSING, local_path=p)
+
+        queue = [
+            {"filepath": fp_success, "filename": "ok.mkv", "file_size_bytes": 0, "video": {}},
+            {"filepath": fp_fail, "filename": "fail.mkv", "file_size_bytes": 0, "video": {}},
+        ]
+
+        def fake_full_gamut(fp, *args, **kwargs):
+            # Mark DONE for ok, ERROR for fail, so subsequent picks skip them
+            # via the status filter (not via _dispatched leftover).
+            if fp == fp_success:
+                orch.state.set_file(fp, FileStatus.DONE)
+                return True
+            orch.state.set_file(fp, FileStatus.ERROR, error="forced")
+            return False
+
+        monkeypatch.setattr("pipeline.orchestrator.full_gamut", fake_full_gamut)
+        monkeypatch.setattr("pipeline.orchestrator.finalize_upload", lambda *a, **kw: True)
+
+        import threading
+
+        def stop_soon():
+            import time
+            time.sleep(0.4)
+            orch._shutdown.set()
+
+        threading.Thread(target=stop_soon, daemon=True).start()
+        orch._gpu_worker(queue, [], worker_id=0)
+
+        # Neither path should still be marked dispatched. If the discard is
+        # missing, both leak — and any subsequent requeue (which resets
+        # status back to PENDING) would be invisible to the GPU pickers.
+        assert fp_success not in orch._dispatched, (
+            "DONE path leaked in _dispatched — safe only because terminal "
+            "status filters it out anyway. Fix the leak."
+        )
+        assert fp_fail not in orch._dispatched, (
+            "ERROR path leaked in _dispatched — file is permanently invisible "
+            "to GPU pickers after a requeue (Resident Alien S01E07 case)."
+        )
+
 
 class TestGapFillerSingleHeavyWorker:
     """Gap filler spawns one SSH heavy worker + one quick worker, not 3 SRV + 2 NAS + 2 quick."""

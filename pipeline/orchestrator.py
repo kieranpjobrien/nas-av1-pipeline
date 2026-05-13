@@ -614,6 +614,21 @@ class Orchestrator:
                 self.state.stats["errors"] = self.state.stats.get("errors", 0) + 1
                 self.state.save()
 
+            # Release the dispatched slot. _dispatched is the "GPU worker is
+            # actively processing this file" set — if we don't discard, the
+            # path stays in the set forever and _pick_next_locked filters
+            # it out of all future passes. Stuck-forever case observed
+            # 2026-05-14: Resident Alien S01E07 hit a PREP MISS at 05:17,
+            # was requeued (state ERROR -> PENDING via /api/file/requeue),
+            # was re-fetched + re-prepped (prep done at 05:22:51) — but
+            # then sat in status=processing/stage=prepped for ~50 minutes
+            # because every GPU worker passed it over: `fp in self._dispatched`.
+            # Discard regardless of outcome (success: terminal status filter
+            # would have caught it anyway; failure: file may legitimately
+            # be retried after a requeue).
+            with self._dispatched_lock:
+                self._dispatched.discard(filepath)
+
             self._set_gpu_wants(None, previous=filepath)
 
         self._set_gpu_wants(None)
