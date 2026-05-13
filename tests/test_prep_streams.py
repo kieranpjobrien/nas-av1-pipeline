@@ -179,7 +179,7 @@ def test_sub_drop_empty_when_strip_disabled():
 
 def test_strip_returns_ok_when_nothing_to_drop(monkeypatch):
     """If neither audio nor sub needs stripping, the wrapper returns
-    True without calling mkvmerge."""
+    True with the ORIGINAL local_path (no strip happened)."""
     item = {
         "audio_streams": [_audio(lang="eng")],
         "subtitle_streams": [_sub(lang="eng")],
@@ -191,24 +191,25 @@ def test_strip_returns_ok_when_nothing_to_drop(monkeypatch):
     def should_not_run(*a, **kw):
         raise AssertionError("mkvmerge should NOT run when nothing to drop")
     monkeypatch.setattr(
-        "pipeline.compliance_fixers._mkvmerge_drop_streams", should_not_run
+        "pipeline.compliance_fixers._mkvmerge_drop_streams_to_path", should_not_run
     )
-    ok, msg = strip_streams_locally("/fake.mkv", item, config)
+    ok, path = strip_streams_locally("/fake.mkv", item, config)
     assert ok is True
-    assert "no streams" in msg.lower()
+    assert path == "/fake.mkv", (
+        f"no-strip case must return the original local path so the encoder "
+        f"consumes the fetched file directly, got {path!r}"
+    )
 
 
 def test_strip_refuses_all_audio(monkeypatch):
     """Safety guard: if the drop list covers EVERY audio track, refuse
-    rather than produce a silent file. Mock the selector to force a
-    drop-all scenario directly (independent of encoder policy logic)."""
+    rather than produce a silent file."""
     item = {
         "audio_streams": [
             _audio(lang="fre"), _audio(lang="ger"), _audio(lang="ita"),
         ],
         "subtitle_streams": [],
     }
-    # Force the audio-drop computation to return all 3 indices
     monkeypatch.setattr(
         "pipeline.prep_streams.compute_audio_drop_indices",
         lambda item, config: [0, 1, 2],
@@ -219,24 +220,20 @@ def test_strip_refuses_all_audio(monkeypatch):
         mkvmerge_called["yes"] = True
         raise AssertionError("mkvmerge must NOT run when refusing to drop all audio")
     monkeypatch.setattr(
-        "pipeline.compliance_fixers._mkvmerge_drop_streams", should_not_run
+        "pipeline.compliance_fixers._mkvmerge_drop_streams_to_path", should_not_run
     )
 
     ok, msg = strip_streams_locally("/fake.mkv", item, {})
     assert ok is False
     assert "all" in msg.lower() and "audio" in msg.lower()
-    assert mkvmerge_called["yes"] is False, (
-        "safety guard must refuse BEFORE invoking mkvmerge"
-    )
+    assert mkvmerge_called["yes"] is False
 
 
-def test_strip_propagates_mkvmerge_success(monkeypatch):
-    """When _mkvmerge_drop_streams succeeds, the wrapper returns True.
-
-    Need 3+ audio streams to trigger the encoder's drop selector —
-    the legacy ``english_und`` policy refuses to strip 1-2 tracks
-    (correctly: not worth the complexity for trivially-small files).
-    """
+def test_strip_returns_sibling_path_on_success(monkeypatch):
+    """When the strip helper succeeds, the wrapper returns
+    (True, <sibling path>) — NOT the original local path. The encoder
+    consumes the sibling so the fetched source is never modified
+    (eliminates the os.replace lock race against Windows antivirus)."""
     item = {
         "audio_streams": [
             _audio(lang="eng"),
@@ -251,27 +248,34 @@ def test_strip_propagates_mkvmerge_success(monkeypatch):
         "strip_non_english_subs": True,
         "audio_keep_policy": "english_und",
     }
-    captured = {"drop_audio": None, "drop_sub": None}
+    captured = {"src": None, "dst": None, "drop_a": None, "drop_s": None}
 
-    def fake_drop(path, *, drop_audio_indices=None, drop_sub_indices=None):
-        captured["drop_audio"] = drop_audio_indices
-        captured["drop_sub"] = drop_sub_indices
+    def fake_drop(src, dst, *, drop_audio_indices=None, drop_sub_indices=None):
+        captured["src"] = src
+        captured["dst"] = dst
+        captured["drop_a"] = drop_audio_indices
+        captured["drop_s"] = drop_sub_indices
         return True
 
     monkeypatch.setattr(
-        "pipeline.compliance_fixers._mkvmerge_drop_streams", fake_drop
+        "pipeline.compliance_fixers._mkvmerge_drop_streams_to_path", fake_drop
     )
-    ok, msg = strip_streams_locally("/fake.mkv", item, config)
+    ok, path = strip_streams_locally("/fake/X.mkv", item, config)
     assert ok is True
+    # Strip writes to a sibling, NOT to the original
+    assert path == "/fake/X.mkv.stripped.mkv", (
+        f"strip output must be a sibling, got {path!r}"
+    )
+    assert captured["src"] == "/fake/X.mkv"
+    assert captured["dst"] == "/fake/X.mkv.stripped.mkv"
     # Foreign audio (1, 2) dropped; foreign sub (1) dropped
-    assert sorted(captured["drop_audio"] or []) == [1, 2]
-    assert captured["drop_sub"] == [1]
+    assert sorted(captured["drop_a"] or []) == [1, 2]
+    assert captured["drop_s"] == [1]
 
 
 def test_strip_propagates_mkvmerge_failure(monkeypatch):
-    """If _mkvmerge_drop_streams returns False (proof-of-work mismatch
-    or rc!=0), the wrapper surfaces a usable error message.
-    Need 3+ audio so the encoder's 1-2 track guard doesn't bail."""
+    """If the underlying helper returns False (proof-of-work mismatch
+    or rc!=0), the wrapper surfaces a usable error message."""
     item = {
         "audio_streams": [
             _audio(lang="eng"), _audio(lang="fre"), _audio(lang="ger"),
@@ -284,7 +288,8 @@ def test_strip_propagates_mkvmerge_failure(monkeypatch):
         "audio_keep_policy": "english_und",
     }
     monkeypatch.setattr(
-        "pipeline.compliance_fixers._mkvmerge_drop_streams", lambda *a, **kw: False
+        "pipeline.compliance_fixers._mkvmerge_drop_streams_to_path",
+        lambda src, dst, **kw: False,
     )
     ok, msg = strip_streams_locally("/fake.mkv", item, config)
     assert ok is False

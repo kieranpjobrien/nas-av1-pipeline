@@ -36,6 +36,127 @@ MKVMERGE = r"C:/Program Files/MKVToolNix/mkvmerge.exe"
 MKVPROPEDIT = r"C:/Program Files/MKVToolNix/mkvpropedit.exe"
 
 
+def _mkvmerge_drop_streams_to_path(
+    src: str,
+    dst: str,
+    *,
+    drop_audio_indices: list[int] | None = None,
+    drop_sub_indices: list[int] | None = None,
+) -> bool:
+    """Run mkvmerge to write ``dst`` from ``src`` with the specified audio
+    and/or subtitle stream indices dropped. ``src`` is NEVER modified —
+    callers consume ``dst`` directly.
+
+    This is the no-atomic-replace path added 2026-05-13 (post-21:03)
+    after repeated PermissionError 13 failures on the in-place version.
+    Antivirus / Windows file-cache locks on ``src`` made the
+    ``os.replace(tmp, src)`` step flaky. By writing to a sibling path
+    and never touching ``src``, every lock-class failure goes away —
+    nothing competes for the source.
+
+    Returns True if dst has the expected track counts (proof-of-work).
+    Removes dst on failure. ``src`` is left exactly as it was.
+    """
+    if not drop_audio_indices and not drop_sub_indices:
+        # Nothing to do — copy src to dst (caller wants dst regardless).
+        # We could symlink but Windows symlinks need admin; just copy.
+        import shutil as _shutil
+        _shutil.copy2(src, dst)
+        return True
+
+    from pipeline.full_gamut import _probe_full
+    probe = _probe_full(src)
+    n_video = 1 if probe.get("video") else 0
+    n_audio = len(probe.get("audio") or [])
+    n_sub = len(probe.get("subs") or [])
+    audio_id_offset = n_video
+    sub_id_offset = n_video + n_audio
+
+    cmd = [MKVMERGE, "-o", dst]
+
+    if drop_audio_indices is not None:
+        keep_audio_per_type = [i for i in range(n_audio) if i not in drop_audio_indices]
+        if not keep_audio_per_type:
+            logging.error(
+                f"refusing to drop ALL audio tracks (would produce zero-audio file): {src}"
+            )
+            return False
+        keep_audio_global = [audio_id_offset + i for i in keep_audio_per_type]
+        cmd.extend(["--audio-tracks", ",".join(str(i) for i in keep_audio_global)])
+
+    if drop_sub_indices is not None:
+        keep_sub_per_type = [i for i in range(n_sub) if i not in drop_sub_indices]
+        if keep_sub_per_type:
+            keep_sub_global = [sub_id_offset + i for i in keep_sub_per_type]
+            cmd.extend(["--subtitle-tracks", ",".join(str(i) for i in keep_sub_global)])
+        else:
+            cmd.append("--no-subtitles")
+
+    cmd.append(src)
+
+    src_size = os.path.getsize(src)
+    timeout_secs = max(600, 60 + int(src_size / (4 * 1024 * 1024)))
+    try:
+        out = subprocess.run(cmd, capture_output=True, timeout=timeout_secs)
+    except Exception as e:
+        logging.error(
+            f"mkvmerge drop-to-path raised (timeout={timeout_secs}s, "
+            f"src_size={src_size/1024**3:.1f}GB): {e}"
+        )
+        if os.path.exists(dst):
+            try:
+                os.remove(dst)
+            except OSError:
+                pass
+        return False
+    if out.returncode != 0:
+        logging.error(
+            f"mkvmerge drop-to-path rc={out.returncode}: "
+            f"{out.stderr.decode('utf-8','replace')[:200]}"
+        )
+        if os.path.exists(dst):
+            try:
+                os.remove(dst)
+            except OSError:
+                pass
+        return False
+
+    if not os.path.exists(dst):
+        logging.error(f"mkvmerge drop-to-path produced no output: {dst}")
+        return False
+    out_size = os.path.getsize(dst)
+    if out_size < src_size * 0.5:
+        logging.error(
+            f"mkvmerge drop-to-path output too small ({out_size/1024**2:.1f} MB vs "
+            f"{src_size/1024**2:.1f} MB source) — discarding"
+        )
+        try:
+            os.remove(dst)
+        except OSError:
+            pass
+        return False
+
+    # Proof-of-work: verify dst has the expected track counts.
+    out_probe = _probe_full(dst)
+    n_out_audio = len(out_probe.get("audio") or [])
+    n_out_sub = len(out_probe.get("subs") or [])
+    expected_audio = n_audio - (len(drop_audio_indices) if drop_audio_indices else 0)
+    expected_sub = n_sub - (len(drop_sub_indices) if drop_sub_indices else 0)
+    if n_out_audio != expected_audio or n_out_sub != expected_sub:
+        logging.error(
+            f"mkvmerge drop-to-path track-count mismatch: expected "
+            f"audio={expected_audio} sub={expected_sub}, "
+            f"got audio={n_out_audio} sub={n_out_sub} — discarding."
+        )
+        try:
+            os.remove(dst)
+        except OSError:
+            pass
+        return False
+
+    return True
+
+
 def _mkvmerge_drop_streams(
     src: str,
     *,

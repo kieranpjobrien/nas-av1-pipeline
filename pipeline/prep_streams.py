@@ -154,21 +154,30 @@ def strip_streams_locally(
     item: dict,
     config: dict,
 ) -> tuple[bool, str]:
-    """Apply the computed drops to ``local_path`` via mkvmerge.
+    """Strip foreign/commentary/extra-sub tracks from ``local_path`` by
+    writing the cleaned output to a SIBLING PATH — never modify the
+    fetched source file. The encoder consumes the stripped sibling.
 
-    Returns ``(ok, message)``.
-      * ``ok=True``  — local_path is now stripped (or nothing to do).
-      * ``ok=False`` — strip attempted but failed; ``message`` is a
+    The 2026-05-13 21:03 architectural fix: previous versions used
+    ``_mkvmerge_drop_streams`` which atomic-replaced the source.
+    That replace fought Windows antivirus / file-cache locks on the
+    freshly-fetched file — observed PermissionError 13 failures.
+    Writing to a NEW path bypasses the entire lock class because
+    nothing competes for the source.
+
+    Returns ``(ok, stripped_path_or_message)``.
+      * ``ok=True``  — caller's input is now at ``stripped_path_or_message``
+        (could be ``local_path`` itself if nothing needed stripping, or
+        a new sibling path if streams were dropped).
+      * ``ok=False`` — strip attempted but failed; the value is a
         human-readable reason for state.set_file(ERROR).
-
-    The atomic replace is handled inside ``_mkvmerge_drop_streams`` —
-    on failure the original local file is preserved untouched.
     """
     drop_audio = compute_audio_drop_indices(item, config)
     drop_sub = compute_sub_drop_indices(item, config)
 
     if not drop_audio and not drop_sub:
-        return (True, "no streams to strip")
+        # No work needed — encoder uses the fetched file directly.
+        return (True, local_path)
 
     # Safety: never strip ALL audio. The encoder needs at least one
     # audio track to map; an all-audio drop would produce a silent
@@ -177,18 +186,23 @@ def strip_streams_locally(
     if drop_audio and len(drop_audio) >= len(audio_streams):
         return (False, f"refusing to drop all {len(audio_streams)} audio tracks")
 
-    from pipeline.compliance_fixers import _mkvmerge_drop_streams
+    from pipeline.compliance_fixers import _mkvmerge_drop_streams_to_path
 
     n_a = len(audio_streams)
     n_s = len(item.get("subtitle_streams") or [])
+    # Sibling path next to the fetched file — same directory, suffix
+    # ``.stripped.mkv`` so the cleanup pass can find both halves.
+    stripped_path = local_path + ".stripped.mkv"
     logging.info(
-        f"  prep: stripping streams locally — drop audio={drop_audio} (keep {n_a - len(drop_audio)}) "
+        f"  prep: stripping streams locally → {os.path.basename(stripped_path)} — "
+        f"drop audio={drop_audio} (keep {n_a - len(drop_audio)}) "
         f"sub={drop_sub} (keep {n_s - len(drop_sub)})"
     )
 
     try:
-        ok = _mkvmerge_drop_streams(
+        ok = _mkvmerge_drop_streams_to_path(
             local_path,
+            stripped_path,
             drop_audio_indices=drop_audio or None,
             drop_sub_indices=drop_sub or None,
         )
@@ -197,5 +211,8 @@ def strip_streams_locally(
 
     if not ok:
         return (False, "local mkvmerge strip failed (rc!=0 or proof-of-work mismatch)")
+    # Success — return the stripped sibling path. The encoder consumes
+    # that path. Caller owns cleanup of both files when encode is done.
+    return (True, stripped_path)
 
     return (True, f"stripped {len(drop_audio)} audio + {len(drop_sub)} sub track(s)")

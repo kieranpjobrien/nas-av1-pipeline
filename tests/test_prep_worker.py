@@ -40,10 +40,14 @@ def _mock_prep_external_calls(monkeypatch):
         )
     monkeypatch.setattr("tools.probe_source_integrity.probe_file", _probe_healthy)
 
-    # Strip no-op stub — nothing to drop on a synthetic file
+    # Strip no-op stub — return the same path (no strip happened).
+    # Updated 2026-05-13 21:30: the contract changed from
+    # (ok, message) to (ok, stripped_path_or_message). The success
+    # case now returns either local_path itself (no work) or a sibling
+    # path. Tests using synthetic files don't strip, so return local_path.
     monkeypatch.setattr(
         "pipeline.prep_streams.strip_streams_locally",
-        lambda path, item, config: (True, "no streams to strip"),
+        lambda path, item, config: (True, path),
     )
 
 

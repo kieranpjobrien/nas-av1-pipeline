@@ -422,18 +422,30 @@ def prepare_for_encode(
         # encodes that ultimately got refused.
         from pipeline.prep_streams import strip_streams_locally
 
-        strip_ok, strip_msg = strip_streams_locally(actual_input, item, config)
+        # Post-2026-05-13 21:03 architecture: strip writes to a NEW
+        # sibling path, never touches the fetched source. Eliminates
+        # the os.replace lock race against Windows antivirus / cache.
+        strip_ok, strip_result = strip_streams_locally(actual_input, item, config)
         if not strip_ok:
-            logging.error(f"  prep: local stream strip failed — {strip_msg}")
+            logging.error(f"  prep: local stream strip failed — {strip_result}")
             state.set_file(
                 filepath,
                 FileStatus.ERROR,
-                error=f"pre-encode strip: {strip_msg}",
+                error=f"pre-encode strip: {strip_result}",
                 stage="prep_strip",
             )
             _cleanup(local_path, remuxed_path, None)
             return None
-        if strip_msg != "no streams to strip":
+        # On success, ``strip_result`` is the path the encoder should
+        # consume. Either local_path (nothing stripped) or a new sibling.
+        stripped_input = strip_result
+        if stripped_input != actual_input:
+            # Strip produced a new file — that's the encoder's input now.
+            # The previous actual_input + any remux output are garbage
+            # (superseded). Hand them to _cleanup so they get removed
+            # alongside the encoded artefacts later.
+            prev_actual_input = actual_input
+            actual_input = stripped_input
             # Re-probe so item.audio_streams / subtitle_streams reflect
             # the now-stripped input. The encoder's stream selector
             # will see the trimmed lists and won't need to re-strip.
