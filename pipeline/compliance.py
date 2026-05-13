@@ -210,6 +210,20 @@ def check_compliance(
         ))
 
     # === Subtitles ===
+    # Forced and SDH/HI subs each occupy a SEPARATE slot from "regular
+    # English" — they carry different content (forced: foreign-dialogue
+    # translation; SDH: sound effects + speaker IDs for the
+    # hearing-impaired) and the user's setup wants both alongside the
+    # regular English dialogue track. Pre-2026-05-14 this loop excluded
+    # only forced from the regular count, then flagged extra_eng_subs
+    # when a file had regular + SDH (e.g. Slow Horses S05E05 Circus:
+    # 1 forced + 1 regular + 1 SDH → compliance counted regular+SDH=2
+    # and refused). prep_streams.compute_sub_drop_indices already does
+    # the right thing (excludes both forced AND SDH from the regular
+    # count); compliance must match or files survive prep cleanly and
+    # then loop on the breaker here.
+    from pipeline.streams import is_hi_internal
+
     foreign_sub_indices: list[int] = []
     extra_eng_sub_indices: list[int] = []
     eng_regular_seen: list[int] = []
@@ -218,10 +232,16 @@ def check_compliance(
         if lang and lang not in KEEP_LANGS:
             foreign_sub_indices.append(i)
             continue
-        # Forced subs are a separate slot — don't count toward regular English
+        # Forced subs — different slot, don't count toward the regular cap.
         title = (s.get("title") or "").lower()
         is_forced = "forced" in title or "foreign" in title
         if is_forced:
+            continue
+        # SDH / HI subs — also a different slot. Use the canonical
+        # disposition + title regex from pipeline.streams so this stays
+        # in sync with the encoder's HI detection (which also drives
+        # _map_subtitle_streams's eng-regular-keep decision).
+        if is_hi_internal(s):
             continue
         eng_regular_seen.append(i)
 

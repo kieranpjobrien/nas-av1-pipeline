@@ -164,6 +164,83 @@ def test_forced_sub_alongside_regular_eng_is_ok():
     assert not any(v.tag == "extra_eng_subs" for v in out)
 
 
+def test_sdh_sub_alongside_regular_eng_is_ok_title():
+    """Pin the 2026-05-14 Slow Horses S05E05 Circus PREP MISS fix.
+
+    Pre-fix, compliance.py counted SDH/HI subs toward the regular-English
+    cap. A file with regular + SDH was flagged as ``extra_eng_subs``
+    even though ``prep_streams.compute_sub_drop_indices`` correctly
+    excluded SDH from its own regular-eng count. The breaker fired
+    on every encode of Slow Horses S05E05 Circus (1 forced + 1
+    regular + 1 SDH; prep kept all three, compliance refused).
+
+    Post-fix: compliance uses ``streams.is_hi_internal`` (disposition
+    + title regex) to identify SDH/HI tracks, matching prep_streams.
+    Forced AND SDH each occupy a separate slot from regular English.
+    """
+    out = check_compliance(**_base_args(output_probe={
+        "video": {"codec": "av1"},
+        "audio": [{"codec": "eac3", "language": "eng"}],
+        "subs": [
+            {"language": "eng", "title": ""},
+            # Title-based SDH detection
+            {"language": "eng", "title": "SDH"},
+        ],
+    }))
+    assert not any(v.tag == "extra_eng_subs" for v in out), (
+        "SDH sub (title='SDH') must not count toward the regular-English cap"
+    )
+
+
+def test_sdh_sub_alongside_regular_eng_is_ok_disposition():
+    """Same as above but via the disposition.hearing_impaired flag —
+    common on tracks whose title is None or just the language name."""
+    out = check_compliance(**_base_args(output_probe={
+        "video": {"codec": "av1"},
+        "audio": [{"codec": "eac3", "language": "eng"}],
+        "subs": [
+            {"language": "eng", "title": ""},
+            {"language": "eng", "title": None, "disposition": {"hearing_impaired": 1}},
+        ],
+    }))
+    assert not any(v.tag == "extra_eng_subs" for v in out), (
+        "disposition.hearing_impaired sub must not count toward the regular-English cap"
+    )
+
+
+def test_cc_sub_alongside_regular_eng_is_ok():
+    """``(CC)`` in the title — Closed Caption variants — are SDH-class.
+    Resident Alien S01E07's eng sub was titled ``İngilizce [CC]`` (CC
+    token in Turkish); the same detection should treat it as SDH on
+    the compliance side too."""
+    out = check_compliance(**_base_args(output_probe={
+        "video": {"codec": "av1"},
+        "audio": [{"codec": "eac3", "language": "eng"}],
+        "subs": [
+            {"language": "eng", "title": ""},
+            {"language": "eng", "title": "English (CC)"},
+        ],
+    }))
+    assert not any(v.tag == "extra_eng_subs" for v in out)
+
+
+def test_three_regular_english_still_flagged():
+    """Sanity: the SDH carve-out doesn't accidentally exempt genuine
+    duplicates. Three non-forced, non-SDH eng subs → flagged."""
+    out = check_compliance(**_base_args(output_probe={
+        "video": {"codec": "av1"},
+        "audio": [{"codec": "eac3", "language": "eng"}],
+        "subs": [
+            {"language": "eng", "title": ""},
+            {"language": "eng", "title": ""},
+            {"language": "eng", "title": ""},
+        ],
+    }))
+    extra = [v for v in out if v.tag == "extra_eng_subs"]
+    assert extra and extra[0].category == Category.FIXABLE
+    assert extra[0].data["indices"] == [1, 2]
+
+
 def test_foreign_sub_flagged_fixable():
     out = check_compliance(**_base_args(output_probe={
         "video": {"codec": "av1"},
