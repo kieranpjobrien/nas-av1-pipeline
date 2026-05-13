@@ -1251,17 +1251,28 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
             except Exception:
                 return {}
 
-        _output_size = os.path.getsize(dest_path)
-
         def _run_compliance() -> list:
+            # Re-probe dest_path EVERY time the closure is invoked so the
+            # post-fix re-check sees the actual mutated file rather than
+            # the pre-fix cached probe. Pre-2026-05-13 the outer
+            # ``output_probe`` and ``_output_size`` were captured once at
+            # line 1082; the closure used those stale values, so even
+            # when the fixer correctly dropped tracks the residual
+            # compliance run saw "no change" and REFUSE-d every time.
+            # Heads of State / Wild Robot / etc. were stuck on this.
+            fresh_probe = _probe_full(dest_path)
+            try:
+                fresh_size = os.path.getsize(dest_path)
+            except OSError:
+                fresh_size = 0
             return check_compliance(
                 filepath=filepath,
                 item=compliance_item,
                 encode_params=encode_params_used,
-                output_probe=output_probe,
+                output_probe=fresh_probe,
                 mkv_tags=_read_dest_tags(dest_path),
                 input_size_bytes=input_size,
-                output_size_bytes=_output_size,
+                output_size_bytes=fresh_size,
                 source_was_av1=source_was_av1,
                 config=config,
             )
