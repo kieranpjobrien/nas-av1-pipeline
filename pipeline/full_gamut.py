@@ -1038,8 +1038,22 @@ def _encode_only(
         if prep_result is None:
             return False
         prep_data = prep_result
+        # Re-read state — the inline prep call above just persisted a fresh
+        # detected_audio / detected_subs that reflect the post-strip layout.
+        # The original `existing` snapshot was loaded BEFORE inline prep ran,
+        # so its detected_audio/subs are stale (e.g. pre-strip 2-element audio
+        # list when post-strip is 1-element). Using the stale snapshot for the
+        # restore below would override item.audio_streams BACK to the pre-strip
+        # view — observed live 2026-05-14 15:15 on The Favourite (2018): prep
+        # produced a 1-audio stripped file, restore reverted item.audio_streams
+        # to 2-element, encoder built ``-map 0:a:1`` against the 1-audio
+        # stripped input, ffmpeg refused ("Stream map '' matches no streams").
+        existing = state.get_file(filepath) or existing
 
-    # Restore mutated stream lists from prep cache.
+    # Restore mutated stream lists from prep cache. ``item`` carries the
+    # pre-prep view if a fresh full_gamut() invocation passed in a freshly
+    # built dict; the detected_audio/subs persisted by the most recent prep
+    # are the authoritative post-strip view that the encoder must consume.
     if existing.get("detected_audio") is not None:
         item["audio_streams"] = existing["detected_audio"]
     if existing.get("detected_subs") is not None:

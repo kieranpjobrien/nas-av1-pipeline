@@ -417,6 +417,142 @@ class TestEncodeOnlyShortCircuit:
         )
 
 
+class TestEncodeOnlyStaleExistingSnapshot:
+    """Pin the 2026-05-14 15:15 The Favourite (2018) restore-bug fix.
+
+    ``_encode_only`` reads ``existing = state.get_file(filepath)`` at
+    the top, then guards against stale prep_data and re-runs
+    ``prepare_for_encode`` inline if needed. The fresh prepare_for_encode
+    call mutates ``item.audio_streams`` / ``item.subtitle_streams`` to
+    the post-strip layout AND persists fresh ``detected_audio`` /
+    ``detected_subs`` to state. But the restore block at the bottom
+    used the ORIGINAL ``existing`` snapshot — captured BEFORE inline
+    prep ran — so its detected_audio/subs were stale.
+
+    Result: prep correctly stripped a 2-audio source to 1 audio, the
+    re-probe updated item.audio_streams to a 1-element list, but the
+    restore line then overrode it BACK to the stale 2-element list.
+    The encoder's ``_select_audio_streams`` returned ``[1]`` (keep
+    index 1 of the 2-element view), and ``build_ffmpeg_cmd`` emitted
+    ``-map 0:a:1`` against the 1-audio stripped input. ffmpeg refused
+    with "Stream map '' matches no streams".
+
+    Post-fix: after inline prep runs, ``existing`` is re-read from
+    state so the restore picks up the fresh detected_audio/subs.
+    """
+
+    def test_inline_prep_fallback_uses_fresh_state_for_restore(self, tmp_path):
+        from unittest.mock import patch
+
+        from pipeline.full_gamut import _encode_only
+
+        orch = _orch(tmp_path)
+        nas_path, local_path = _file_in_disk_state(tmp_path, "Favourite.mkv")
+
+        # Initial state: prep_data points at a stripped sibling that does NOT
+        # exist on disk (the stale-prep guard will trip). detected_audio
+        # holds the OLD pre-strip 2-element list. The inline-prep fallback
+        # must update detected_audio to the post-strip 1-element view before
+        # the restore reads it.
+        stale_stripped = str(tmp_path / "fetch" / "missing.stripped.mkv")
+        orch.state.set_file(
+            nas_path,
+            FileStatus.PROCESSING,
+            local_path=local_path,
+            prep_done=True,
+            prep_data={
+                "clean_name": "Favourite.mkv",
+                "actual_input": stale_stripped,
+                "remuxed_path": None,
+                "external_subs": [],
+                "output_path": str(tmp_path / "encoded" / "out.mkv"),
+            },
+            detected_audio=[
+                # Stale pre-strip 2-element list — the test's tripwire.
+                {"codec_raw": "eac3", "language": "und", "title": ""},
+                {"codec_raw": "eac3", "language": "eng", "title": ""},
+            ],
+            detected_subs=[],
+        )
+
+        item = {
+            "filepath": nas_path,
+            "filename": "Favourite.mkv",
+            "library_type": "movie",
+            "audio_streams": [
+                {"codec_raw": "eac3", "language": "und", "title": ""},
+                {"codec_raw": "eac3", "language": "eng", "title": ""},
+            ],
+            "subtitle_streams": [],
+            "tmdb": {"original_language": "en", "title": "Favourite"},
+        }
+
+        # Fresh-prep result that the inline fallback would produce — points
+        # at a stripped sibling that exists, with post-strip 1-element audio.
+        new_stripped = str(tmp_path / "fetch" / "deadbeef_Favourite.mkv.stripped.mkv")
+        (tmp_path / "fetch" / "deadbeef_Favourite.mkv.stripped.mkv").write_bytes(b"x")
+        fresh_prep = {
+            "clean_name": "Favourite.mkv",
+            "actual_input": new_stripped,
+            "remuxed_path": None,
+            "external_subs": [],
+            "output_path": str(tmp_path / "encoded" / "out.mkv"),
+        }
+        # Post-strip audio view that the fresh prep would persist.
+        post_strip_audio = [
+            {"codec": "EAC3", "codec_raw": "eac3", "language": "eng",
+             "title": "", "channels": 6},
+        ]
+
+        def fake_prepare(fp, itm, cfg, st, staging):
+            # Mirror what real prepare_for_encode does on the fresh path:
+            # mutate item AND persist to state.
+            itm["audio_streams"] = list(post_strip_audio)
+            st.set_file(
+                fp,
+                FileStatus.PROCESSING,
+                stage="prepped",
+                prep_done=True,
+                prep_data=fresh_prep,
+                detected_audio=post_strip_audio,
+                detected_subs=[],
+            )
+            return fresh_prep
+
+        # Capture item.audio_streams at the point the encoder is about to
+        # build its command — that's what determines whether the restore
+        # picked up the fresh post-strip view or the stale pre-strip view.
+        observed_audio: list = []
+
+        def fake_run_encode(*a, **kw):
+            # _encode_only calls _run_encode(cmd, actual_input, output_path,
+            # item, ...) — item is positional arg 3.
+            observed_audio.append(list(a[3].get("audio_streams", [])))
+            # Don't bother building a real output; signal success.
+            output_path = a[2]
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+            with open(output_path, "wb") as fh:
+                fh.write(b"x" * 1000)
+            return True
+
+        fake_params = {"cq": 27, "base_cq": 27, "cq_offset": 0, "preset": "p5", "content_grade": "default"}
+        with patch("pipeline.full_gamut.prepare_for_encode", side_effect=fake_prepare), \
+             patch("pipeline.full_gamut._run_encode", side_effect=fake_run_encode), \
+             patch("pipeline.full_gamut.build_ffmpeg_cmd",
+                   return_value=["ffmpeg", "-i", "stub"]), \
+             patch("pipeline.full_gamut.resolve_encode_params", return_value=fake_params), \
+             patch("pipeline.full_gamut.get_res_key", return_value="1080p"):
+            _encode_only(nas_path, item, {}, orch.state, str(tmp_path), gpu_semaphore=None)
+
+        assert observed_audio, "_run_encode was never called"
+        seen = observed_audio[0]
+        assert len(seen) == 1, (
+            f"after inline-prep fallback, item.audio_streams should be the "
+            f"post-strip 1-element list — got {len(seen)} elements: {seen!r}. "
+            f"Stale `existing` snapshot is overriding the fresh prep mutation."
+        )
+
+
 class TestPrepWorkerPicker:
     """Prep worker picks fetched-but-not-prepped files via _pick_for_prep."""
 
