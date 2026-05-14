@@ -194,7 +194,7 @@ def strip_streams_locally(
     # ``.stripped.mkv`` so the cleanup pass can find both halves.
     stripped_path = local_path + ".stripped.mkv"
     logging.info(
-        f"  prep: stripping streams locally → {os.path.basename(stripped_path)} — "
+        f"  prep: stripping streams locally -> {os.path.basename(stripped_path)} - "
         f"drop audio={drop_audio} (keep {n_a - len(drop_audio)}) "
         f"sub={drop_sub} (keep {n_s - len(drop_sub)})"
     )
