@@ -908,3 +908,82 @@ class TestEncodeOnlyStalePrepGuard:
             "When prep_data is valid (file exists), _encode_only must NOT "
             "fall back to prepare_for_encode"
         )
+
+
+class TestPrepBailsOnTerminalStatus:
+    """Pin the 2026-05-15 16:52 Varsity Blues stuck-loop.
+
+    Two workers raced: GPU worker's inline prep set FLAGGED_CORRUPT on
+    the file; the prep worker was blocked on the per-filepath lock and
+    woke up after the GPU released. The wait-for-fetch loop only exited
+    on PROCESSING+local, ERROR, or DONE — flagged_corrupt fell through
+    and the worker spun forever, logging "still waiting for fetch ..."
+    every 2 minutes (observed 30+ minutes in production before fix).
+    """
+
+    def test_returns_none_when_already_flagged_corrupt(self, tmp_path):
+        """If the file is already terminal on entry, bail without entering wait."""
+        from pipeline.full_gamut import prepare_for_encode
+
+        orch = _orch(tmp_path)
+        nas_path, _ = _file_in_disk_state(tmp_path, "Corrupt.mkv")
+        orch.state.set_file(
+            nas_path,
+            FileStatus.FLAGGED_CORRUPT,
+            error="source corruption (prep-time probe)",
+            stage="prep_source_integrity",
+        )
+
+        item = {"filepath": nas_path, "filename": "Corrupt.mkv"}
+        result = prepare_for_encode(nas_path, item, {}, orch.state, str(tmp_path))
+        assert result is None
+
+    def test_returns_none_for_each_flagged_state(self, tmp_path):
+        """Every FLAGGED_* terminal state exits prep cleanly."""
+        from pipeline.full_gamut import prepare_for_encode
+
+        orch = _orch(tmp_path)
+        for idx, flagged in enumerate([
+            FileStatus.FLAGGED_FOREIGN_AUDIO,
+            FileStatus.FLAGGED_UNDETERMINED,
+            FileStatus.FLAGGED_MANUAL,
+            FileStatus.FLAGGED_CORRUPT,
+        ]):
+            nas_path, _ = _file_in_disk_state(tmp_path, f"Flagged{idx}.mkv")
+            orch.state.set_file(nas_path, flagged)
+            item = {"filepath": nas_path, "filename": f"Flagged{idx}.mkv"}
+            result = prepare_for_encode(nas_path, item, {}, orch.state, str(tmp_path))
+            assert result is None, f"Expected None for terminal status {flagged.value}"
+
+    def test_wait_loop_breaks_when_status_becomes_terminal(self, tmp_path, monkeypatch):
+        """File starts pending, flips to FLAGGED_CORRUPT mid-wait — loop exits."""
+        from pipeline.full_gamut import prepare_for_encode
+
+        orch = _orch(tmp_path)
+        nas_path, _ = _file_in_disk_state(tmp_path, "WillFlag.mkv")
+        # Start pending (not in PROCESSING+local — forces wait loop entry)
+        orch.state.set_file(nas_path, FileStatus.PENDING)
+
+        # After the first sleep, flip status to FLAGGED_CORRUPT (simulates
+        # the GPU worker's inline prep failing while we're waiting).
+        flip_state = orch.state
+        call_count = {"n": 0}
+        real_sleep = __import__("time").sleep
+
+        def _fake_sleep(secs):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                flip_state.set_file(nas_path, FileStatus.FLAGGED_CORRUPT)
+            # Don't actually sleep — keep the test fast.
+            real_sleep(0)
+
+        monkeypatch.setattr("pipeline.full_gamut.time.sleep", _fake_sleep)
+
+        item = {"filepath": nas_path, "filename": "WillFlag.mkv"}
+        result = prepare_for_encode(nas_path, item, {}, orch.state, str(tmp_path))
+        assert result is None
+        # Must NOT have spun more than a couple of cycles
+        assert call_count["n"] < 5, (
+            f"Loop ran {call_count['n']} times after status flipped terminal — "
+            f"should have broken on first re-poll after the flip"
+        )

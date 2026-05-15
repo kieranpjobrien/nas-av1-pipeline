@@ -30,7 +30,7 @@ from pipeline.ffmpeg import (
 )
 from pipeline.language import detect_all_languages
 from pipeline.report import update_entry
-from pipeline.state import FileStatus, PipelineState
+from pipeline.state import FileStatus, PipelineState, is_terminal
 from pipeline.streams import is_hi_external
 from pipeline.subs import scan_sidecars
 
@@ -320,13 +320,24 @@ def _prepare_for_encode_locked(
         status = existing.get("status") if existing else None
         local_path = existing.get("local_path") if existing else None
 
-        if status == FileStatus.DONE.value:
-            logging.info(f"Already done: {filename} — skipping prep.")
+        # Terminal already (DONE or any FLAGGED_*) — nothing to do. This also
+        # covers the prep/GPU race where the GPU's inline prep set FLAGGED_CORRUPT
+        # while the prep worker was blocked on the per-file lock: we MUST bail
+        # before STEP 1 instead of sitting in the wait-for-fetch loop forever
+        # (observed live 2026-05-15: Varsity Blues spun 30+ minutes after being
+        # flagged corrupt at 16:52, log showed "still waiting for fetch ...
+        # status=flagged_corrupt" every 2 minutes).
+        if status and is_terminal(status):
+            logging.info(f"prep: file already terminal ({status}) — skipping: {filename}")
             return None
 
         if not (status == FileStatus.PROCESSING.value and local_path and os.path.exists(local_path)):
             logging.info(f"prep: waiting for fetch: {filename}")
             waited = 0
+            # Hard cap: 30 minutes of fruitless waiting is always a bug, never
+            # a legitimate fetch. Bail loudly so the file goes to ERROR and the
+            # next queue build can retry rather than burying a stuck thread.
+            max_wait_secs = 1800
             while True:
                 existing = state.get_file(filepath)
                 status = existing.get("status") if existing else None
@@ -336,7 +347,18 @@ def _prepare_for_encode_locked(
                 if status == FileStatus.ERROR.value:
                     logging.error(f"prep: fetch failed: {filename}")
                     return None
-                if status == FileStatus.DONE.value:
+                # Any terminal state (DONE / FLAGGED_*) means the file is settled
+                # by another worker — exit silently rather than waiting forever.
+                if status and is_terminal(status):
+                    logging.info(
+                        f"prep: file became terminal during wait ({status}) — releasing: {filename}"
+                    )
+                    return None
+                if waited >= max_wait_secs:
+                    logging.error(
+                        f"prep: gave up waiting for fetch after {waited}s "
+                        f"(status={status}): {filename}"
+                    )
                     return None
                 time.sleep(2)
                 waited += 2
