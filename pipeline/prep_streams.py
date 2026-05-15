@@ -103,10 +103,22 @@ def compute_audio_drop_indices(item: dict, config: dict) -> list[int]:
 def compute_sub_drop_indices(item: dict, config: dict) -> list[int]:
     """Per-type sub indices to drop.
 
-    Two categories:
-      * foreign_subs — language not in eng/und/zxx
+    Categories:
+      * foreign_subs — language not in eng/und/zxx, dropped unconditionally.
       * extra_eng_subs — regular (non-forced, non-SDH) English subs
-        beyond MAX_REGULAR_ENGLISH_SUBS
+        beyond MAX_REGULAR_ENGLISH_SUBS.
+      * und/zxx with a confirmed eng track also present — dropped (2026-05-15
+        refinement). The 2026-04-29 inviolate rule "never strip without
+        knowing the language" was written to protect the case where the
+        und track is the ONLY thing standing between us and a sub-less
+        output. When a confirmed eng track exists, the und is dispensable:
+        if it's actually eng, we have eng already; if it's foreign, we
+        wanted to drop it anyway; if it's zxx (no dialogue), the eng
+        SDH carries the audio cues. Saves a whisper round-trip per und
+        track AND avoids the wholesale "defer the strip, map everything"
+        fallback that bloated Thelma & Louise (36 subs, one
+        ``language=und title="Chinese (Cantonese)"``) to ship every
+        foreign track.
 
     Mirrors compliance.py's check_compliance sub-violation logic so
     the verify-only post-encode gate has nothing to refuse.
@@ -117,6 +129,14 @@ def compute_sub_drop_indices(item: dict, config: dict) -> list[int]:
 
     if not config.get("strip_non_english_subs", True):
         return []
+
+    # Confirmed-eng detection: any sub tagged eng/en (regardless of
+    # forced/SDH disposition). One such track is enough to let us drop
+    # und/zxx — the eng track is the user-facing fallback.
+    has_confirmed_eng = any(
+        (s.get("language") or "").lower().strip() in ("eng", "en")
+        for s in sub_streams
+    )
 
     drop: set[int] = set()
     eng_regular_seen: list[int] = []
@@ -129,8 +149,15 @@ def compute_sub_drop_indices(item: dict, config: dict) -> list[int]:
             drop.add(i)
             continue
 
-        # English / und / zxx subs — track which are "regular" so we can
-        # cap them at MAX_REGULAR_ENGLISH_SUBS. Forced and SDH stay.
+        # und / zxx — droppable only when a confirmed eng sub exists.
+        # Without an eng fallback the inviolate rule applies: keep the
+        # track and let whisper resolve its language on a later pass.
+        if lang in ("und", "zxx", "") and has_confirmed_eng:
+            drop.add(i)
+            continue
+
+        # English subs — track which are "regular" so we can cap them
+        # at MAX_REGULAR_ENGLISH_SUBS. Forced and SDH stay.
         if lang in ("eng", "en"):
             is_forced = "forced" in title or s.get("forced") is True
             is_sdh = (

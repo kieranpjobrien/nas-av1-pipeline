@@ -153,8 +153,10 @@ def test_sub_drop_keeps_forced_english_separately():
     assert drop == [], "forced + 1 regular is within the cap"
 
 
-def test_sub_drop_und_zxx_kept():
-    """Undetermined and no-dialogue subs are policy-safe (kept)."""
+def test_sub_drop_und_zxx_kept_when_no_eng():
+    """No-eng-fallback case — und/zxx are kept per the 2026-04-29 inviolate
+    rule: never strip the LAST sub of a possibly-relevant language. Whisper
+    can resolve them on a later pass."""
     item = {
         "subtitle_streams": [
             _sub(lang="und", title="??"),
@@ -163,7 +165,87 @@ def test_sub_drop_und_zxx_kept():
         ],
     }
     drop = compute_sub_drop_indices(item, {"strip_non_english_subs": True})
-    assert drop == [2]
+    assert drop == [2], (
+        "with no confirmed eng track, und + zxx must stay so whisper can "
+        "resolve them later; only the explicit foreign is dropped"
+    )
+
+
+def test_sub_drop_und_dropped_when_confirmed_eng_present():
+    """Pin the 2026-05-15 refinement.
+
+    Thelma & Louise (1991) shape: 36 subs total, including one
+    ``language=und title="Chinese (Cantonese)"`` and two confirmed eng
+    (regular + SDH). Pre-fix, the und triggered the inviolate-rule
+    defer in ``_map_subtitle_streams`` and the prep step kept the und
+    alongside everything else. Post-fix, a confirmed eng track makes
+    und droppable: the eng is the user-facing fallback, the und is
+    dispensable (whatever its real language).
+    """
+    item = {
+        "subtitle_streams": [
+            _sub(lang="eng", title="English"),
+            _sub(lang="und", title="Chinese (Cantonese)"),
+            _sub(lang="zxx", title=""),
+            _sub(lang="fre", title="Foreign"),
+        ],
+    }
+    drop = compute_sub_drop_indices(item, {"strip_non_english_subs": True})
+    assert 0 not in drop, "confirmed eng must be kept"
+    assert 1 in drop, "und must be dropped when a confirmed eng track is present"
+    assert 2 in drop, "zxx droppable too when eng is present"
+    assert 3 in drop, "foreign always dropped"
+
+
+def test_sub_drop_thelma_and_louise_shape():
+    """Full Thelma & Louise (1991) reproduction — pin the canonical
+    shape that motivated the und/eng refinement. 36-sub source with
+    one und ``title="Chinese (Cantonese)"`` and two confirmed eng
+    (regular + SDH). Strip should keep exactly those two and drop the
+    other 34."""
+    subs = [
+        _sub(lang="eng", title="English"),                       # 0  kept
+        _sub(lang="eng", title="English (SDH)"),                 # 1  kept (SDH separate slot)
+        _sub(lang="ara", title="Arabic"),
+        _sub(lang="und", title="Chinese (Cantonese)"),           # 3  the canary — must drop
+        _sub(lang="chi", title="Chinese (Traditional)"),
+        _sub(lang="hrv", title="Croatian"),
+        _sub(lang="cze", title="Czech"),
+        _sub(lang="dan", title="Danish"),
+        _sub(lang="dut", title="Dutch"),
+        _sub(lang="fil", title="Filipino"),
+        _sub(lang="fin", title="Finnish"),
+        _sub(lang="fre", title="French (Parisian)"),
+        _sub(lang="ger", title="German"),
+        _sub(lang="gre", title="Greek"),
+        _sub(lang="heb", title="Hebrew"),
+        _sub(lang="hun", title="Hungarian"),
+        _sub(lang="ind", title="Indonesian"),
+        _sub(lang="ita", title="Italian"),
+        _sub(lang="jpn", title="Japanese"),
+        _sub(lang="kor", title="Korean"),
+        _sub(lang="may", title="Malay"),
+        _sub(lang="nor", title="Norwegian"),
+        _sub(lang="pol", title="Polish"),
+        _sub(lang="por", title="Portuguese (Brazilian)"),
+        _sub(lang="por", title="Portuguese (Iberian)"),
+        _sub(lang="rus", title="Russian"),
+        _sub(lang="slv", title="Slovenian"),
+        _sub(lang="spa", title="Spanish (Castilian)"),
+        _sub(lang="spa", title="Spanish (Latin American)"),
+        _sub(lang="swe", title="Swedish"),
+        _sub(lang="tha", title="Thai"),
+        _sub(lang="tur", title="Turkish"),
+        _sub(lang="vie", title="Vietnamese"),
+        _sub(lang="jpn", title="Japanese (Commentary #1)"),
+        _sub(lang="kor", title="Korean (Commentary #1)"),
+        _sub(lang="jpn", title="Japanese (Commentary #2)"),
+    ]
+    item = {"subtitle_streams": subs}
+    drop = compute_sub_drop_indices(item, {"strip_non_english_subs": True})
+    # Two eng subs kept, 34 others dropped
+    assert sorted(drop) == sorted(i for i in range(36) if i not in (0, 1))
+    assert 3 in drop, "the und 'Chinese (Cantonese)' canary must drop"
 
 
 def test_sub_drop_empty_when_strip_disabled():
