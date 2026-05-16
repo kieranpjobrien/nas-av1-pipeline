@@ -775,6 +775,23 @@ def build_ffmpeg_cmd(
                 # is enough today but title gives a human-readable signal
                 # in mediainfo / mkvinfo output too).
                 cmd.extend([f"-metadata:s:s:{out_idx}", "title=Forced"])
+            elif sub_obj.is_hi:
+                # Same problem class as forced (Little Mermaid 2026-05-17):
+                # source had 2 SDH eng tracks ("English SDH - Songs only",
+                # "English SDH"). _map_subtitle_streams' regular-eng selector
+                # dropped both (is_hi=True), mapped == 0, fallback ``-map 0:s?``
+                # kept both, then ``-map_metadata -1`` nuked title+disposition,
+                # output had 2 untitled eng with hearing_impaired=0 →
+                # compliance counted both as regular → PREP MISS. Re-stamp
+                # hearing_impaired disposition + a canonical title so
+                # is_hi_internal (disposition path) and the title-regex path
+                # both classify the output correctly. Preserve the source
+                # title if it carried useful detail (e.g. "Songs only");
+                # otherwise stamp "SDH" so the title regex matches.
+                cmd.extend([f"-disposition:s:{out_idx}", "hearing_impaired"])
+                src_title = (track.get("title") or "").strip()
+                hi_title = src_title if src_title else "SDH"
+                cmd.extend([f"-metadata:s:s:{out_idx}", f"title={hi_title}"])
 
     # Set language metadata for EXTERNAL subtitle streams (Bazarr sidecars
     # we mapped as additional inputs above). Output index continues after

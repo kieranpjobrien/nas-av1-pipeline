@@ -383,6 +383,64 @@ class TestSubtitleMapOptional:
             idx = cmd.index("-disposition:s:1")
             assert cmd[idx + 1] != "forced", "regular eng must not be marked forced"
 
+    def test_kept_hi_sub_gets_disposition_and_title_restamped(self) -> None:
+        """Pin the 2026-05-17 Little Mermaid PREP MISS fix.
+
+        Source: 2 eng SDH tracks ("English SDH - Songs only",
+        "English SDH"). _map_subtitle_streams' regular-eng selector
+        drops both (is_hi=True), mapped==0 triggers the fallback
+        ``-map 0:s?`` which maps both. Without re-stamping
+        hearing_impaired disposition + a title that matches the
+        HI regex, ``-map_metadata -1`` leaves the output subs with
+        title="" and disposition.hearing_impaired=0. Compliance then
+        counts both as regular English and refuses with
+        ``extra_eng_subs``.
+        """
+        item = _base_item()
+        item["subtitle_streams"] = [
+            {"language": "eng", "title": "English SDH - Songs only", "codec": "subrip"},
+            {"language": "eng", "title": "English SDH", "codec": "subrip"},
+        ]
+        cmd = build_ffmpeg_cmd(
+            input_path="in.mkv",
+            output_path="out.mkv",
+            item=item,
+            config=_base_config(),
+        )
+        # Both SDH subs are mapped via the fallback (no eng-regular,
+        # no forced — the selector returns mapped==0 → -map 0:s?).
+        assert "0:s?" in cmd, "all-subs fallback must fire for HI-only source"
+
+        # Each output sub must carry hearing_impaired disposition so
+        # compliance.is_hi_internal classifies them correctly.
+        for out_idx in (0, 1):
+            disp_key = f"-disposition:s:{out_idx}"
+            assert disp_key in cmd, f"sub {out_idx} must have disposition re-stamped"
+            disp_idx = cmd.index(disp_key)
+            assert cmd[disp_idx + 1] == "hearing_impaired", (
+                f"sub {out_idx} must be tagged hearing_impaired"
+            )
+
+        # Title must also be re-stamped so the HI title regex (\bsdh\b /
+        # \bhi\b / \bhearing\b / \bcc\b / \bclosed.caption\b) matches
+        # downstream — defense-in-depth alongside the disposition flag.
+        for out_idx in (0, 1):
+            meta_key = f"-metadata:s:s:{out_idx}"
+            title_stamped = False
+            for i in range(len(cmd) - 1):
+                if cmd[i] == meta_key and cmd[i + 1].lower().startswith("title="):
+                    title_stamped = True
+                    title_val = cmd[i + 1][len("title="):].lower()
+                    # Must contain one of the HI tokens so is_hi_internal's
+                    # title regex matches even if a downstream tool strips
+                    # disposition flags.
+                    assert any(
+                        tok in title_val
+                        for tok in ("sdh", "hi", "hearing", "cc", "closed caption")
+                    ), f"sub {out_idx} title {title_val!r} doesn't match HI regex"
+                    break
+            assert title_stamped, f"sub {out_idx} must have title re-stamped"
+
     def test_external_eng_sidecar_skips_internal_eng(self) -> None:
         """2026-05-10 fix: when an external English sidecar is being muxed
         in via ``external_subs``, the internal-sub mapper must NOT also
