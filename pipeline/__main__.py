@@ -143,13 +143,55 @@ def categorise_entry(
     if control.should_skip(filepath):
         return ("skip", None)
 
-    # Already terminal? Skip. DONE means encoded successfully; FLAGGED_*
-    # means qualify/audit deliberately parked the file. Earlier versions
-    # only skipped "done", so flagged rows landed back in the queue and
-    # got re-encoded with the wrong audio.
+    # Already terminal? Mostly skip. DONE means encoded successfully;
+    # FLAGGED_* means qualify/audit deliberately parked the file.
+    # Earlier versions only skipped "done", so flagged rows landed back in
+    # the queue and got re-encoded with the wrong audio.
+    #
+    # AUTO-RESET (2026-05-17): a flagged_corrupt / flagged_foreign_audio /
+    # flagged_undetermined row whose underlying file has been REFRESHED on
+    # disk since the flag was applied gets resurrected as pending. The
+    # canonical case: user deletes a corrupt source from NAS, Sonarr /
+    # Radarr re-downloads a clean release at the same path. Without this
+    # the new file sits invisible because the picker skips terminal rows
+    # forever — user has to manually clear the state row. The reset is
+    # gated on report.file_mtime > state.last_updated + 60s (clock-skew
+    # tolerance) so a small post-encode mtime wiggle on the SAME file
+    # doesn't cause a re-encode loop.
     existing = state.get_file(filepath)
     if existing and is_terminal(existing["status"]):
-        return ("skip", None)
+        st = existing["status"]
+        if st in ("flagged_corrupt", "flagged_foreign_audio", "flagged_undetermined"):
+            file_mtime = entry.get("file_mtime", 0) or 0
+            flag_time = 0.0
+            last_updated = existing.get("last_updated")
+            if last_updated:
+                try:
+                    flag_time = datetime.fromisoformat(last_updated).timestamp()
+                except (ValueError, TypeError):
+                    pass
+            if file_mtime > flag_time + 60:
+                logging.info(
+                    f"  Auto-reset {st} → pending: file refreshed on disk since flag was set "
+                    f"({os.path.basename(filepath)}, "
+                    f"file_mtime={file_mtime:.0f} > flag_time={flag_time:.0f})"
+                )
+                state.set_file(
+                    filepath,
+                    FileStatus.PENDING,
+                    stage=None,
+                    error=None,
+                    reason=f"auto-reset from {st} — file refreshed on disk",
+                )
+                # Fall through to normal categorisation against the fresh entry.
+                existing = state.get_file(filepath)
+            else:
+                return ("skip", None)
+        else:
+            # DONE / flagged_manual — never auto-reset. DONE re-runs only
+            # via explicit force_reencode; flagged_manual is the user's
+            # park button and must require user action to clear.
+            return ("skip", None)
 
     # Unprobeable: ffprobe couldn't determine the video codec. Earlier
     # versions silently skipped these files at queue-build time, so
