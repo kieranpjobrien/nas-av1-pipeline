@@ -448,6 +448,28 @@ class PipelineState:
         """Mark stats as needing a flush. Call after modifying stats dict in-place."""
         self._stats_dirty = True
 
+    def count_active_with_local(self, statuses: list[str]) -> int:
+        """Count rows in given statuses that have a non-empty local_path.
+
+        Direct SQL — no JSON decode of the extras column. Used by the fetch
+        worker's prefetch-cap loop, which formerly went through
+        ``get_all_files`` and json.loads'd every row's extras on every tick.
+        That hotspot triggered a recurring Windows access-violation in the
+        Python 3.14 json decoder (2026-05-16 19:01 pipeline stall) — narrowing
+        the query to real columns removes the crash surface entirely.
+        """
+        if not statuses:
+            return 0
+        placeholders = ",".join("?" * len(statuses))
+        with self._lock:
+            row = self._conn.execute(
+                f"SELECT COUNT(*) FROM pipeline_files "
+                f"WHERE status IN ({placeholders}) "
+                f"AND local_path IS NOT NULL AND local_path != ''",
+                statuses,
+            ).fetchone()
+        return int(row[0]) if row else 0
+
     def reset_non_terminal(self) -> int:
         """Reset any non-terminal states (from crashed runs) back to pending.
 

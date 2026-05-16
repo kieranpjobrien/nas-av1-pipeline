@@ -1579,18 +1579,17 @@ class Orchestrator:
         when dozens are already sitting on the staging drive waiting for the encoder. Counts
         any non-terminal, non-pending file (processing/uploading/encoding/etc.) — those have
         a local fetch file consuming buffer.
+
+        Direct SQL via ``state.count_active_with_local`` — avoids decoding
+        every row's extras JSON, which is a recurring native-crash hotspot
+        in the Python 3.14 json module on Windows (see state.py docstring).
         """
-        active_statuses = {
+        active_statuses = [
             FileStatus.PROCESSING.value,
             FileStatus.FETCHING.value,
             FileStatus.UPLOADING.value,
-        }
-        count = 0
-        for fp, entry in self.state.get_all_files().items():
-            status = (entry.get("status") or "").lower()
-            if status in active_statuses and entry.get("local_path"):
-                count += 1
-        return count
+        ]
+        return self.state.count_active_with_local(active_statuses)
 
     def _lookup_file(self, filepath: str) -> dict | None:
         """Look up a file in the media report."""

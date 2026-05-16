@@ -115,6 +115,63 @@ class TestPipelineStateBasics:
         )
         state.close()
 
+class TestCountActiveWithLocal:
+    """Regression for 2026-05-16 pipeline stall.
+
+    The fetch worker's prefetch-cap loop went through ``get_all_files``
+    and json.loads'd every row's extras on every tick. That hotspot
+    triggered a Windows native access-violation in the Python 3.14 json
+    decoder, killed the fetch thread, and the encoder went silent ~30
+    minutes later when the prep queue drained. ``count_active_with_local``
+    is the direct-SQL replacement that avoids the JSON decode entirely.
+    """
+
+    def test_returns_zero_on_empty(self, tmp_state_db):
+        state = PipelineState(tmp_state_db)
+        assert state.count_active_with_local([FileStatus.PROCESSING.value]) == 0
+        state.close()
+
+    def test_counts_only_matching_status_with_local_path(self, tmp_state_db):
+        state = PipelineState(tmp_state_db)
+        state.set_file(r"\\Nas\a.mkv", FileStatus.PROCESSING, local_path=r"F:\stage\a.mkv")
+        state.set_file(r"\\Nas\b.mkv", FileStatus.FETCHING, local_path=r"F:\stage\b.mkv")
+        state.set_file(r"\\Nas\c.mkv", FileStatus.UPLOADING, local_path=r"F:\stage\c.mkv")
+        state.set_file(r"\\Nas\d.mkv", FileStatus.PROCESSING)  # no local_path -> excluded
+        state.set_file(r"\\Nas\e.mkv", FileStatus.PENDING, local_path=r"F:\stage\e.mkv")  # wrong status
+        state.set_file(r"\\Nas\f.mkv", FileStatus.DONE, local_path=r"F:\stage\f.mkv")  # terminal -> excluded
+
+        active = [FileStatus.PROCESSING.value, FileStatus.FETCHING.value, FileStatus.UPLOADING.value]
+        assert state.count_active_with_local(active) == 3
+        state.close()
+
+    def test_empty_status_list_returns_zero(self, tmp_state_db):
+        state = PipelineState(tmp_state_db)
+        state.set_file(r"\\Nas\a.mkv", FileStatus.PROCESSING, local_path=r"F:\stage\a.mkv")
+        assert state.count_active_with_local([]) == 0
+        state.close()
+
+    def test_ignores_corrupt_extras(self, tmp_state_db):
+        """The whole point: never touch the extras column. A row with poisoned
+        extras must still be countable."""
+        import sqlite3
+
+        state = PipelineState(tmp_state_db)
+        fp = r"\\Nas\poisoned.mkv"
+        state.set_file(fp, FileStatus.PROCESSING, local_path=r"F:\stage\poisoned.mkv")
+        state.close()
+        con = sqlite3.connect(tmp_state_db)
+        con.execute(
+            "UPDATE pipeline_files SET extras = ? WHERE filepath = ?",
+            ('{"force_reencode"E-AC-3true', fp),
+        )
+        con.commit()
+        con.close()
+
+        state = PipelineState(tmp_state_db)
+        assert state.count_active_with_local([FileStatus.PROCESSING.value]) == 1
+        state.close()
+
+
 class TestStatusTransitions:
     """Verify the pipeline state machine transitions work correctly."""
 
