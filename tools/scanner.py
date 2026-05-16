@@ -775,20 +775,52 @@ def _scan_body(args) -> None:
         current_files = current.get("files", []) or []
         merged: list = []
 
-        # 1. Keep/update entries we re-scanned. If a pipeline update happened between
-        #    our read and now, prefer whichever source has the NEWER file_mtime — so
-        #    a post-encode update_entry() after the scanner started takes precedence.
-        #    Either way, always carry tmdb + per-stream detection data forward.
+        # 1. Keep/update entries we re-scanned.
+        #
+        # Conflict resolution between the fresh probe (what we just observed
+        # on disk) and the existing entry (whatever was last persisted to the
+        # report) was naive pre-2026-05-16: ``existing.file_mtime > fresh.file_mtime
+        # → existing wins``. Designed for the post-encode race where the pipeline's
+        # ``update_entry`` runs between scanner-read and scanner-write — the
+        # existing entry has the newer post-encode mtime + same file content,
+        # so trusting it is correct.
+        #
+        # The bug: any condition that makes the existing entry's file_mtime
+        # newer than the disk's (manual file replace that loses the new mtime
+        # somehow, NAS migration with mtime preservation, a buggy mtime stamp)
+        # permanently locks in the stale entry. Observed live 2026-05-16: 22
+        # files with stale ``file_size_bytes`` (Once Upon a Time in America
+        # 3 → 42 GB, Armageddon 6 → 32 GB, Eternal Sunshine 17 → 7.6 GB)
+        # because the report's mtime got bumped to the post-encode-update
+        # time but the file on disk had a 2020/2022/2023 mtime — the
+        # mtime-tiebreak ran forever in favour of the stale entry.
+        #
+        # Empirical truth: file_size_bytes from a fresh probe IS the current
+        # disk state. If it disagrees with the existing entry by anything
+        # meaningful, the file has demonstrably changed — fresh wins, full
+        # stop. The mtime-tiebreak only applies when sizes match.
         for existing in current_files:
             fp = existing.get("filepath")
-            if fp in seen_paths:
-                fresh = result_by_path[fp]
-                if existing.get("file_mtime", 0) > fresh.get("file_mtime", 0):
-                    merged.append(existing)
-                else:
-                    merged.append(_merge_preserved(fresh, existing))
-                seen_paths.discard(fp)  # processed — don't re-add below
-            # else: file wasn't in our scan → file is gone, drop it
+            if fp not in seen_paths:
+                continue  # else: file wasn't in our scan → it's gone, drop it
+            fresh = result_by_path[fp]
+
+            fresh_size = fresh.get("file_size_bytes", 0)
+            existing_size = existing.get("file_size_bytes", 0)
+            size_diff = abs(fresh_size - existing_size)
+            # 1 MB tolerance for mkvpropedit tag-write wiggle. Anything bigger
+            # is a real content change — trust the fresh probe.
+            size_changed = size_diff > 1024 * 1024
+
+            if size_changed:
+                merged.append(_merge_preserved(fresh, existing))
+            elif existing.get("file_mtime", 0) > fresh.get("file_mtime", 0):
+                # Same size, existing has newer mtime → post-encode race;
+                # existing is the authoritative post-update view.
+                merged.append(existing)
+            else:
+                merged.append(_merge_preserved(fresh, existing))
+            seen_paths.discard(fp)
 
         # 2. Add any entries that are in our results but weren't in the current report
         #    (new files that appeared after the last scan).
