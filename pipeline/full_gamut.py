@@ -1793,10 +1793,12 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
         return False
 
     # === Replace original (crash-safe) ===
-    # Backup policy: DO NOT auto-delete the .original.bak. We leave it in place so
-    # Synology's #recycle captures a safety copy on any subsequent housekeeping, AND
-    # any tool that wants to verify the replacement (e.g. a nightly audit) can still
-    # compare the sizes. Cleanup of old .bak files is a separate, manual/scheduled step.
+    # Backup policy (2026-05-16): the .original.bak is a SHORT-LIVED safety
+    # net during the replace + post-replace verification steps. Once those
+    # all pass (compliance, filename, TMDb stamping, sidecar cleanup), the
+    # .bak gets deleted at the end of finalize_upload so space is freed
+    # immediately. Pre-2026-05-16 the .bak persisted forever and accumulated
+    # 3.62 TB across 631 files before the user asked for the auto-cleanup.
     #
     # Re-encode case (2026-05-10 fix): when a file has been encoded before,
     # the backup_path already exists from that earlier run. The "move original
@@ -1816,8 +1818,11 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
             os.rename(filepath, backup_path)
         if os.path.exists(dest_path):
             os.replace(dest_path, final_path)
-            logging.info(f"  Replaced: {final_name} (backup kept at .original.bak)")
-        # NOTE: we intentionally DO NOT remove backup_path here. See commit message.
+            logging.info(f"  Replaced: {final_name} (backup kept for verification)")
+        # NOTE: backup deleted at the end of finalize_upload after all
+        # post-replace verification passes. Kept in place during the
+        # filename / TMDb / sidecar steps so any early-return rollback
+        # path can still restore the original.
     except Exception as e:
         state.set_file(filepath, FileStatus.ERROR, error=f"replace failed: {e}", stage="replace")
         return False
@@ -1939,6 +1944,27 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
 
     # === Plex scan ===
     _trigger_plex_scan(final_path)
+
+    # === Backup deletion (2026-05-16) ===
+    # All post-replace verification passed (compliance, filename, TMDb,
+    # sidecar cleanup). The new file on NAS is the canonical version and
+    # the .original.bak is now pure garbage. Delete it so we don't leak
+    # roughly-source-sized files indefinitely. Failures here don't fail
+    # the encode — at worst we leave one bak behind that the next bulk
+    # purge picks up.
+    if os.path.exists(backup_path):
+        try:
+            bak_size = os.path.getsize(backup_path)
+            os.remove(backup_path)
+            logging.info(
+                f"  Removed backup: {os.path.basename(backup_path)} "
+                f"({format_bytes(bak_size)} freed)"
+            )
+        except OSError as e:
+            logging.warning(
+                f"  Backup removal failed for {os.path.basename(backup_path)}: {e} "
+                f"— leaving for the next bulk purge"
+            )
 
     # === DONE ===
     # Clear the duration_retry_count on success — a file that retried once and then
