@@ -40,10 +40,6 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
-# 5% growth tolerance for AV1→AV1. Beyond this, the encode is producing
-# the wrong-direction output (high source CQ → low target CQ inflates).
-AV1_GROWTH_TOLERANCE = 1.05
-
 # Audio codec policy: EAC-3 is the target (Sonos Arc decodes natively),
 # TrueHD is the Atmos passthrough exception (object layer preservation).
 # Lossless codecs (FLAC/PCM/DTS-HD MA) are accepted only when the user's
@@ -332,24 +328,13 @@ def check_compliance(
                 data={"expected": expected_filename, "actual": actual_filename},
             ))
 
-    # === AV1→AV1 growth threshold ===
-    # Only enforce on AV1 sources. HEVC/H.264 → AV1 first-encodes can
-    # legitimately grow (the user explicitly accepted this earlier:
-    # "I have an autistic attachment to the same container for everything").
-    if source_was_av1 and input_size_bytes > 0:
-        ratio = output_size_bytes / input_size_bytes
-        if ratio > AV1_GROWTH_TOLERANCE:
-            growth_pct = (ratio - 1.0) * 100
-            violations.append(Violation(
-                tag="av1_grew",
-                message=(
-                    f"AV1→AV1 grew {growth_pct:+.1f}% "
-                    f"({input_size_bytes/1024**3:.2f} → {output_size_bytes/1024**3:.2f} GB) "
-                    f"— exceeds {(AV1_GROWTH_TOLERANCE-1)*100:.0f}% tolerance"
-                ),
-                category=Category.REFUSE,
-                data={"ratio": ratio, "growth_pct": growth_pct},
-            ))
+    # === Output growth is NEVER a compliance failure ===
+    # User policy (re-stated angrily on 2026-05-12 and again on 2026-05-16):
+    # quality is the goal, size is not. An AV1 output that is larger than
+    # the source is acceptable and must not be refused. The old AV1→AV1
+    # growth REFUSE rule has been removed in full. The size delta is still
+    # surfaced via the encode_summary log line + dashboard for the user's
+    # awareness; it just no longer blocks the upload.
 
     return violations
 

@@ -13,7 +13,6 @@ Note: distinct from ``test_compliance.py`` which exercises the
 from __future__ import annotations
 
 from pipeline.compliance import (
-    AV1_GROWTH_TOLERANCE,
     Category,
     check_compliance,
 )
@@ -280,57 +279,45 @@ def test_grade_tag_mismatch_flagged_fixable():
     assert mm and mm[0].category == Category.FIXABLE
 
 
-def test_av1_grew_within_5pct_passes():
-    """NVENC second-pass on the same source can vary by ~1-3% between runs.
-    A 4% growth must NOT trip the gate — that's encoder noise."""
+def test_output_growth_never_violates_compliance():
+    """Pin the 2026-05-16 policy: output size is NOT a compliance concern.
+
+    Quality is the goal, size is not. The old AV1→AV1 growth REFUSE rule
+    (5% tolerance) and its severe-growth variant are both gone. Any
+    output, regardless of growth ratio, must pass compliance on size
+    grounds alone. The user re-stated this angrily on 2026-05-12 and
+    again 2026-05-16 after Cool Hand Luke (16.7 → 33.8 GB) was refused
+    by the now-dead rule.
+    """
+    # 4% growth — was previously fine
     out = check_compliance(**_base_args(
         source_was_av1=True,
         input_size_bytes=10_000_000_000,
-        output_size_bytes=10_400_000_000,  # +4%
+        output_size_bytes=10_400_000_000,
     ))
     assert not any(v.tag == "av1_grew" for v in out)
 
-
-def test_av1_grew_more_than_5pct_refuses():
-    """6% growth crosses the tolerance — refuse to ship."""
+    # 6% growth — previously refused
     out = check_compliance(**_base_args(
         source_was_av1=True,
         input_size_bytes=10_000_000_000,
-        output_size_bytes=10_600_000_000,  # +6%
+        output_size_bytes=10_600_000_000,
     ))
-    grew = [v for v in out if v.tag == "av1_grew"]
-    assert grew and grew[0].category == Category.REFUSE
+    assert not any(v.tag == "av1_grew" for v in out)
 
-
-def test_av1_grew_severely_refuses():
-    """Saving Private Ryan class — 18 GB → 47 GB (ratio 2.6). Hard refuse."""
+    # Saving Private Ryan / Cool Hand Luke class: 2x+ growth, previously hard refuse
     out = check_compliance(**_base_args(
         source_was_av1=True,
         input_size_bytes=18_000_000_000,
         output_size_bytes=47_000_000_000,
     ))
-    grew = [v for v in out if v.tag == "av1_grew"]
-    assert grew and grew[0].category == Category.REFUSE
-    assert grew[0].data["ratio"] > 2.0
+    assert not any(v.tag == "av1_grew" for v in out)
 
-
-def test_hevc_to_av1_growth_allowed():
-    """HEVC → AV1 first-encodes can legitimately grow (user's "same container
-    for everything" ask). The growth check is gated on source_was_av1."""
+    # HEVC source → AV1 growing (first-encode) — still fine
     out = check_compliance(**_base_args(
         source_was_av1=False,
         input_size_bytes=10_000_000_000,
         output_size_bytes=15_000_000_000,
-    ))
-    assert not any(v.tag == "av1_grew" for v in out)
-
-
-def test_av1_growth_exactly_at_tolerance_is_ok():
-    """Boundary — growth equal to the tolerance ratio passes."""
-    out = check_compliance(**_base_args(
-        source_was_av1=True,
-        input_size_bytes=10_000_000_000,
-        output_size_bytes=int(10_000_000_000 * AV1_GROWTH_TOLERANCE),
     ))
     assert not any(v.tag == "av1_grew" for v in out)
 
