@@ -157,14 +157,17 @@ def check_compliance(
 
     # === Audio: language (KEEP_LANGS + original_language equivalents) ===
     from pipeline.config import KEEP_LANGS
-    from pipeline.qualify import _ISO1_EQUIV
+    from pipeline.qualify import equivalence_bucket
 
     orig_lang = ((item.get("tmdb") or {}).get("original_language") or "").lower().strip()
     allowed_audio_langs: set[str] = set(KEEP_LANGS)
-    if orig_lang in _ISO1_EQUIV:
-        allowed_audio_langs |= _ISO1_EQUIV[orig_lang]
-    elif orig_lang:
-        allowed_audio_langs.add(orig_lang)
+    if orig_lang:
+        # Use the reverse-aware lookup so TMDb's "cn" (legacy Chinese code)
+        # finds the {zh, cn, chi, zho, yue, cmn, ...} bucket and the actual
+        # MKV 'chi' tag doesn't get refused as foreign. Pre-2026-05-17 the
+        # direct lookup only knew the canonical 'zh' key and "In the Mood
+        # for Love" (TMDb returns cn) tripped foreign_audio.
+        allowed_audio_langs |= equivalence_bucket(orig_lang)
 
     foreign_audio_indices: list[int] = []
     for i, a in enumerate(out_audio):

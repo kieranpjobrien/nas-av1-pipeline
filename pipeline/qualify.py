@@ -170,6 +170,42 @@ _ISO1_EQUIV: dict[str, set[str]] = {
 }
 
 
+# Reverse lookup: given ANY code in any equivalence bucket, find the bucket.
+# Built once at module load. Lets callers handle the case where TMDb reports
+# the legacy "cn" code for Chinese instead of the canonical "zh" key (or any
+# other 639-2/3 / English-name input the canonical key dict doesn't anticipate).
+# Observed live 2026-05-17: "In the Mood for Love (2000)" had TMDb
+# original_language='cn'; compliance.check_compliance did
+# ``if 'cn' in _ISO1_EQUIV`` (False — keyed by 'zh'), fell to the
+# elif branch which added only {'cn'} to allowed_audio_langs, then refused
+# the actual 'chi'-tagged Chinese audio as foreign_audio.
+_ISO1_EQUIV_REVERSE: dict[str, set[str]] = {}
+for _canon, _eqs in _ISO1_EQUIV.items():
+    for _code in _eqs:
+        # Guard: never overwrite an existing entry (collision means two buckets
+        # share a code — should never happen with the table above, but if it
+        # ever does we want the first definition to win deterministically).
+        _ISO1_EQUIV_REVERSE.setdefault(_code, _eqs)
+
+
+def equivalence_bucket(code: str) -> set[str]:
+    """Return the equivalence bucket containing ``code``, or just {code}.
+
+    Lookup first checks the canonical-key dict, then the reverse-index built
+    from the bucket values. Callers that previously did ``_ISO1_EQUIV.get(x)``
+    should switch to this so legacy/alternate codes (TMDb's 'cn' for Chinese,
+    say) map to the right bucket regardless of which alias they happen to use.
+    """
+    code = (code or "").lower().strip()
+    if not code:
+        return set()
+    if code in _ISO1_EQUIV:
+        return _ISO1_EQUIV[code]
+    if code in _ISO1_EQUIV_REVERSE:
+        return _ISO1_EQUIV_REVERSE[code]
+    return {code}
+
+
 def _languages_equivalent(a: str, b: str) -> bool:
     """True if a and b refer to the same language under ISO 639-1/2 conventions.
 
