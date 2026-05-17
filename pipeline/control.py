@@ -133,9 +133,22 @@ class PipelineControl:
             logging.info("Resumed.")
 
     def is_fetch_paused(self) -> bool:
-        """Check if fetching specifically is paused."""
+        """Check if fetching specifically is paused.
+
+        2026-05-18 semantic change: the default ``pause_all`` (type "all")
+        UI button now ONLY blocks the GPU encode dispatch, not fetch / prep
+        / upload. Pausing exists primarily to free the GPU for gaming —
+        keeping the rest of the pipeline running means prep work, fetches
+        and uploads continue draining in the background so the moment the
+        user resumes the GPU has a queue of already-prepped files ready to
+        encode immediately rather than 5-10 minutes of cold-start prep.
+
+        Returns True only on an explicit ``"fetch_only"`` pause type. The
+        legacy ``"all"`` type now means "encode only" effectively (see
+        ``is_encode_paused`` which still treats them the same).
+        """
         pt = self._get_pause_type()
-        return pt in ("all", "fetch_only")
+        return pt == "fetch_only"
 
     def is_encode_paused(self) -> bool:
         """Check if encoding specifically is paused."""
