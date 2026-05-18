@@ -378,7 +378,27 @@ class PipelineState:
             # Single INSERT OR REPLACE — atomic, no race
             cols = ["filepath"] + list(direct.keys()) + ["extras"]
             placeholders = ", ".join(["?"] * len(cols))
-            vals = [filepath] + list(direct.values()) + [json.dumps(extras)]
+            extras_json = json.dumps(extras)
+
+            # Defense-in-depth: validate the extras JSON we're about to
+            # commit. The 2026-05-18/19 corruption incident showed
+            # arbitrary-word substitution of the JSON ``: `` separator
+            # appearing in state extras (and in 4 file-backed JSONs).
+            # File writes are now guarded; this validates the SQLite
+            # write path too. If json.dumps is somehow producing
+            # corrupt output (the smoking-gun scenario), this raises
+            # with a stack trace pointing at the caller — the corrupt
+            # bytes never reach SQLite.
+            try:
+                json.loads(extras_json)
+            except json.JSONDecodeError as je:
+                raise ValueError(
+                    f"set_file({filepath!r}): json.dumps(extras) produced "
+                    f"invalid JSON ({je}). Refusing to write corrupt extras "
+                    f"to state DB. Raw head: {extras_json[:200]!r}"
+                ) from je
+
+            vals = [filepath] + list(direct.values()) + [extras_json]
             try:
                 self._conn.execute(
                     f"INSERT OR REPLACE INTO pipeline_files ({', '.join(cols)}) VALUES ({placeholders})", vals
