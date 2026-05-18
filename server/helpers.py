@@ -108,9 +108,27 @@ def read_json_safe(path: Path) -> dict | list | None:
 
 
 def write_json_safe(path: Path, data: dict | list) -> None:
-    """Atomically write JSON data to a file via tmp-rename."""
+    """Atomically write JSON data to a file via tmp-rename.
+
+    Read-back parse guard added after the 2026-05-18 corruption incident
+    (see tools.report_lock for details): if the just-written bytes don't
+    parse, leave the destination intact and raise. Prevents the silent
+    overwrite class that wiped media_report.json + priority.json +
+    agents.registry.json + heavy_worker_state.json simultaneously.
+    """
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    try:
+        json.loads(tmp.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as e:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise OSError(
+            f"refusing to commit malformed JSON to {path.name}: read-back "
+            f"of the just-written .tmp failed to parse ({e})."
+        ) from e
     tmp.replace(path)
 
 

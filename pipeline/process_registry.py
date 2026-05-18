@@ -67,11 +67,32 @@ def _read_entries(path: Path) -> list[dict[str, Any]]:
 
 
 def _write_entries(path: Path, entries: list[dict[str, Any]]) -> None:
-    """Atomic tmp + os.replace write of the registry."""
+    """Atomic tmp + os.replace write of the registry.
+
+    Includes a read-back parse on the .tmp before os.replace — see the
+    2026-05-18 corruption incident in tools.report_lock for context.
+    If the just-written bytes don't parse, refuse to replace.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = str(path) + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(entries, f, indent=2)
+    # Defense-in-depth: read back + parse before os.replace. The 2026-05-18
+    # incident corrupted four separate JSON files (this one included) with
+    # arbitrary-word substitution of the ``: `` separator. Detect at write
+    # time so the destination never holds garbage.
+    try:
+        with open(tmp, "r", encoding="utf-8") as f:
+            json.load(f)
+    except json.JSONDecodeError as e:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise OSError(
+            f"refusing to commit malformed JSON to {path.name}: read-back "
+            f"of the just-written .tmp failed to parse ({e})."
+        ) from e
     os.replace(tmp, str(path))
 
 

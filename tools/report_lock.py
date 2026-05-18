@@ -210,6 +210,34 @@ def _atomic_write_with_backup(path: Path, report: dict) -> None:
             # fsync isn't available everywhere; not fatal
             pass
 
+    # Read-back validation (2026-05-18). The 2026-05-18 incident wrote
+    # corrupt JSON to media_report.json + priority.json + agents.registry.json
+    # + heavy_worker_state.json simultaneously — the JSON key/value separator
+    # ``: `` got replaced with arbitrary words (``utf-8``, ``frame``,
+    # ``search``). Source unconfirmed; the most plausible cause is an
+    # external editor's botched find-and-replace operation since no in-tree
+    # ``json.dump`` call has a ``separators=`` arg. Whatever the cause,
+    # the in-memory shape check at the top of this function caught nothing
+    # because the corruption only manifested AFTER the bytes hit disk.
+    #
+    # Defense-in-depth: re-open the just-written .tmp and parse it. If
+    # the parse fails, leave the destination + backup intact and raise.
+    # The caller's exception handler will surface the issue rather than
+    # silently overwriting a healthy report with garbage.
+    try:
+        with open(tmp, "r", encoding="utf-8") as f:
+            json.load(f)
+    except json.JSONDecodeError as e:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise ReportCorruptError(
+            f"refusing to commit malformed JSON to {path.name}: read-back "
+            f"of the just-written .tmp failed to parse ({e}). The destination "
+            f"and .last_good are unchanged. Investigate the writer."
+        )
+
     # Promote current → backup BEFORE replacing, only if current is valid.
     # Otherwise we'd just back up the corruption.
     if Path(path).exists():

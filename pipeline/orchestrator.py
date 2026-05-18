@@ -117,6 +117,23 @@ class Orchestrator:
             tmp = path + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
                 _json.dump(status, f, indent=2, ensure_ascii=False)
+            # Read-back validation — see tools.report_lock for the 2026-05-18
+            # corruption incident that motivated this. If the bytes on disk
+            # don't parse, drop the tmp and skip the replace; the existing
+            # destination stays intact.
+            try:
+                with open(tmp, "r", encoding="utf-8") as f:
+                    _json.load(f)
+            except _json.JSONDecodeError as je:
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+                logging.error(
+                    f"heavy_worker_state.json write produced malformed JSON "
+                    f"({je}); destination kept intact."
+                )
+                return
             os.replace(tmp, path)
         except OSError as e:
             logging.warning(f"Failed to write heavy_worker_state.json: {e}")
