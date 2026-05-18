@@ -269,10 +269,29 @@ class PipelineState:
         return self._conn
 
     def save(self):
-        """Flush stats to the database. Always writes since callers mutate the dict directly."""
+        """Flush stats to the database. Always writes since callers mutate the dict directly.
+
+        Read-back-parse validation (2026-05-19): the pipeline_stats row
+        was found corrupted with the same arbitrary-word-separator
+        substitution that hit the file-backed JSONs on 2026-05-18. The
+        corrupt row killed every finalize_upload's post-replace step
+        (``state.stats["completed"] += 1`` → JSON parse on the read →
+        ``Expecting ':' delimiter`` ). Validating the just-serialised
+        bytes parses before committing means corrupt output never
+        reaches the DB.
+        """
         with self._lock:
             if self._stats_cache is not None:
-                self._conn.execute("UPDATE pipeline_stats SET data = ? WHERE id = 1", (json.dumps(self._stats_cache),))
+                stats_json = json.dumps(self._stats_cache)
+                try:
+                    json.loads(stats_json)
+                except json.JSONDecodeError as je:
+                    raise ValueError(
+                        f"state.save(): json.dumps(stats) produced invalid "
+                        f"JSON ({je}). Refusing to corrupt pipeline_stats. "
+                        f"Raw head: {stats_json[:200]!r}"
+                    ) from je
+                self._conn.execute("UPDATE pipeline_stats SET data = ? WHERE id = 1", (stats_json,))
                 self._conn.commit()
                 self._stats_dirty = False
 

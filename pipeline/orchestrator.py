@@ -1269,8 +1269,16 @@ class Orchestrator:
             try:
                 finalize_upload(picked, self.state, self.config)
             except Exception as e:
-                logging.error(f"{tag}: finalize_upload failed for "
-                              f"{os.path.basename(picked)}: {e}")
+                # 2026-05-19: a recurring "Expecting ':' delimiter" error
+                # was killing every upload's post-replace step. The raw
+                # exception message gave nothing to act on. Log the full
+                # traceback so the next occurrence points at the actual
+                # json.loads call site.
+                import traceback as _tb
+                logging.error(
+                    f"{tag}: finalize_upload failed for "
+                    f"{os.path.basename(picked)}: {e}\n{_tb.format_exc()}"
+                )
                 self.state.stats["errors"] = self.state.stats.get("errors", 0) + 1
                 self.state.save()
             finally:
