@@ -7,6 +7,7 @@ JSON-based implementation so callers don't need to change.
 
 import json
 import logging
+import os
 import sqlite3
 import threading
 import time
@@ -497,12 +498,28 @@ class PipelineState:
             # Two-step: status reset + extras scrub. SQLite has no JSON_REMOVE
             # on the version we're targeting reliably, so do extras in Python.
             rows_to_reset = self._conn.execute(
-                f"SELECT filepath, extras FROM pipeline_files WHERE status NOT IN ({placeholders})",
+                f"SELECT filepath, status, stage, output_path, extras "
+                f"FROM pipeline_files WHERE status NOT IN ({placeholders})",
                 preserve,
             ).fetchall()
 
             count = 0
-            for fp, extras_json in rows_to_reset:
+            for fp, status, stage, output_path, extras_json in rows_to_reset:
+                # 2026-05-19 carve-out: UPLOADING rows with stage=pending_upload
+                # AND a valid output_path on disk are NOT crash residue — they're
+                # finished encodes waiting on a live upload worker that died.
+                # Resetting these to pending + clearing output_path forces a
+                # full re-encode of work we already have on disk (57 GB / 23
+                # files in the canonical case). Leave them as-is so the new
+                # upload worker picks them up on its first poll.
+                if (
+                    status == FileStatus.UPLOADING.value
+                    and stage == "pending_upload"
+                    and output_path
+                    and os.path.exists(output_path)
+                ):
+                    continue
+
                 try:
                     extras = json.loads(extras_json or "{}")
                 except (json.JSONDecodeError, TypeError):
