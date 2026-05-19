@@ -1433,43 +1433,90 @@ class Orchestrator:
         gap_filler_queue: list[dict],
         interval_secs: float,
     ) -> None:
-        """Periodically re-read media_report.json and merge new files.
+        """Periodically re-read media_report.json and priority.json.
 
-        Runs as a background thread. Polls the report's mtime every
-        ``interval_secs`` seconds; when it changes, calls
-        :meth:`_merge_new_files` to append unseen entries to the live
-        queues. Files that turn out to be already-known, terminal, or
-        in-flight are filtered out by ``categorise_entry`` + the
-        path-set check inside the merge.
+        Two independent watches on a single short poll loop:
+
+          * ``media_report.json`` — change triggers ``_merge_new_files``
+            which appends unseen entries to the live queues. Heavy:
+            re-reads the full report. Hence the slow native cadence
+            (``interval_secs``, default 1800s).
+
+          * ``control/priority.json`` — change triggers a cheap re-sort
+            of the in-memory full_gamut queue against the fresh priority
+            set. No file merge, no state DB hits. Hence safe to react
+            within seconds. Pre-2026-05-19 this only ran at startup or
+            on a media_report change, so users hitting "Prioritise
+            150 smallest" via the dashboard would have to wait for
+            the next media_report write (or restart) to see the queue
+            re-ordered. The dashboard button did the right thing on
+            disk; the running pipeline just ignored it.
+
+        Both watches share the same poll loop. The loop's wait is the
+        shorter of (interval_secs, 10s) so the priority path stays
+        responsive without us running media_report mtime checks any
+        more often than necessary.
 
         Mutations happen under ``_dispatched_lock`` so iterating workers
-        (GPU pickers, gap_filler) don't race with appends.
+        (GPU pickers, gap_filler) don't race with appends/re-sorts.
         """
-        from paths import MEDIA_REPORT
+        from paths import MEDIA_REPORT, STAGING_DIR
 
         report_path = str(MEDIA_REPORT)
-        last_mtime = 0.0
+        priority_path = os.path.join(str(STAGING_DIR), "control", "priority.json")
+
+        last_report_mtime = 0.0
         try:
-            last_mtime = os.path.getmtime(report_path)
+            last_report_mtime = os.path.getmtime(report_path)
         except OSError:
             pass
 
+        last_priority_mtime = 0.0
+        try:
+            last_priority_mtime = os.path.getmtime(priority_path)
+        except OSError:
+            pass
+
+        # Short poll for responsive priority handling; the heavy
+        # media_report merge runs at most once per ``interval_secs``.
+        poll_secs = min(10.0, interval_secs)
+        ticks_per_report_check = max(1, int(interval_secs / poll_secs))
+        tick = 0
+
         logging.info(
-            f"Queue refresh worker started (poll every {interval_secs:.0f}s, "
-            f"watching {report_path})"
+            f"Queue refresh worker started (priority poll every {poll_secs:.0f}s, "
+            f"media_report poll every {interval_secs:.0f}s)"
         )
+
         while not self._shutdown.is_set():
-            self._shutdown.wait(timeout=interval_secs)
+            self._shutdown.wait(timeout=poll_secs)
             if self._shutdown.is_set():
                 break
+            tick += 1
+
+            # --- priority.json watch (cheap, fires within seconds) ---
+            try:
+                prio_mtime = os.path.getmtime(priority_path)
+            except OSError:
+                prio_mtime = 0.0
+            if prio_mtime > last_priority_mtime:
+                last_priority_mtime = prio_mtime
+                try:
+                    self._apply_priority_resort(full_gamut_queue)
+                except Exception as e:
+                    logging.warning(f"Priority re-sort failed (non-fatal): {e}")
+
+            # --- media_report.json watch (heavy, native cadence) ---
+            if tick % ticks_per_report_check != 0:
+                continue
 
             try:
                 mtime = os.path.getmtime(report_path)
             except OSError:
                 continue
-            if mtime <= last_mtime:
+            if mtime <= last_report_mtime:
                 continue
-            last_mtime = mtime
+            last_report_mtime = mtime
 
             try:
                 added_full, added_gap = self._merge_new_files(
@@ -1485,6 +1532,44 @@ class Orchestrator:
                 logging.warning(f"Queue refresh failed (non-fatal): {e}")
 
         logging.info("Queue refresh worker finished")
+
+    def _apply_priority_resort(self, full_gamut_queue: list[dict]) -> None:
+        """Re-sort the live full_gamut queue against the current priority.json.
+
+        Called when ``control/priority.json`` mtime advances. Reads the
+        fresh priority set, sorts the in-place queue under
+        ``_dispatched_lock`` (matches the locking discipline of
+        ``_merge_new_files``), and logs the bump count so the operator
+        can see their dashboard click took effect.
+        """
+        from pipeline.__main__ import (
+            _prune_done_from_priority,
+            _read_priority_paths,
+            _sort_full_gamut,
+        )
+
+        with self._dispatched_lock:
+            pruned = _prune_done_from_priority(
+                staging_dir=self.staging_dir, state=self.state
+            )
+            if pruned:
+                logging.info(
+                    f"Priority prune (mid-run): dropped {pruned} done/flagged "
+                    f"entries from priority.json"
+                )
+            priority_paths = _read_priority_paths(staging_dir=self.staging_dir)
+            if not priority_paths:
+                logging.info("Priority re-sort: priority list is empty — no bump")
+                return
+            _sort_full_gamut(full_gamut_queue, self.config, priority_paths)
+            in_queue = sum(
+                1 for it in full_gamut_queue if it.get("filepath") in priority_paths
+            )
+            logging.info(
+                f"Priority re-sort applied: {in_queue} of {len(full_gamut_queue)} "
+                f"queued items lifted to the front (priority list has "
+                f"{len(priority_paths)} paths)"
+            )
 
     def _merge_new_files(
         self,
