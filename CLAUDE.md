@@ -122,6 +122,35 @@ as progress. Read and obey before doing anything else.
     Either coordinate via a single writer or partition the writes by
     file (one report-shard per worker class, merged offline).
 
+14. **Health questions get liveness checks, not aggregate metrics.**
+    When the user asks "how's the pipeline going", "anything to be
+    concerned about", "is it working", or any variant: ALWAYS run
+    both of these BEFORE answering, paste the raw output, and only
+    THEN form an opinion:
+      a. `tasklist` (Windows) / `ps -ef` (Linux) — is ffmpeg /
+         mkvmerge / the supervisor python process actually running
+         right now? Empty result with "in flight" rows in state =
+         DEAD.
+      b. `tail -1 F:/AV1_Staging/pipeline.log` vs `date` — is the
+         last log line within the last 2 minutes? Gap > 5 min with
+         "in flight" rows = DEAD. (The gap filler heartbeats every
+         62s; absence of those for > 2 minutes is conclusive.)
+
+    Aggregate metrics ("X done since restart") are LAGGING — they
+    prove past activity, never present. The 2026-05-19 incident: the
+    supervisor died at 10:34 silently; row counters kept saying "165
+    done", in-flight rows showed `age=460min` (7.5h stale), and I
+    answered "no concerns" anyway because I rationalised the stale
+    ages as "long 4K HDR encodes" without running either check
+    above. The user found out via the dashboard's "stale 7h 52m"
+    indicator hours later.
+
+    The rule's bite: even one row with age > 30 min in
+    processing/uploading/fetching combined with NO live encoder
+    child = the answer is "yes, something is wrong" regardless of
+    how many files completed earlier. Aggregate up-counts cannot
+    save a dead supervisor.
+
 ## Required pre-flight before running anything that touches NAS
 
 1. `ssh nas "uptime; free -m"` — confirm load < 10 and memory > 500MB
