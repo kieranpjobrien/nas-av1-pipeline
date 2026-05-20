@@ -586,6 +586,47 @@ export function FileDrawer({ path, onClose }) {
                 </div>
               )}
 
+            {/* Delete file from NAS — destructive, confirm-then-act.
+                Added 2026-05-20: drawer was view-only before, so the user
+                had no way to remove flagged_corrupt sources like
+                Miami Vice or Once Upon a Time in America without poking
+                the DB directly. Calls /api/file/delete which removes
+                the on-disk file AND prunes the media-report cache. */}
+            <div style={{ marginTop: 8, marginBottom: 16 }}>
+              <button
+                onClick={async () => {
+                  const name = media?.filename || path.split(/[\\/]/).pop();
+                  if (
+                    !window.confirm(
+                      `Permanently delete this file from NAS?\n\n${name}\n\nThis cannot be undone.`
+                    )
+                  )
+                    return;
+                  try {
+                    await api.deleteFile(path);
+                    onClose();
+                  } catch (e) {
+                    window.alert(`Delete failed: ${e?.message || e}`);
+                  }
+                }}
+                style={{
+                  width: "100%",
+                  background: "transparent",
+                  color: "var(--bad)",
+                  border: "1px solid var(--bad)",
+                  borderRadius: 6,
+                  padding: "9px 14px",
+                  fontSize: 12,
+                  fontWeight: 500,
+                  cursor: "pointer",
+                  fontFamily: "inherit",
+                  letterSpacing: "0.02em",
+                }}
+              >
+                Delete file from NAS
+              </button>
+            </div>
+
             {/* Path footer */}
             <div
               className="mono"

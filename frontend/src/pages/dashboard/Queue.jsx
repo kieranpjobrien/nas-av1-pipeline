@@ -14,20 +14,40 @@ const statusLabel = (s) => {
 
 export function Queue({ data, pipelineData, onFileOpen }) {
   const [force, setForce] = useState([]);
+  const [priorityPaths, setPriorityPaths] = useState(new Set());
   useEffect(() => {
     api.getForceList().then((r) => setForce(r.items || [])).catch(() => setForce([]));
+    // Mirror the backend's priority bump (priority.json -> paths).
+    // The pipeline sorts the queue priority-first / smallest-first within
+    // the priority bucket; this view should reflect the same order so the
+    // user sees what's actually about to run, not just biggest pending.
+    api
+      .getPriority()
+      .then((p) => setPriorityPaths(new Set((p?.paths || []).map((s) => s.toLowerCase()))))
+      .catch(() => setPriorityPaths(new Set()));
   }, []);
 
   const pipelineFiles = pipelineData?.files || {};
 
-  // Build queue from pipeline state: everything not completed/replaced/skipped, ordered by force first then by size.
+  // Rich-data lookup map: data.files is the full media-report library, not
+  // just the top-200 (topTargets). Pre-fix we looked up via topTargets which
+  // meant any pending file ranked below #200 by size showed codec="?", res="—",
+  // size=0 — that's what the user noticed at the bottom of the queue.
+  const reportByPath = new Map();
+  for (const f of data?.files || []) {
+    if (f?.filepath) reportByPath.set(f.filepath, f);
+  }
+
+  // Build queue from pipeline state: everything not completed/replaced/skipped.
+  // Sort: (1) priority paths first, smallest-first within the bucket (matches
+  // the backend's priority sort introduced 2026-05-20); (2) the rest by size desc.
   const rows = Object.entries(pipelineFiles)
     .filter(([, info]) => {
       const s = (info.status || "").toLowerCase();
       return !["completed", "done", "encoded", "replaced", "skipped"].includes(s);
     })
     .map(([path, info]) => {
-      const reportEntry = (data?.topTargets || []).find((f) => f.filepath === path);
+      const reportEntry = reportByPath.get(path);
       return {
         path,
         filename: path.split(/[\\/]/).pop(),
@@ -37,9 +57,17 @@ export function Queue({ data, pipelineData, onFileOpen }) {
         codec: info.codec || reportEntry?.codec || "?",
         res: info.res_key || reportEntry?.res || "",
         size_gb: reportEntry?.size_gb ?? 0,
+        is_priority: priorityPaths.has(path.toLowerCase()),
       };
     })
-    .sort((a, b) => (b.size_gb || 0) - (a.size_gb || 0))
+    .sort((a, b) => {
+      // Priority items first.
+      if (a.is_priority !== b.is_priority) return a.is_priority ? -1 : 1;
+      // Within priority: smallest-first (matches backend's quick-wins intent).
+      if (a.is_priority && b.is_priority) return (a.size_gb || 0) - (b.size_gb || 0);
+      // Outside priority: largest-first.
+      return (b.size_gb || 0) - (a.size_gb || 0);
+    })
     .slice(0, 50);
 
   const forcePaths = new Set((force || []).map((f) => f.filepath));
@@ -55,8 +83,9 @@ export function Queue({ data, pipelineData, onFileOpen }) {
         <div>
           <div className="page-title">Encode queue</div>
           <div className="page-sub">
-            Files currently tracked by the pipeline, highest-size first. Forced items (from the Library inspector)
-            bubble to the top of the force stack.
+            Files currently tracked by the pipeline, in encode order: priority (smallest-first) then
+            non-priority (largest-first). Forced items bubble to the top. Double-click any row to open
+            its drawer (delete, requeue, override).
           </div>
         </div>
         <div className="stamp">
@@ -105,7 +134,7 @@ export function Queue({ data, pipelineData, onFileOpen }) {
                   <span className="tag res">{f.res || "—"}</span>
                 </div>
                 <div className="num">{fmtSize(f.size_gb)}</div>
-                <div className="num">{forced ? "forced" : f.tier || "—"}</div>
+                <div className="num">{forced ? "forced" : f.is_priority ? "priority" : f.tier || "—"}</div>
                 <div className="status-cell">
                   <span className="led" style={{ background: st.led }} />
                   {st.label}
