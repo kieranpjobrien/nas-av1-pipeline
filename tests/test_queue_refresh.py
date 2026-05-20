@@ -317,8 +317,11 @@ class TestPriorityBump:
     of size; everything else stays in the configured size order."""
 
     def test_priority_paths_lifted_to_front(self):
-        """Sorted output: priority items first (size order within), then
-        the rest in size order."""
+        """Priority items ALWAYS smallest-first (2026-05-20 fix). Users
+        prioritise small files for the burst-of-quick-wins effect; pre-
+        fix the bucket honoured the global encode_queue_order which was
+        largest_first by default, so "150 smallest" delivered the
+        biggest of the small set first."""
         from pipeline.__main__ import _sort_full_gamut
 
         queue = [
@@ -328,9 +331,9 @@ class TestPriorityBump:
             {"filepath": "D", "file_size_bytes": 2_000_000_000},  # priority
         ]
         _sort_full_gamut(queue, {"encode_queue_order": "largest_first"}, {"B", "D"})
-        assert [it["filepath"] for it in queue] == ["D", "B", "C", "A"], (
-            "expected priority items first (D=2GB then B=1GB largest-first within priority), "
-            "then non-priority by size (C=10GB then A=5GB)"
+        assert [it["filepath"] for it in queue] == ["B", "D", "C", "A"], (
+            "priority smallest-first: B(1GB) before D(2GB); non-priority largest-first: "
+            "C(10GB) before A(5GB)"
         )
 
     def test_no_priority_paths_falls_back_to_size_only(self):

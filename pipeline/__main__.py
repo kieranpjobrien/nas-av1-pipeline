@@ -321,24 +321,30 @@ def _sort_full_gamut(queue: list, config: dict, priority_paths: set[str]) -> Non
     """In-place sort of the full_gamut queue.
 
     Order:
-      1. Priority paths (per ``control/priority.json -> paths``), among
-         themselves sorted by size in the configured direction.
-      2. Everything else, sorted by size in the configured direction.
-
-    Largest-first is the default (the user's 2026-05-02 ask) so big
-    files burn down the ETA first; smallest_first config override
-    is preserved for the legacy burn-through-quick-wins use case.
+      1. Priority paths (per ``control/priority.json -> paths``) ALWAYS
+         smallest-first within the bucket. Users prioritise small files
+         to get a burst of quick wins ("150 smallest HEVC/H264"), not
+         to wait through the biggest of the small set first. Pre-2026-
+         05-20 the priority bucket honoured the global encode_queue_order
+         which was largest_first by default — so prioritising "150
+         smallest" delivered the largest of those 150 first. That's
+         the opposite of intent.
+      2. Everything else, sorted by size in the configured direction
+         (``encode_queue_order``, default ``largest_first`` so big
+         files burn down the ETA first).
     """
     order = (config.get("encode_queue_order") or "largest_first").lower()
-    largest_first = order == "largest_first"
+    largest_first_default = order == "largest_first"
 
     def _key(item: dict) -> tuple:
         is_priority = 0 if item.get("filepath") in priority_paths else 1
         size = item.get("file_size_bytes", 0)
-        # Sort by (priority_rank ASC, size in configured direction).
-        # Negate size for largest-first so the natural ascending tuple
-        # sort puts bigger files first within each priority class.
-        return (is_priority, -size if largest_first else size)
+        # Within the priority bucket: always smallest-first (positive
+        # size for natural ascending sort). Outside the bucket: honour
+        # the global config.
+        if is_priority == 0:
+            return (is_priority, size)
+        return (is_priority, -size if largest_first_default else size)
 
     queue.sort(key=_key)
 
