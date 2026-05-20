@@ -51,6 +51,64 @@ def _update_state_filepath(db: str, old_path: str, new_path: str) -> None:
         pass
 
 
+def _update_priority_paths(rename_map: dict[str, str]) -> int:
+    """Rewrite any old paths in ``control/priority.json`` to their new
+    paths. Returns the number of entries updated.
+
+    Pre-2026-05-21 this step didn't exist — bulk_rename_clean updated
+    state DB + media_report, but priority.json kept the old paths. The
+    operator's "encode these first" list became a 45% orphan-rate
+    graveyard pointing at files that no longer existed at those names.
+    The pipeline's priority bump silently matched nothing and the
+    operator's intent was lost.
+
+    Read-back-parse guard on the write matches the pattern from
+    tools.report_lock (commit 14c7a29).
+    """
+    from paths import STAGING_DIR
+
+    prio_path = Path(STAGING_DIR) / "control" / "priority.json"
+    if not prio_path.exists():
+        return 0
+    try:
+        prio = json.loads(prio_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return 0  # caller's rename succeeded — priority drift is non-fatal
+
+    updated = 0
+
+    def _remap(seq: list) -> list:
+        nonlocal updated
+        out = []
+        for fp in seq or []:
+            new = rename_map.get(fp)
+            if new is not None:
+                out.append(new)
+                updated += 1
+            else:
+                out.append(fp)
+        return out
+
+    prio["paths"] = _remap(prio.get("paths") or [])
+    prio["force"] = _remap(prio.get("force") or [])
+    if updated == 0:
+        return 0
+
+    payload = json.dumps(prio, indent=2, ensure_ascii=False)
+    try:
+        json.loads(payload)  # read-back-parse guard
+    except json.JSONDecodeError:
+        return 0
+    tmp = str(prio_path) + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(payload)
+        os.replace(tmp, str(prio_path))
+    except OSError:
+        return 0
+    return updated
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--apply", action="store_true", help="Actually rename (default: dry-run)")
@@ -96,6 +154,7 @@ def main() -> int:
 
     renamed = 0
     failed = 0
+    rename_map: dict[str, str] = {}
     for old, new, entry in candidates:
         try:
             os.rename(old, new)
@@ -108,6 +167,7 @@ def main() -> int:
         entry["filename"] = os.path.basename(new)
         # Update state DB row if it exists
         _update_state_filepath(str(PIPELINE_STATE_DB), old, new)
+        rename_map[old] = new
         renamed += 1
         if renamed % 25 == 0:
             print(f"  Progress: {renamed}/{len(candidates)}")
@@ -118,9 +178,15 @@ def main() -> int:
         tmp.write_text(json.dumps(rep, indent=2, ensure_ascii=False), encoding="utf-8")
         os.replace(tmp, rep_path)
 
+    # Update priority.json to match the rename. Pre-2026-05-21 this was
+    # missed and the operator's "encode these first" list drifted into
+    # 45% orphan paths after the bulk-rename run.
+    prio_updated = _update_priority_paths(rename_map) if rename_map else 0
+
     print(f"\n=== Summary ===")
     print(f"  Renamed: {renamed}")
     print(f"  Failed:  {failed}")
+    print(f"  priority.json entries remapped: {prio_updated}")
     return 0 if failed == 0 else 1
 
 

@@ -595,6 +595,81 @@ def check_report_db_consistency(
 # --------------------------------------------------------------------------
 
 
+def check_priority_paths_resolvable(
+    report: Optional[dict] = None,
+    prio_path: Optional[Path] = None,
+) -> InvariantResult:
+    """Every path in ``control/priority.json`` must appear in
+    ``media_report.json`` AND exist on disk.
+
+    Why: priority.json is the operator's "encode these first" list.
+    If its paths don't resolve in the report, the pipeline's priority
+    bump silently matches nothing and the operator's intent is lost.
+
+    The 2026-05-21 incident: a previous bulk_rename_clean run renamed
+    Show-dash-SXXEYY-Title files to Show SXXEYY Title, and a Sonarr
+    swap turned several .mp4 files into .mkv. Both operations
+    correctly updated media_report.json + state DB, but NOT
+    priority.json. 144 of 323 priority entries became orphan paths
+    pointing at files that no longer existed. The pipeline kept
+    bumping non-priority items because no priority path matched any
+    queued entry.
+
+    Remediation tooling: ``python -m tools.resolve_priority_paths``
+    re-resolves stale priority paths via the same series-rename /
+    ext-swap heuristics and writes priority.json back atomically.
+    Run it when this invariant fires.
+    """
+    name = "priority_paths_resolvable"
+    severity: Severity = "MEDIUM"
+
+    if prio_path is None:
+        prio_path = Path(STAGING_DIR) / "control" / "priority.json"
+    if not prio_path.exists():
+        return InvariantResult(name, severity, True, "priority.json not present")
+
+    try:
+        with open(prio_path, encoding="utf-8") as f:
+            prio = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        return InvariantResult(
+            name, severity, False, f"priority.json unreadable: {e}",
+        )
+
+    paths_list = (prio.get("paths") or []) + (prio.get("force") or [])
+    if not paths_list:
+        return InvariantResult(name, severity, True, "priority.json empty")
+
+    if report is None:
+        report = _load_media_report()
+    if report is None:
+        return InvariantResult(
+            name, severity, True, "media_report.json not present - skipped",
+        )
+
+    report_paths = {e.get("filepath") for e in (report.get("files") or [])}
+    unresolved = [
+        p for p in paths_list
+        if p not in report_paths or not os.path.exists(p)
+    ]
+    passed = not unresolved
+    msg = (
+        f"all {len(paths_list)} priority paths resolve in media_report + disk"
+        if passed
+        else f"{len(unresolved)}/{len(paths_list)} priority paths unresolvable "
+             f"(rename / ext-swap / removed). Run "
+             f"`python -m tools.resolve_priority_paths --apply` to repair."
+    )
+    return InvariantResult(
+        name,
+        severity,
+        passed,
+        msg,
+        violations=unresolved[:50],
+        details={"total": len(paths_list), "unresolved": len(unresolved)},
+    )
+
+
 def check_report_file_exists_on_disk(
     report: Optional[dict] = None, sample_size: int = 100
 ) -> InvariantResult:
@@ -1037,6 +1112,7 @@ def _invariant_runners(skip_ssh: bool) -> list[Callable[[], InvariantResult]]:
         check_no_ghost_python_processes,
         check_report_db_consistency,
         check_report_file_exists_on_disk,
+        check_priority_paths_resolvable,
         check_no_banned_ffmpeg_flags_in_log,
         check_heavy_worker_running,
         check_media_report_not_collapsed,
