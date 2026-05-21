@@ -104,6 +104,7 @@ def categorise_entry(
     config: dict,
     state: PipelineState,
     control: PipelineControl,
+    priority_paths: set[str] | None = None,
 ) -> tuple[str, dict | None]:
     """Decide which queue (if any) a media-report entry belongs to.
 
@@ -207,6 +208,20 @@ def categorise_entry(
         return ("skip", None)
 
     if codec_raw == "av1":
+        # Priority override (2026-05-22). If the operator has put this
+        # filepath on control/priority.json, treat it as force_reencode
+        # regardless of audit data. Operator intent is the highest
+        # signal — without this override, AV1 files with no audit blob
+        # (e.g. recent Sonarr drops the scanner hasn't audited yet) get
+        # silently skipped even when prioritised. The bite that surfaced
+        # this: 139 of 187 priority paths fell through to skip because
+        # categorise_entry didn't see the priority list. The
+        # priority-resort then had only ~4 items to lift to the front
+        # and the GPU worker moved on to non-priority files while the
+        # priority bucket was effectively empty in-queue.
+        if priority_paths and filepath in priority_paths:
+            return ("full_gamut", _build_full_gamut_item(entry))
+
         # CQ adherence check (2026-05-21). Policy: an AV1 file whose
         # current_cq disagrees with target_cq is NOT compliant — it's
         # off-spec for the current grade rule and must be re-encoded.
@@ -380,19 +395,23 @@ def build_queues(report_path: str, config: dict, state: PipelineState, control: 
     full_gamut_queue = []
     gap_filler_queue = []
 
-    for entry in report.get("files", []):
-        category, item = categorise_entry(entry, config, state, control)
-        if category == "full_gamut":
-            full_gamut_queue.append(item)
-        elif category == "gap_filler":
-            gap_filler_queue.append(item)
-
-    # Drop terminal-status entries from priority.json so the list is a
-    # live view of "still to do", not a ledger of every add ever made.
+    # Read priority paths BEFORE categorisation so categorise_entry can
+    # honour the operator's "encode these first" override (priority list
+    # wins over the AV1-no-audit silent skip). Pre-2026-05-22 the priority
+    # paths were read AFTER the categorisation loop, only for sort — which
+    # meant 139 of 187 priority paths got skipped at categorise time and
+    # never reached the queue to be sorted.
     pruned = _prune_done_from_priority(state=state)
     if pruned:
         logging.info(f"Priority prune: dropped {pruned} done/flagged entries from priority.json")
     priority_paths = _read_priority_paths()
+
+    for entry in report.get("files", []):
+        category, item = categorise_entry(entry, config, state, control, priority_paths=priority_paths)
+        if category == "full_gamut":
+            full_gamut_queue.append(item)
+        elif category == "gap_filler":
+            gap_filler_queue.append(item)
     _sort_full_gamut(full_gamut_queue, config, priority_paths)
     if priority_paths:
         n_prio = sum(1 for it in full_gamut_queue if it.get("filepath") in priority_paths)

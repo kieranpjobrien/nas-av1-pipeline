@@ -134,3 +134,57 @@ def test_av1_partial_audit_blob_does_not_force_reencode(tmp_path):
         assert category == "skip", (
             f"partial audit ({cur}, {tgt}) must skip; got {category!r}"
         )
+
+
+def test_av1_on_priority_list_routes_to_full_gamut_even_without_audit(tmp_path):
+    """The 2026-05-22 bite: a recent Sonarr AV1 drop on priority.json
+    with no audit data fell through to skip. categorise_entry didn't
+    see the priority list, so operator intent was silently lost.
+    Pass priority_paths and the override fires before any compliance
+    check."""
+    state = _state(tmp_path)
+    control = _control(tmp_path)
+    fp = r"\\NAS\Series\Recent Drop\Recent Drop S01E01.mkv"
+
+    entry = _av1_entry(fp, current_cq=30, target_cq=30, bucket="optimal")
+    entry.pop("audit", None)  # No audit data — the very class that 'silently skipped'.
+    # Without priority_paths: skip (matches the no-audit baseline test).
+    cat_no_prio, _ = categorise_entry(entry, {}, state, control)
+    assert cat_no_prio == "skip"
+    # With priority_paths containing this fp: full_gamut, regardless of audit.
+    cat_prio, item = categorise_entry(
+        entry, {}, state, control, priority_paths={fp}
+    )
+    assert cat_prio == "full_gamut"
+    assert item is not None
+
+
+def test_av1_on_priority_list_routes_to_full_gamut_even_when_optimal(tmp_path):
+    """Even an optimal AV1 file gets re-encoded if the operator put it
+    on priority.json. Their intent is the highest signal — quality-
+    optimal means the file would skip otherwise."""
+    state = _state(tmp_path)
+    control = _control(tmp_path)
+    fp = r"\\NAS\Movies\AlreadyOptimal\AlreadyOptimal.mkv"
+
+    entry = _av1_entry(fp, current_cq=30, target_cq=30, bucket="optimal")
+    cat_no_prio, _ = categorise_entry(entry, {}, state, control)
+    assert cat_no_prio == "skip"
+    cat_prio, _ = categorise_entry(
+        entry, {}, state, control, priority_paths={fp}
+    )
+    assert cat_prio == "full_gamut"
+
+
+def test_av1_priority_paths_none_uses_default_categorisation(tmp_path):
+    """Backward-compat: callers that don't pass priority_paths get the
+    same behaviour they always did. Required because every existing
+    test (test_queue_refresh, test_flagged_auto_reset_on_refresh, etc.)
+    calls categorise_entry positional without the new kwarg."""
+    state = _state(tmp_path)
+    control = _control(tmp_path)
+    fp = r"\\NAS\Movies\Default\Default.mkv"
+
+    entry = _av1_entry(fp, current_cq=30, target_cq=30, bucket="optimal")
+    cat, _ = categorise_entry(entry, {}, state, control)
+    assert cat == "skip", "default categorisation unchanged when priority_paths is None"

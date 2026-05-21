@@ -1658,6 +1658,15 @@ class Orchestrator:
             known_full = {item.get("filepath") for item in full_gamut_queue}
             known_gap = {item.get("filepath") for item in gap_filler_queue}
 
+        # Read priority paths BEFORE the categorisation loop so
+        # categorise_entry can honour the priority override for AV1
+        # files with no audit data (see categorise_entry docstring +
+        # 2026-05-22 incident). Without this, recent AV1 drops on
+        # priority.json silently fall to "skip" because the qualifier
+        # sees no gaps.
+        from pipeline.__main__ import _read_priority_paths as _rpp_for_categ
+        priority_paths_for_categ = _rpp_for_categ(staging_dir=self.staging_dir)
+
         new_full: list[dict] = []
         new_gap: list[dict] = []
         for entry in report.get("files", []) or []:
@@ -1666,7 +1675,10 @@ class Orchestrator:
                 continue
             if fp in known_full or fp in known_gap:
                 continue
-            category, item = categorise_entry(entry, self.config, self.state, self.control)
+            category, item = categorise_entry(
+                entry, self.config, self.state, self.control,
+                priority_paths=priority_paths_for_categ,
+            )
             if category == "full_gamut":
                 new_full.append(item)
             elif category == "gap_filler":
