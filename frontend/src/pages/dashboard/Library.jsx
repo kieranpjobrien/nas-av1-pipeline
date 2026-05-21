@@ -172,6 +172,18 @@ export function Library({ data, pipelineData, onFileOpen, drillKey, onClearDrill
     foreignSubs: false,
     status: null, // null | "needs_encode" | "errored"
     library: null, // null | "movie" | "series"
+    // Hide rows whose pipeline state DB row is `done`. Useful in the
+    // common "I selected AV1 and want to see what's actually left to
+    // act on" case — most AV1 rows are already DONE in state, and the
+    // user doesn't want them cluttering the list. Default OFF so a
+    // user opening Library fresh still sees the full picture.
+    // ('done' here means the pipeline marked it complete under the
+    // current compliance rules. It does NOT mean current_cq matches
+    // target_cq exactly — many older Bluey-class AV1 encodes are at
+    // CQ 30 with current target 37 but stay DONE because compliance
+    // gates on audio/subs/codec, not on CQ. Use the Grade-Optimised
+    // drill from Glance to see CQ-vs-target detail.)
+    hideDone: false,
   });
   // Subsequent drillKey changes (user navigates Glance again without
   // unmounting Library) update the filter rather than re-seeding from
@@ -343,6 +355,13 @@ export function Library({ data, pipelineData, onFileOpen, drillKey, onClearDrill
       }
       if (filters.status === "errored") {
         if (!statusIsErrored(pipelineFiles[f.filepath])) return false;
+      }
+      if (filters.hideDone) {
+        const st = (pipelineFiles[f.filepath]?.status || "").toLowerCase();
+        // 'replaced' is the alternate terminal status used after the
+        // original gets atomically swapped post-encode — same shoulder
+        // as 'done' from the user's perspective.
+        if (st === "done" || st === "replaced") return false;
       }
       if (filters.library) {
         const lib = (f.library || libraryOf(f.filepath) || "").toLowerCase();
@@ -763,6 +782,13 @@ export function Library({ data, pipelineData, onFileOpen, drillKey, onClearDrill
             onClick={() => setStatus("errored")}
           >
             Errored <span className="c">{data.errorCount || 0}</span>
+          </button>
+          <button
+            className={`chip ${filters.hideDone ? "on" : ""}`}
+            onClick={() => toggleBool("hideDone")}
+            title="Hide rows whose pipeline state is DONE or REPLACED — useful when narrowing to what's left to act on. Note: DONE means the pipeline considers the file compliant; an older AV1 encode at CQ 30 with current target 37 still counts as DONE because compliance doesn't gate on CQ."
+          >
+            Hide done
           </button>
         </div>
       </div>
