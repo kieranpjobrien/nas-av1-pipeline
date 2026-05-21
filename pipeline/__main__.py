@@ -99,6 +99,41 @@ def _build_full_gamut_item(entry: dict) -> dict:
     }
 
 
+def _stamp_force_reencode(
+    state: PipelineState,
+    filepath: str,
+    existing: dict | None,
+    *,
+    reason: str,
+) -> None:
+    """Set ``force_reencode=true`` on the state row so the AV1-source
+    guard in ``full_gamut`` lets the encode proceed.
+
+    Preserves any existing non-terminal status (PENDING / QUEUED /
+    QUALIFYING). Creates a fresh PENDING row when there isn't one.
+    Called from the AV1 branches of ``categorise_entry`` when routing
+    to full_gamut — without this stamp the file gets silently DONE'd by
+    the guard at full_gamut.py:689. (2026-05-22 incident: 183 priority
+    AV1 paths got silently DONE'd before this stamp was added.)
+    """
+    # Pick a sane non-terminal status. Existing rows here are guaranteed
+    # non-terminal (terminal-skip ran above) so just reuse whatever it
+    # had, otherwise PENDING.
+    if existing and existing.get("status"):
+        try:
+            status_to_use = FileStatus(existing["status"])
+        except ValueError:
+            status_to_use = FileStatus.PENDING
+    else:
+        status_to_use = FileStatus.PENDING
+    state.set_file(
+        filepath,
+        status_to_use,
+        force_reencode=True,
+        reason=f"force_reencode set by categorise_entry: {reason}",
+    )
+
+
 def categorise_entry(
     entry: dict,
     config: dict,
@@ -219,7 +254,19 @@ def categorise_entry(
         # priority-resort then had only ~4 items to lift to the front
         # and the GPU worker moved on to non-priority files while the
         # priority bucket was effectively empty in-queue.
+        #
+        # IMPORTANT: routing to full_gamut alone is not enough. full_gamut
+        # has an AV1-source guard (full_gamut.py:689) that refuses to
+        # re-encode AV1 unless force_reencode=true is stamped on the
+        # state row. The 2026-05-22 09:15 follow-up bite: 183 priority
+        # AV1 paths got routed to full_gamut, hit the guard, marked DONE
+        # as "av1 source preserved (no force_reencode flag)" without any
+        # actual encode. We MUST stamp force_reencode here so the guard
+        # lets the encode through.
         if priority_paths and filepath in priority_paths:
+            if not (existing and existing.get("force_reencode")):
+                _stamp_force_reencode(state, filepath, existing,
+                                      reason="priority.json membership")
             return ("full_gamut", _build_full_gamut_item(entry))
 
         # CQ adherence check (2026-05-21). Policy: an AV1 file whose
@@ -242,6 +289,14 @@ def categorise_entry(
         cur_cq = audit.get("current_cq")
         tgt_cq = audit.get("target_cq")
         if cur_cq is not None and tgt_cq is not None and cur_cq != tgt_cq:
+            # Same AV1-source-guard story as the priority branch above —
+            # routing to full_gamut without force_reencode causes the
+            # full_gamut.py:689 guard to mark this DONE as "av1 source
+            # preserved" without encoding. Stamp the flag so the encode
+            # actually runs.
+            if not (existing and existing.get("force_reencode")):
+                _stamp_force_reencode(state, filepath, existing,
+                                      reason=f"cq off-target ({cur_cq} vs {tgt_cq})")
             return ("full_gamut", _build_full_gamut_item(entry))
         # User-initiated force re-encode wins over the codec check.
         # Without this an already-AV1 file at the wrong CQ can never be

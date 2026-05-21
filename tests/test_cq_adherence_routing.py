@@ -188,3 +188,45 @@ def test_av1_priority_paths_none_uses_default_categorisation(tmp_path):
     entry = _av1_entry(fp, current_cq=30, target_cq=30, bucket="optimal")
     cat, _ = categorise_entry(entry, {}, state, control)
     assert cat == "skip", "default categorisation unchanged when priority_paths is None"
+
+
+def test_priority_av1_stamps_force_reencode(tmp_path):
+    """The 09:15 follow-up bite: routing a priority AV1 file to full_gamut
+    isn't enough — full_gamut.py:689 has an AV1-source guard that marks
+    DONE 'av1 source preserved' unless force_reencode=true is on the
+    state row. categorise_entry MUST stamp the flag when routing AV1 to
+    full_gamut via the priority override (or via CQ-adherence). 183
+    priority paths got silently DONE'd before this stamp was added."""
+    state = _state(tmp_path)
+    control = _control(tmp_path)
+    fp = r"\\NAS\Series\Bluey\Season 1\Bluey S01E11 Bike.mkv"
+
+    entry = _av1_entry(fp, current_cq=30, target_cq=30, bucket="optimal")
+    entry.pop("audit", None)
+    categorise_entry(entry, {}, state, control, priority_paths={fp})
+
+    row = state.get_file(fp)
+    assert row is not None, "state row should exist after priority override stamps it"
+    assert row.get("force_reencode") is True, (
+        "priority override must stamp force_reencode=true so the AV1-source "
+        "guard in full_gamut lets the encode proceed"
+    )
+
+
+def test_cq_off_target_av1_stamps_force_reencode(tmp_path):
+    """Same bite as priority but for the CQ-adherence routing path —
+    AV1 with cur != tgt also needs force_reencode stamped, otherwise
+    the full_gamut AV1 guard short-circuits to silent DONE."""
+    state = _state(tmp_path)
+    control = _control(tmp_path)
+    fp = r"\\NAS\Series\Bluey\Season 1\Bluey S01E10 Hotel.mkv"
+
+    entry = _av1_entry(fp, current_cq=30, target_cq=37, bucket="inferred_uncertain")
+    categorise_entry(entry, {}, state, control)
+
+    row = state.get_file(fp)
+    assert row is not None
+    assert row.get("force_reencode") is True, (
+        "CQ-adherence routing must stamp force_reencode=true; otherwise the "
+        "full_gamut AV1 guard silently marks DONE before the encode runs"
+    )
