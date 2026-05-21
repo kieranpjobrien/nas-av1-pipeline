@@ -7,6 +7,7 @@ import {
   fmtPct,
   fmtSize,
   prettyTitle,
+  resKey,
 } from "./helpers";
 
 function fmtAge(ms) {
@@ -1096,10 +1097,14 @@ export function Glance({ data, pipelineData, throughputPerDay, workersActive, wo
               .slice(0, 4)
               .map(([k, n]) => {
                 // Map Glance resolution label to Library filter key.
-                // "480p" isn't a Library filter chip — leave it non-clickable.
-                const resKey = String(k).toLowerCase();
-                const resFilterKey = { "4k": "4k", "1080p": "1080p", "720p": "720p" }[resKey];
-                const clickable = resFilterKey && !!onDrillTo && n > 0;
+                // Uses the canonical resKey() bucketiser from helpers.js so
+                // any raw value the scanner emits ("2160p", "UHD", "1920x1080",
+                // etc.) maps to the same bucket as the Library chip filter.
+                // Non-bucketable values ("?", "Unknown") fall through to
+                // resFilterKey === "?" and stay non-clickable.
+                const resFilterKey = resKey(String(k));
+                const knownBuckets = new Set(["4k", "1080p", "720p", "480p"]);
+                const clickable = knownBuckets.has(resFilterKey) && !!onDrillTo && n > 0;
                 return (
                   <div
                     key={k}

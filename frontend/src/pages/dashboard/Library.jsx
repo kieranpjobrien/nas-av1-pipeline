@@ -149,6 +149,7 @@ const RES_DRILL_LABEL = {
   "res:4k":    "4K resolution",
   "res:1080p": "1080p resolution",
   "res:720p":  "720p resolution",
+  "res:480p":  "480p resolution",
 };
 function parseCodecResDrill(key) {
   if (!key) return null;
@@ -738,7 +739,7 @@ export function Library({ data, pipelineData, onFileOpen, drillKey, onClearDrill
         </div>
         <div className="facet-group">
           <span className="lbl">Resolution</span>
-          {["4k", "1080p", "720p"].map((r) => (
+          {["4k", "1080p", "720p", "480p"].map((r) => (
             <button
               key={r}
               className={`chip ${filters.res === r ? "on" : ""}`}
