@@ -207,6 +207,27 @@ def categorise_entry(
         return ("skip", None)
 
     if codec_raw == "av1":
+        # CQ adherence check (2026-05-21). Policy: an AV1 file whose
+        # current_cq disagrees with target_cq is NOT compliant — it's
+        # off-spec for the current grade rule and must be re-encoded.
+        # Pre-fix, qualify gated compliance on codec + audio config
+        # only, so a Bluey episode encoded at CQ 30 under the older
+        # policy stayed DONE forever even though tv_animation grade
+        # now targets CQ 37. Operator's stated rule: "if they're too
+        # low then they're not done — that needs to be stopped."
+        # Note this routes BOTH too_low (cur<tgt, higher quality than
+        # target → re-encode shrinks) AND too_high (cur>tgt, lower
+        # quality → re-encode improves), since the rule is parity
+        # with target, not a direction.
+        # Audit blob is populated by the scanner from MKV CQ tag, or
+        # bitrate-inferred when no tag. inferred_uncertain rows are
+        # still actioned — re-encoding will produce a confidently-
+        # tagged file that becomes 'optimal' on the next audit pass.
+        audit = entry.get("audit") or {}
+        cur_cq = audit.get("current_cq")
+        tgt_cq = audit.get("target_cq")
+        if cur_cq is not None and tgt_cq is not None and cur_cq != tgt_cq:
+            return ("full_gamut", _build_full_gamut_item(entry))
         # User-initiated force re-encode wins over the codec check.
         # Without this an already-AV1 file at the wrong CQ can never be
         # re-encoded — the queue builder would route it to gap_filler

@@ -446,16 +446,33 @@ def _prepare_for_encode_locked(
                             f"proceeding with re-encode (CQ downgrade): {filename}"
                         )
                     else:
-                        logging.info(f"  prep: already compliant: {filename}")
-                        state.set_file(
-                            filepath,
-                            FileStatus.DONE,
-                            mode="full_gamut",
-                            reason="already compliant",
-                            force_reencode=False,
-                        )
-                        _cleanup(local_path, None, None)
-                        return None
+                        # CQ adherence check (2026-05-21). Mirror of the
+                        # categorise_entry guard. qualify only sees
+                        # codec+audio+subs; this second check on cur vs
+                        # tgt makes sure the prep stage doesn't mark an
+                        # off-target AV1 file DONE just because qualify
+                        # was happy. Operator policy: cur != tgt is not
+                        # compliant, regardless of how the cur was
+                        # derived (tag or bitrate-inferred).
+                        _audit = (item or {}).get("audit") or {}
+                        _cur = _audit.get("current_cq")
+                        _tgt = _audit.get("target_cq")
+                        if _cur is not None and _tgt is not None and _cur != _tgt:
+                            logging.info(
+                                f"  prep: qualify=already_compliant but cq off-target "
+                                f"(cur={_cur} tgt={_tgt}) → proceeding with re-encode: {filename}"
+                            )
+                        else:
+                            logging.info(f"  prep: already compliant: {filename}")
+                            state.set_file(
+                                filepath,
+                                FileStatus.DONE,
+                                mode="full_gamut",
+                                reason="already compliant",
+                                force_reencode=False,
+                            )
+                            _cleanup(local_path, None, None)
+                            return None
             except Exception as e:
                 logging.warning(f"  prep: qualify pre-check failed (non-fatal): {e}")
 
@@ -852,16 +869,28 @@ def full_gamut(
                             f"proceeding with re-encode (CQ downgrade): {filename}"
                         )
                     else:
-                        logging.info(f"  Already compliant: {filename}")
-                        state.set_file(
-                            filepath,
-                            FileStatus.DONE,
-                            mode="full_gamut",
-                            reason="already compliant",
-                            force_reencode=False,
-                        )
-                        _cleanup(local_path, None, None)
-                        return True
+                        # CQ adherence check (2026-05-21). Mirror of the
+                        # prep-stage guard. See prepare_for_encode for the
+                        # rationale: cur != tgt means off-target → re-encode.
+                        _audit = (item or {}).get("audit") or {}
+                        _cur = _audit.get("current_cq")
+                        _tgt = _audit.get("target_cq")
+                        if _cur is not None and _tgt is not None and _cur != _tgt:
+                            logging.info(
+                                f"  qualify=already_compliant but cq off-target "
+                                f"(cur={_cur} tgt={_tgt}) → proceeding with re-encode: {filename}"
+                            )
+                        else:
+                            logging.info(f"  Already compliant: {filename}")
+                            state.set_file(
+                                filepath,
+                                FileStatus.DONE,
+                                mode="full_gamut",
+                                reason="already compliant",
+                                force_reencode=False,
+                            )
+                            _cleanup(local_path, None, None)
+                            return True
                 # QUALIFIED: continue with the existing encode flow. The keep
                 # indices are computed inside build_ffmpeg_cmd from item's stream
                 # lists, which reflect the language detection above.
