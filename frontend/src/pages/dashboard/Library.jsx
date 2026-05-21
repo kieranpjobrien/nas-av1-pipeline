@@ -140,9 +140,10 @@ const drillLabel = {
 // compliance failures — Library treats them by populating filters.codec
 // / filters.res rather than running a drillFailures predicate.
 const CODEC_DRILL_LABEL = {
-  "codec:av1":  "AV1 video",
-  "codec:hevc": "HEVC video",
-  "codec:h264": "H.264 video",
+  "codec:av1":   "AV1 video",
+  "codec:hevc":  "HEVC video",
+  "codec:h264":  "H.264 video",
+  "codec:other": "Other video (MPEG-2 / VC-1 / VP9 / legacy)",
 };
 const RES_DRILL_LABEL = {
   "res:4k":    "4K resolution",
@@ -721,13 +722,17 @@ export function Library({ data, pipelineData, onFileOpen, drillKey, onClearDrill
         </div>
         <div className="facet-group">
           <span className="lbl">Codec</span>
-          {["av1", "hevc", "h264"].map((c) => (
+          {["av1", "hevc", "h264", "other"].map((c) => (
             <button
               key={c}
               className={`chip ${filters.codec === c ? "on" : ""}`}
               onClick={() => toggle("codec", c)}
+              title={c === "other"
+                ? "Anything not AV1/HEVC/H.264 — typically MPEG-2, VC-1, VP9, or legacy codecs that the policy says should re-encode."
+                : undefined}
             >
-              {c.toUpperCase()} <span className="c">{fmtNum(codecCount(data.codecs, c))}</span>
+              {c === "other" ? "Other" : c.toUpperCase()}{" "}
+              <span className="c">{fmtNum(codecCount(data.codecs, c))}</span>
             </button>
           ))}
         </div>

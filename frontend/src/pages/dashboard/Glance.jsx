@@ -1044,12 +1044,15 @@ export function Glance({ data, pipelineData, throughputPerDay, workersActive, wo
           </h3>
           <div>
             {segs.map((seg) => {
-              // Map Glance codec label to Library filter key.
-              // "Other" isn't a Library filter — leave it non-clickable.
+              // Map Glance codec label to Library filter key. "Other" is a
+              // real Library filter (catches anything codecKey() returns
+              // 'other' for — MPEG-2, VC-1, VP9, etc.) so it drills the
+              // same way as the named codecs.
               const codecFilterKey = {
                 "AV1": "av1",
                 "HEVC": "hevc",
                 "H.264": "h264",
+                "Other": "other",
               }[seg.k];
               const clickable = codecFilterKey && !!onDrillTo && seg.n > 0;
               return (
