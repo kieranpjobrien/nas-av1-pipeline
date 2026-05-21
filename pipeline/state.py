@@ -411,10 +411,56 @@ class PipelineState:
             try:
                 json.loads(extras_json)
             except json.JSONDecodeError as je:
+                # Capture the smoking gun. Across 4 recurrences (utf-8,
+                # frame, search, status) we've never caught WHY json.dumps
+                # produces corrupt output. The hypotheses are:
+                #   (a) someone monkey-patched JSONEncoder.key_separator
+                #       at class level — would affect all dumps calls.
+                #   (b) memory corruption on this box (BSOD history).
+                #   (c) a thread mutating the dict mid-dumps.
+                # Capture enough state here to discriminate next time.
+                import json.encoder as _je
+                cls_keysep = getattr(_je.JSONEncoder, "key_separator", "<missing>")
+                cls_itemsep = getattr(_je.JSONEncoder, "item_separator", "<missing>")
+                inst = _je.JSONEncoder()
+                inst_keysep = getattr(inst, "key_separator", "<missing>")
+                inst_itemsep = getattr(inst, "item_separator", "<missing>")
+                # Retry with explicit separators — if that succeeds while
+                # the bare call failed, separator mutation is the smoking gun.
+                try:
+                    explicit = json.dumps(extras, separators=(",", ":"))
+                    explicit_ok = True
+                    try:
+                        json.loads(explicit)
+                        explicit_loads_ok = True
+                    except Exception:
+                        explicit_loads_ok = False
+                    explicit_head = explicit[:200]
+                except Exception as ex:
+                    explicit_ok = False
+                    explicit_loads_ok = False
+                    explicit_head = f"<retry raised: {ex!r}>"
+                # Truncated repr of the source dict — small primitives only.
+                safe_keys = sorted(extras.keys()) if isinstance(extras, dict) else []
+                logging.error(
+                    "set_file CORRUPTION CAUGHT: %s\n"
+                    "  raw head: %r\n"
+                    "  class key_sep=%r item_sep=%r\n"
+                    "  inst  key_sep=%r item_sep=%r\n"
+                    "  explicit-sep retry: dumps_ok=%s loads_ok=%s head=%r\n"
+                    "  extras keys=%r",
+                    filepath, extras_json[:200],
+                    cls_keysep, cls_itemsep,
+                    inst_keysep, inst_itemsep,
+                    explicit_ok, explicit_loads_ok, explicit_head,
+                    safe_keys,
+                )
                 raise ValueError(
                     f"set_file({filepath!r}): json.dumps(extras) produced "
                     f"invalid JSON ({je}). Refusing to write corrupt extras "
-                    f"to state DB. Raw head: {extras_json[:200]!r}"
+                    f"to state DB. Raw head: {extras_json[:200]!r} | "
+                    f"cls key_sep={cls_keysep!r} item_sep={cls_itemsep!r} | "
+                    f"explicit-retry dumps_ok={explicit_ok} loads_ok={explicit_loads_ok}"
                 ) from je
 
             vals = [filepath] + list(direct.values()) + [extras_json]

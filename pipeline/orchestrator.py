@@ -65,6 +65,19 @@ class Orchestrator:
         # has for GPU.
         self._prepping: set[str] = set()
         self._prepping_lock = threading.Lock()
+        # Circuit breaker: count consecutive prep crashes per filepath.
+        # On the 3rd crash, we try to mark the row flagged_manual and add
+        # the path to _prep_skip. If even the breaker write fails (same
+        # corruption affecting the breaker's own set_file call), the
+        # in-memory _prep_skip is the last-resort guard against an
+        # infinite retry loop wedging the pipeline. Reset to 0 on success.
+        # The 2026-05-21 incident: a JSON-corruption rejection on The Fall
+        # S03E03 kept the prep worker spinning forever on the same file,
+        # killing the supervisor by exhaustion. With this breaker, one
+        # corrupt file gets shelved and the queue keeps moving.
+        self._prep_fail_counts: dict[str, int] = {}
+        self._prep_skip: set[str] = set()
+        self._prep_skip_lock = threading.Lock()
         # Files currently being uploaded by an upload worker. Same role for
         # upload as _dispatched has for GPU.
         self._uploading: set[str] = set()
@@ -1362,8 +1375,44 @@ class Orchestrator:
                                  "(flagged / nothing-to-do / fetch failed)")
                 else:
                     logging.info(f"{tag}: prep done for {os.path.basename(filepath)}")
+                # Success — reset the circuit-breaker counter.
+                self._prep_fail_counts.pop(filepath, None)
             except Exception as e:
-                logging.warning(f"{tag}: prep crashed on {os.path.basename(filepath)}: {e}")
+                fails = self._prep_fail_counts.get(filepath, 0) + 1
+                self._prep_fail_counts[filepath] = fails
+                logging.warning(
+                    f"{tag}: prep crashed on {os.path.basename(filepath)} "
+                    f"({fails}/3): {e}"
+                )
+                if fails >= 3:
+                    # Trip the breaker. Try to mark the row flagged_manual
+                    # so the queue builder doesn't hand it back. If THAT
+                    # write also fails (likely the same corruption class),
+                    # fall back to the in-memory skip set — guaranteed to
+                    # stop _pick_for_prep from picking the file again.
+                    reason = f"prep circuit-breaker tripped after {fails} consecutive failures: {e}"
+                    try:
+                        self.state.set_file(
+                            filepath,
+                            FileStatus.FLAGGED_MANUAL,
+                            error=str(e)[:500],
+                            stage="prep_circuit_breaker",
+                            reason=reason[:500],
+                        )
+                        logging.error(
+                            f"{tag}: CIRCUIT BREAKER tripped — "
+                            f"{os.path.basename(filepath)} flagged_manual after "
+                            f"{fails} prep failures"
+                        )
+                    except Exception as e2:
+                        # State write also failed. Last resort: in-memory skip.
+                        with self._prep_skip_lock:
+                            self._prep_skip.add(filepath)
+                        logging.error(
+                            f"{tag}: CIRCUIT BREAKER (fallback) — "
+                            f"{os.path.basename(filepath)} added to in-mem skip "
+                            f"set; state write also failed: {e2}"
+                        )
             finally:
                 self._release_prep(filepath)
 
@@ -1398,6 +1447,13 @@ class Orchestrator:
 
         for item in queue_snapshot:
             fp = item["filepath"]
+            # Circuit-breaker last-resort skip — if the breaker tripped and
+            # the state write to flagged_manual ALSO failed (same corruption),
+            # this in-memory set is what keeps us from looping back to the
+            # same broken file forever.
+            with self._prep_skip_lock:
+                if fp in self._prep_skip:
+                    continue
             with self._prepping_lock:
                 if fp in self._prepping:
                     continue
