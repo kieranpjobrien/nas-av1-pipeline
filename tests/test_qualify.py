@@ -319,3 +319,65 @@ def test_qualify_keep_lang_eng_passes_even_without_original_match(cfg):
     # This test was a placeholder — see _amelie test above for the real
     # behaviour.
     pass
+
+
+# ---------------------------------------------------------------------------
+# Codec-compliance gate (2026-05-22) — qualify must NOT return NOTHING_TO_DO
+# for non-AV1 sources, even if audio/subs are clean.
+# ---------------------------------------------------------------------------
+
+
+def test_qualify_av1_source_clean_audio_returns_nothing_to_do(cfg):
+    """The genuine compliant case: AV1 video + EAC-3 audio + ENG subs.
+    Should still short-circuit to NOTHING_TO_DO."""
+    entry = _heat_clean_entry()
+    entry["video"] = {"codec_raw": "av1", "codec": "AV1"}
+    result = qualify_file(entry, cfg, use_whisper=False)
+    assert result.outcome == QualifyOutcome.NOTHING_TO_DO, (
+        f"clean AV1 must short-circuit: {result.outcome.value} ({result.rationale})"
+    )
+
+
+def test_qualify_vc1_source_clean_audio_must_not_short_circuit(cfg):
+    """The Friday (1995) case: VC-1 video + TrueHD passthrough audio.
+    analyse_gaps sees no audio/sub gaps (TrueHD is passthrough, ENG sub
+    is fine) and would return needs_anything=False. Pre-fix this fell
+    through to NOTHING_TO_DO → DONE 'already compliant' — but the file
+    is VC-1, NOT AV1. Must return QUALIFIED so the encoder runs."""
+    entry = _heat_clean_entry()
+    entry["video"] = {"codec_raw": "vc1", "codec": "VC-1"}
+    # Replace audio with TrueHD (passthrough → no gap)
+    entry["audio_streams"] = [
+        {"language": "eng", "codec": "truehd", "codec_raw": "truehd", "channels": 8},
+    ]
+    result = qualify_file(entry, cfg, use_whisper=False)
+    assert result.outcome == QualifyOutcome.QUALIFIED, (
+        f"VC-1 source must NOT be NOTHING_TO_DO; got "
+        f"{result.outcome.value}: {result.rationale}"
+    )
+    assert "vc1" in result.rationale.lower() or "av1" in result.rationale.lower()
+
+
+def test_qualify_hevc_source_clean_audio_must_not_short_circuit(cfg):
+    """27 of the 29 wrongly-DONE'd files were HEVC with clean EAC-3 audio.
+    Same shape as VC-1 case — codec-compliance gate must catch it."""
+    entry = _heat_clean_entry()
+    entry["video"] = {"codec_raw": "hevc", "codec": "HEVC"}
+    result = qualify_file(entry, cfg, use_whisper=False)
+    assert result.outcome == QualifyOutcome.QUALIFIED, (
+        f"HEVC source must NOT be NOTHING_TO_DO; got "
+        f"{result.outcome.value}: {result.rationale}"
+    )
+
+
+def test_qualify_missing_video_block_must_not_short_circuit(cfg):
+    """If video block is absent or codec_raw is empty, we cannot prove
+    the file is AV1 — be conservative and route to encode rather than
+    silently mark DONE. (Better to re-encode a few benign files than
+    to silently lose 29 files to false 'already compliant'.)"""
+    entry = _heat_clean_entry()
+    # No 'video' key at all.
+    result = qualify_file(entry, cfg, use_whisper=False)
+    assert result.outcome == QualifyOutcome.QUALIFIED, (
+        f"missing video block must not short-circuit; got {result.outcome.value}"
+    )

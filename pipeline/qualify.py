@@ -436,8 +436,29 @@ def qualify_file(
             )
             return result
 
-    # 5. Already-compliant short-circuit.
+    # 5. Codec-compliance gate (2026-05-22). NOTHING_TO_DO requires
+    # the source to actually be AV1 — anything else needs to be
+    # encoded TO AV1 regardless of audio/sub gap state. Pre-fix this
+    # gate didn't exist and 29 non-AV1 files (27 HEVC + 1 H.264 + 1
+    # VC-1, e.g. Friday (1995).mkv at TrueHD-passthrough → no gaps →
+    # marked DONE "already compliant") slipped through. analyse_gaps
+    # is documented as "what an already-AV1 file needs to be fully
+    # done" — its silence on a non-AV1 file means "no audio/sub
+    # cleanup", not "compliant".
+    video = (enriched.get("video") or {})
+    src_codec_raw = (video.get("codec_raw") or "").lower()
+    is_av1_source = "av1" in src_codec_raw
+
     if not gaps.needs_anything:
+        if not is_av1_source:
+            # Non-AV1 source, audio/subs are clean, but the file still
+            # needs codec conversion. Send to encode.
+            result.outcome = QualifyOutcome.QUALIFIED
+            result.rationale = (
+                f"source codec is {src_codec_raw or 'unknown'} — needs encode to AV1"
+            )
+            return result
+        # AV1 + no gaps = genuinely compliant.
         result.outcome = QualifyOutcome.NOTHING_TO_DO
         result.rationale = "no gaps detected — file is already compliant"
         return result

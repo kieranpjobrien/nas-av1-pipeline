@@ -1724,7 +1724,7 @@ function Inspector({ sel, panel, setPanel, onFileOpen, onAuditPatch, selectedPat
         >
           {isBulk
             ? `Queue ${fmtNum(targetCount)} for re-encode`
-            : "Queue re-encode"}{" "}
+            : (codecKey(sel?.codec) === "av1" ? "Queue re-encode" : "Queue encode")}{" "}
           <span className="k">R</span>
         </button>
         <button
