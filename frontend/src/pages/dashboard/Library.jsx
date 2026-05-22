@@ -158,6 +158,28 @@ function parseCodecResDrill(key) {
   return null;
 }
 
+// "Needs encode" predicate, shared by the row filter and the chip-count
+// useMemo. Defined at module scope so it's safe to call from the rows
+// useMemo (which runs during render) — defining it inside the component
+// after the useMemo body would put it in the TDZ. (Operator 2026-05-22:
+// previous in-component placement crashed the UI with "Cannot access 've'
+// before initialization" on Library mount.)
+//
+// Definition: anything not confidently optimal-AV1 needs encode.
+//   * non-AV1 codec (HEVC / H.264 / Other) -> needs encode
+//   * AV1 with audit.current_cq != audit.target_cq -> needs encode
+//   * AV1 at target (or no/partial audit) -> compliant, exclude
+function _needsEncode(f) {
+  if (!f) return false;
+  const k = codecKey(f.codec);
+  if (k !== "av1") return true;
+  const a = f.audit || {};
+  const cur = a.current_cq;
+  const tgt = a.target_cq;
+  if (cur != null && tgt != null && cur !== tgt) return true;
+  return false;
+}
+
 export function Library({ data, pipelineData, onFileOpen, drillKey, onClearDrill }) {
   const all = data.files || data.topTargets;
   const [selIdx, setSelIdx] = useState(0);
@@ -426,25 +448,8 @@ export function Library({ data, pipelineData, onFileOpen, drillKey, onClearDrill
     if (drillKey && drillKey.startsWith("res:") && onClearDrill) onClearDrill();
   };
 
-  // "Needs encode" predicate, reused by the chip-count display and the
-  // row filter. Definition (2026-05-22): anything not confidently
-  // optimal-AV1.
-  //   * Non-AV1 codec (HEVC / H.264 / VC-1 / MPEG-2 / other) → needs encode.
-  //   * AV1 with audit.current_cq != audit.target_cq → needs encode.
-  //   * AV1 with audit on-target → compliant, exclude.
-  //   * AV1 with no/partial audit → conservative, exclude (we don't know
-  //     it's off-target). The Inspector's grade-optimised drill is the
-  //     place to surface those uncertainty cases.
-  const _needsEncode = (f) => {
-    if (!f) return false;
-    const k = codecKey(f.codec);
-    if (k !== "av1") return true;
-    const a = f.audit || {};
-    const cur = a.current_cq;
-    const tgt = a.target_cq;
-    if (cur != null && tgt != null && cur !== tgt) return true;
-    return false;
-  };
+  // Chip-count for the "Needs encode" filter. Uses the module-scope
+  // _needsEncode predicate so the in-component useMemo doesn't shadow it.
   const needsEncodeCount = useMemo(
     () => (data?.files || []).reduce((n, f) => n + (_needsEncode(f) ? 1 : 0), 0),
     [data?.files],
