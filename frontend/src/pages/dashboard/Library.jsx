@@ -352,8 +352,7 @@ export function Library({ data, pipelineData, onFileOpen, drillKey, onClearDrill
       if (filters.atmos && !hasAtmos(f)) return false;
       if (filters.foreignSubs && !foreignSubsOnly(f)) return false;
       if (filters.status === "needs_encode") {
-        const k = codecKey(f.codec);
-        if (k !== "hevc" && k !== "h264") return false;
+        if (!_needsEncode(f)) return false;
       }
       if (filters.status === "errored") {
         if (!statusIsErrored(pipelineFiles[f.filepath])) return false;
@@ -412,6 +411,44 @@ export function Library({ data, pipelineData, onFileOpen, drillKey, onClearDrill
   const toggle = (k, v) => setFilters((f) => ({ ...f, [k]: f[k] === v ? null : v }));
   const toggleBool = (k) => setFilters((f) => ({ ...f, [k]: !f[k] }));
   const setStatus = (v) => setFilters((f) => ({ ...f, status: f.status === v ? null : v }));
+
+  // Codec / res chip click while a matching drill-in is active produces
+  // contradictory predicates (drill says "codec:h264", chip says AV1) →
+  // 0 rows. Clear the drill in that case so chip-click owns the filter.
+  // (2026-05-22 operator screenshot: AV1 chip + H.264 drill + Needs-encode
+  // = 'No files match the current filters', confusing UX.)
+  const toggleCodecChip = (c) => {
+    toggle("codec", c);
+    if (drillKey && drillKey.startsWith("codec:") && onClearDrill) onClearDrill();
+  };
+  const toggleResChip = (r) => {
+    toggle("res", r);
+    if (drillKey && drillKey.startsWith("res:") && onClearDrill) onClearDrill();
+  };
+
+  // "Needs encode" predicate, reused by the chip-count display and the
+  // row filter. Definition (2026-05-22): anything not confidently
+  // optimal-AV1.
+  //   * Non-AV1 codec (HEVC / H.264 / VC-1 / MPEG-2 / other) → needs encode.
+  //   * AV1 with audit.current_cq != audit.target_cq → needs encode.
+  //   * AV1 with audit on-target → compliant, exclude.
+  //   * AV1 with no/partial audit → conservative, exclude (we don't know
+  //     it's off-target). The Inspector's grade-optimised drill is the
+  //     place to surface those uncertainty cases.
+  const _needsEncode = (f) => {
+    if (!f) return false;
+    const k = codecKey(f.codec);
+    if (k !== "av1") return true;
+    const a = f.audit || {};
+    const cur = a.current_cq;
+    const tgt = a.target_cq;
+    if (cur != null && tgt != null && cur !== tgt) return true;
+    return false;
+  };
+  const needsEncodeCount = useMemo(
+    () => (data?.files || []).reduce((n, f) => n + (_needsEncode(f) ? 1 : 0), 0),
+    [data?.files],
+  );
 
   const sortLabel = SORT_OPTIONS.find((o) => o.k === sort)?.label || sort;
   const groupLabel = GROUP_OPTIONS.find((o) => o.k === group)?.label || group;
@@ -727,7 +764,7 @@ export function Library({ data, pipelineData, onFileOpen, drillKey, onClearDrill
             <button
               key={c}
               className={`chip ${filters.codec === c ? "on" : ""}`}
-              onClick={() => toggle("codec", c)}
+              onClick={() => toggleCodecChip(c)}
               title={c === "other"
                 ? "Anything not AV1/HEVC/H.264 — typically MPEG-2, VC-1, VP9, or legacy codecs that the policy says should re-encode."
                 : undefined}
@@ -743,7 +780,7 @@ export function Library({ data, pipelineData, onFileOpen, drillKey, onClearDrill
             <button
               key={r}
               className={`chip ${filters.res === r ? "on" : ""}`}
-              onClick={() => toggle("res", r)}
+              onClick={() => toggleResChip(r)}
             >
               {r.toUpperCase()} <span className="c">{fmtNum(resCount(data.resolutions, r))}</span>
             </button>
@@ -777,11 +814,9 @@ export function Library({ data, pipelineData, onFileOpen, drillKey, onClearDrill
           <button
             className={`chip ${filters.status === "needs_encode" ? "on" : ""}`}
             onClick={() => setStatus("needs_encode")}
+            title="Anything not confidently optimal AV1: non-AV1 codec (HEVC/H.264/Other) plus AV1 with current_cq != target_cq. Excludes optimal AV1 and AV1 with no audit data (uncertainty — use the Grade-Optimised drill from Glance for those)."
           >
-            Needs encode{" "}
-            <span className="c">
-              {fmtNum(codecCount(data.codecs, "hevc") + codecCount(data.codecs, "h264"))}
-            </span>
+            Needs encode <span className="c">{fmtNum(needsEncodeCount)}</span>
           </button>
           <button
             className={`chip ${filters.status === "errored" ? "on" : ""}`}
