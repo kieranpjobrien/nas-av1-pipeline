@@ -117,6 +117,13 @@ export const normalizeFile = (f) => {
       flags: s.flags || [],
       ext: s.ext,
     })),
+    // CQ audit blob — populated by the scanner from the MKV's CQ tag,
+    // or bitrate-inferred when no tag. Used by the Library "Needs
+    // encode" filter to detect AV1 files where current_cq != target_cq
+    // (off-target under the current grade rule). Pre-2026-05-22 this
+    // field wasn't forwarded — AV1 contribution to "Needs encode" was
+    // always 0 because every f.audit looked undefined client-side.
+    audit: f.audit || null,
   };
 };
 
