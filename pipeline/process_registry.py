@@ -85,6 +85,43 @@ def _write_entries(path: Path, entries: list[dict[str, Any]]) -> None:
         with open(tmp, "r", encoding="utf-8") as f:
             json.load(f)
     except json.JSONDecodeError as e:
+        # Smoking-gun diagnostic — mirror of pipeline.state.set_file's
+        # corruption catcher (2026-05-22). Across recurrences (utf-8,
+        # frame, search, status, ...) this path has logged "malformed
+        # JSON" repeatedly but never captured the substitution word.
+        # On 2026-05-23 the supervisor segfaulted ~5 min after this
+        # heartbeat write started failing; the only way to root-cause
+        # is to capture the smoking gun before the next crash.
+        try:
+            with open(tmp, "rb") as fr:
+                raw_head = fr.read(200)
+        except OSError:
+            raw_head = b"<unreadable>"
+        import json.encoder as _je
+        cls_keysep = getattr(_je.JSONEncoder, "key_separator", "<missing>")
+        cls_itemsep = getattr(_je.JSONEncoder, "item_separator", "<missing>")
+        inst = _je.JSONEncoder()
+        inst_keysep = getattr(inst, "key_separator", "<missing>")
+        inst_itemsep = getattr(inst, "item_separator", "<missing>")
+        try:
+            explicit = json.dumps(entries, separators=(",", ":"))
+            json.loads(explicit)
+            explicit_ok = True
+        except Exception:
+            explicit_ok = False
+        _LOG.error(
+            "%s CORRUPTION CAUGHT: %s\n"
+            "  raw head (200B): %r\n"
+            "  class key_sep=%r item_sep=%r\n"
+            "  inst  key_sep=%r item_sep=%r\n"
+            "  explicit-sep dumps+loads: ok=%s\n"
+            "  entries len=%d",
+            path.name, e, raw_head,
+            cls_keysep, cls_itemsep,
+            inst_keysep, inst_itemsep,
+            explicit_ok,
+            len(entries) if isinstance(entries, list) else -1,
+        )
         try:
             os.remove(tmp)
         except OSError:

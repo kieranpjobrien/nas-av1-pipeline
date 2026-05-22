@@ -138,14 +138,51 @@ class Orchestrator:
                 with open(tmp, "r", encoding="utf-8") as f:
                     _json.load(f)
             except _json.JSONDecodeError as je:
+                # Smoking-gun diagnostic — mirror of pipeline.state.set_file's
+                # corruption catcher (2026-05-22). Across recurrences (utf-8,
+                # frame, search, status, ...) we've never captured the
+                # substitution word here because this site just logged the
+                # JSONDecodeError. Dump enough state to discriminate:
+                #   * raw head of the on-disk bytes that failed to parse
+                #   * JSONEncoder class + instance key/item separators
+                #   * explicit-separator retry result
+                # Pre-2026-05-23 the supervisor segfaulted ~5 min after this
+                # path started firing; capturing the substitution next time
+                # is the only path to root cause.
+                try:
+                    with open(tmp, "rb") as fr:
+                        raw_head = fr.read(200)
+                except OSError:
+                    raw_head = b"<unreadable>"
+                import json.encoder as _je
+                cls_keysep = getattr(_je.JSONEncoder, "key_separator", "<missing>")
+                cls_itemsep = getattr(_je.JSONEncoder, "item_separator", "<missing>")
+                inst = _je.JSONEncoder()
+                inst_keysep = getattr(inst, "key_separator", "<missing>")
+                inst_itemsep = getattr(inst, "item_separator", "<missing>")
+                try:
+                    explicit = _json.dumps(status, separators=(",", ":"))
+                    _json.loads(explicit)
+                    explicit_ok = True
+                except Exception:
+                    explicit_ok = False
+                logging.error(
+                    "heavy_worker_state.json CORRUPTION CAUGHT: %s\n"
+                    "  raw head (200B): %r\n"
+                    "  class key_sep=%r item_sep=%r\n"
+                    "  inst  key_sep=%r item_sep=%r\n"
+                    "  explicit-sep dumps+loads: ok=%s\n"
+                    "  status dict keys=%r",
+                    je, raw_head,
+                    cls_keysep, cls_itemsep,
+                    inst_keysep, inst_itemsep,
+                    explicit_ok,
+                    sorted(status.keys()) if isinstance(status, dict) else "<not-dict>",
+                )
                 try:
                     os.remove(tmp)
                 except OSError:
                     pass
-                logging.error(
-                    f"heavy_worker_state.json write produced malformed JSON "
-                    f"({je}); destination kept intact."
-                )
                 return
             os.replace(tmp, path)
         except OSError as e:
