@@ -379,6 +379,10 @@ export function Library({ data, pipelineData, onFileOpen, drillKey, onClearDrill
       if (filters.status === "errored") {
         if (!statusIsErrored(pipelineFiles[f.filepath])) return false;
       }
+      if (filters.status === "flagged_corrupt") {
+        const st = (pipelineFiles[f.filepath]?.status || "").toLowerCase();
+        if (st !== "flagged_corrupt") return false;
+      }
       if (filters.hideDone) {
         const st = (pipelineFiles[f.filepath]?.status || "").toLowerCase();
         // 'replaced' is the alternate terminal status used after the
@@ -454,6 +458,21 @@ export function Library({ data, pipelineData, onFileOpen, drillKey, onClearDrill
     () => (data?.files || []).reduce((n, f) => n + (_needsEncode(f) ? 1 : 0), 0),
     [data?.files],
   );
+
+  // Chip-count for the "Flagged corrupt" filter. Sourced from state DB
+  // via pipelineFiles — these are files the source-integrity probe
+  // flagged after ffmpeg-decoding 3×60s windows and hitting hard error
+  // signatures (EBML container offsets, HEVC POC mismatches, AAC
+  // decode errors). Re-acquiring the source and replacing the file on
+  // disk auto-resets the flag to pending (mtime > flag_time + 60s),
+  // so a flag here means "needs re-acquire" — not "stuck forever".
+  const flaggedCorruptCount = useMemo(() => {
+    let n = 0;
+    for (const info of Object.values(pipelineFiles || {})) {
+      if ((info?.status || "").toLowerCase() === "flagged_corrupt") n++;
+    }
+    return n;
+  }, [pipelineFiles]);
 
   const sortLabel = SORT_OPTIONS.find((o) => o.k === sort)?.label || sort;
   const groupLabel = GROUP_OPTIONS.find((o) => o.k === group)?.label || group;
@@ -828,6 +847,13 @@ export function Library({ data, pipelineData, onFileOpen, drillKey, onClearDrill
             onClick={() => setStatus("errored")}
           >
             Errored <span className="c">{data.errorCount || 0}</span>
+          </button>
+          <button
+            className={`chip ${filters.status === "flagged_corrupt" ? "on" : ""}`}
+            onClick={() => setStatus("flagged_corrupt")}
+            title="Files where the source-integrity probe (ffmpeg-decodes 3 windows looking for hard bitstream errors) confirmed corruption. They stay flagged until the file on disk is replaced — re-download via Sonarr/Radarr auto-resets the flag to pending when the new file's mtime advances past the flag time. Use the inspector's Delete button to remove the bad file from NAS, then trigger a re-acquire."
+          >
+            Flagged corrupt <span className="c">{fmtNum(flaggedCorruptCount)}</span>
           </button>
           <button
             className={`chip ${filters.hideDone ? "on" : ""}`}
