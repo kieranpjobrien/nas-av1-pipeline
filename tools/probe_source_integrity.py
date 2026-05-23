@@ -105,32 +105,39 @@ def _decode_window(filepath: str, start_secs: float, length_secs: float = 60,
     warnings ("Application provided invalid, non monotonically
     increasing dts") are tolerated.
 
-    Timeouts are retried up to ``max_retries`` times before being
-    reported as failures — flaky SMB reads can cause a 60s decode
-    to overrun a 180s wall clock, and that's NOT bitstream corruption.
-    Up (2009) (2026-05-12) tripped the original no-retry version on a
-    transient timeout and got falsely flagged_corrupt. A retry on the
-    SAME window distinguishes real corruption (deterministic; both
-    attempts hit hard-error signatures) from network blips (first
-    attempt times out, second succeeds).
+    Retries up to ``max_retries`` times on BOTH:
+      * subprocess timeout (flaky SMB read overrunning wall clock), and
+      * detected hard-error patterns (transient SMB blip mid-read).
+
+    Real bitstream corruption is deterministic — both attempts on the
+    same byte ranges hit the same signatures, so it still flags. A
+    transient SMB hiccup only shows up on one attempt; the retry comes
+    back clean and we pass.
+
+    Background (2026-05-24): the previous version retried on timeout
+    only, not on hits. A burst of 6 healthy files (Star Wars, Avengers,
+    Talladega Nights, ...) got falsely flagged_corrupt within a 14-min
+    window when ffmpeg's first stderr line hit a hard-error pattern
+    that didn't reproduce on the next decode. Up (2009) was the
+    original timeout-only case (2026-05-12).
     """
     cmd = [FFMPEG, "-v", "error", "-nostdin",
            "-ss", str(start_secs), "-i", filepath,
            "-t", str(length_secs),
            "-f", "null", "-"]
     attempts = max_retries + 1
-    timeout_msgs: list[str] = []
+    last_msgs: list[str] = []
     for attempt in range(1, attempts + 1):
         try:
             out = subprocess.run(cmd, capture_output=True, text=True,
                                  timeout=timeout, encoding="utf-8", errors="replace")
         except subprocess.TimeoutExpired:
-            timeout_msgs.append(
+            last_msgs = [
                 f"timeout after {timeout}s at ss={start_secs:.0f}s (attempt {attempt}/{attempts})"
-            )
+            ]
             if attempt < attempts:
                 continue  # retry — could be flaky SMB
-            return False, timeout_msgs
+            return False, last_msgs
         # Real ffmpeg exit — examine stderr regardless of return code
         stderr = out.stderr or ""
         hits: list[str] = []
@@ -139,9 +146,18 @@ def _decode_window(filepath: str, start_secs: float, length_secs: float = 60,
                 hits.append(line.strip()[:200])
                 if len(hits) >= 6:
                     break
-        return (not hits), hits
+        if not hits:
+            return True, []
+        # Hard-error hits detected. Retry once before flagging — a real
+        # bitstream defect reproduces deterministically across attempts;
+        # a one-shot SMB hiccup doesn't. Keep the hits we just saw so
+        # we can report them if the retry also fails.
+        last_msgs = hits
+        if attempt < attempts:
+            continue
+        return False, last_msgs
     # Unreachable in practice but keeps type checker happy.
-    return False, timeout_msgs
+    return False, last_msgs
 
 
 def probe_file(filepath: str) -> ProbeResult:

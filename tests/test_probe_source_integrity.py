@@ -231,28 +231,37 @@ def test_decode_window_persistent_timeout_fails(monkeypatch):
     monkeypatch.setattr(psi.subprocess, "run", always_timeout)
     ok, errs = psi._decode_window("/fake.mkv", 0.0, 60)
     assert ok is False
-    assert len(errs) == 2
-    assert all("timeout" in e for e in errs)
+    # 2026-05-24: post-retry-on-hits hardening, last_msgs is the
+    # per-attempt buffer (overwritten, not accumulated). Final message
+    # describes the LAST attempt's outcome — that's what matters when
+    # both attempts agree.
+    assert len(errs) >= 1
+    assert any("timeout" in e for e in errs)
     assert call_count["n"] == 2
 
 
-def test_decode_window_hard_error_no_retry(monkeypatch):
-    """If the FIRST attempt completes with a hard-error stderr signature,
-    no retry — bitstream corruption is deterministic; re-decoding will hit
-    the same error and waste GPU time. Retry is only for timeouts."""
+def test_decode_window_hard_error_retried_then_failed(monkeypatch):
+    """2026-05-24: BOTH attempts hit hard-error stderr → flag corrupt.
+    Real bitstream corruption is deterministic and reproduces across
+    retries; transient SMB blips wash out (see
+    test_probe_retry_on_hits.test_hard_error_retried_then_clean_passes).
+
+    Pre-hardening this test asserted call_count == 1 ('no retry on
+    hits'). That's been replaced by retry-on-hits which catches the
+    burst-of-false-positives pattern from 2026-05-23 morning."""
     import subprocess as _sp
     call_count = {"n": 0}
 
-    def first_call_returns_error(cmd, **kw):
+    def both_calls_return_error(cmd, **kw):
         call_count["n"] += 1
         return _sp.CompletedProcess(cmd, 0, "",
                                     "[hevc] Could not find ref with POC 7\n")
 
-    monkeypatch.setattr(psi.subprocess, "run", first_call_returns_error)
+    monkeypatch.setattr(psi.subprocess, "run", both_calls_return_error)
     ok, errs = psi._decode_window("/fake.mkv", 0.0, 60)
     assert ok is False
     assert any("POC" in e for e in errs)
-    assert call_count["n"] == 1, "must NOT retry on hard decode errors"
+    assert call_count["n"] == 2, "must retry once on hard decode errors before flagging"
 
 
 def test_main_streams_progress_to_stderr_in_text_mode(monkeypatch, tmp_path, capsys):
