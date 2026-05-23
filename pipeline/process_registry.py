@@ -76,7 +76,11 @@ def _write_entries(path: Path, entries: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = str(path) + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(entries, f, indent=2)
+        # Explicit separators — see orchestrator._write_heavy_worker_status
+        # for the 2026-05-23 incident that motivated this. Class attribute
+        # JSONEncoder.key_separator was caught mutated to 'status'; passing
+        # separators here makes the write immune to that corruption.
+        json.dump(entries, f, indent=2, separators=(",", ": "))
     # Defense-in-depth: read back + parse before os.replace. The 2026-05-18
     # incident corrupted four separate JSON files (this one included) with
     # arbitrary-word substitution of the ``: `` separator. Detect at write

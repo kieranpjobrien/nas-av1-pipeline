@@ -397,7 +397,14 @@ class PipelineState:
             # Single INSERT OR REPLACE — atomic, no race
             cols = ["filepath"] + list(direct.keys()) + ["extras"]
             placeholders = ", ".join(["?"] * len(cols))
-            extras_json = json.dumps(extras)
+            # Explicit separators (2026-05-23): see
+            # pipeline.orchestrator._write_heavy_worker_status for the
+            # incident. JSONEncoder.key_separator gets corrupted from
+            # ': ' to a random interned string mid-process. Passing
+            # separators explicitly bypasses the class default. This
+            # path is called on every state.set_file() — critical to
+            # defend.
+            extras_json = json.dumps(extras, separators=(",", ": "))
 
             # Defense-in-depth: validate the extras JSON we're about to
             # commit. The 2026-05-18/19 corruption incident showed

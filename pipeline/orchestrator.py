@@ -129,7 +129,15 @@ class Orchestrator:
             path = os.path.join(self.staging_dir, "heavy_worker_state.json")
             tmp = path + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
-                _json.dump(status, f, indent=2, ensure_ascii=False)
+                # Explicit separators (2026-05-23): the diagnostic at this
+                # site caught JSONEncoder.key_separator mutated from ': '
+                # to 'status' (5th recurrence after utf-8/frame/search/
+                # status — all common Python interned strings, consistent
+                # with hardware/driver interned-string-pointer corruption).
+                # Passing explicit separators bypasses the corrupted class
+                # default — caught with explicit-sep dumps+loads ok=True.
+                _json.dump(status, f, indent=2, ensure_ascii=False,
+                           separators=(",", ": "))
             # Read-back validation — see tools.report_lock for the 2026-05-18
             # corruption incident that motivated this. If the bytes on disk
             # don't parse, drop the tmp and skip the replace; the existing

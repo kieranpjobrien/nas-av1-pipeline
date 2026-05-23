@@ -9,6 +9,18 @@ import os
 import sys
 from datetime import datetime
 
+# Defensive re-set of JSONEncoder defaults (2026-05-23). Across 5 incidents
+# we've caught JSONEncoder.key_separator silently mutated from ': ' to a
+# random interned string (utf-8, frame, search, status, status). Hardware
+# / driver interned-string-pointer corruption is the working hypothesis
+# (consistent with 0x7E BSOD history). Resetting at process start gives a
+# known-good baseline; hot-path writes also pass separators=(",", ": ")
+# explicitly so they survive future corruption — see
+# pipeline.orchestrator._write_heavy_worker_status for context.
+import json.encoder as _json_encoder
+_json_encoder.JSONEncoder.key_separator = ": "
+_json_encoder.JSONEncoder.item_separator = ", "
+
 # Pipeline mode forces whisper to run on CPU. The GPU is owned by NVENC for
 # the live encode workers, and running whisper on the same chip caused a
 # BSOD on 2026-04-21 (rule 9a). CPU + faster-whisper int8 is fast enough
