@@ -95,9 +95,11 @@ def _ffmpeg_drop_streams_to_path(
     Layered guards on output:
       * subprocess timeout sized at 4 MB/s (covers SMB-paced reads)
       * rc != 0 → discard + False
-      * output size < 50% of source → discard + False (catches the
-        torn-mux class even though we haven't seen it from ffmpeg —
-        guard-in-depth is cheap)
+      * output size < 10% of source → discard + False (truncation
+        detector — was 50%, relaxed 2026-05-23 because foreign-track-
+        heavy files legitimately strip to ~40% when 23 of 24 audio
+        dubs are removed). The track-count check is the real
+        correctness gate; this is just a last-ditch torn-mux detector.
       * proof-of-work re-probe: expected vs actual audio/sub count
         must match, else discard + False.
 
@@ -175,10 +177,22 @@ def _ffmpeg_drop_streams_to_path(
         logging.error(f"ffmpeg drop-to-path produced no output: {dst}")
         return False
     out_size = os.path.getsize(dst)
-    if out_size < src_size * 0.5:
+    # Size sanity check — guards against ffmpeg silently producing a
+    # near-empty file. The original threshold was 50% of source, which
+    # was too strict for files dominated by foreign-language audio
+    # tracks: a Bluey episode with 24 audio dubs legitimately strips to
+    # ~40% of source when 23 dubs get removed (24× ~5 MB AAC tracks
+    # adds up to >half the file). The track-count proof-of-work check
+    # below is the real correctness gate — this size check is just a
+    # last-ditch "did ffmpeg crash mid-write" detector. 10% is
+    # generous enough to allow heavy-strip cases through while still
+    # catching the truncation symptom we actually care about.
+    # 2026-05-23: a Bluey burst hit this guard repeatedly (101 MB /
+    # 254 MB = 40% — well below 50% — but track-count-correct).
+    if out_size < src_size * 0.10:
         logging.error(
             f"ffmpeg drop-to-path output too small ({out_size/1024**2:.1f} MB vs "
-            f"{src_size/1024**2:.1f} MB source) — discarding"
+            f"{src_size/1024**2:.1f} MB source, <10%) — discarding as truncated"
         )
         try:
             os.remove(dst)
@@ -316,16 +330,22 @@ def _mkvmerge_drop_streams(
                 pass
         return False
 
-    # Sanity guard: output must be ≥ 50% of input (mirrors mkv_tags
-    # remux guard — protects against the 4 KB stub class).
+    # Sanity guard: output must be ≥ 10% of input (mirrors the relaxed
+    # threshold in _ffmpeg_drop_streams_to_path above — protects against
+    # the 4 KB stub class without rejecting legitimate heavy-strip
+    # outputs like Bluey's 23-of-24 audio-track strip that legitimately
+    # lands around 40% of source).
+    # Pre-2026-05-23 was 50%; that gate misfired on foreign-track-heavy
+    # files. The proof-of-work track-count check below is the real
+    # correctness gate.
     if not os.path.exists(tmp_out):
         logging.error(f"compliance fix produced no output file: {tmp_out}")
         return False
     out_size = os.path.getsize(tmp_out)
-    if out_size < src_size * 0.5:
+    if out_size < src_size * 0.10:
         logging.error(
             f"compliance fix output too small ({out_size/1024**2:.1f} MB vs "
-            f"{src_size/1024**2:.1f} MB source) — refusing replace"
+            f"{src_size/1024**2:.1f} MB source, <10%) — refusing replace as truncated"
         )
         try:
             os.remove(tmp_out)
