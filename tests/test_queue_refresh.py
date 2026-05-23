@@ -133,10 +133,16 @@ class TestCategoriseEntry:
         assert item is entry
 
     def test_terminal_status_is_skipped(self, tmp_path):
+        """A DONE row whose on-disk codec matches the target (AV1) must
+        stay skipped. Pre-2026-05-24 this test used an h264 entry to
+        verify the same — but DONE+h264 is now a state-vs-disk mismatch
+        and triggers auto-reset (see test_done_non_av1_auto_reset.py).
+        AV1 is the right shape for the 'genuine DONE' case."""
         orch = _orch(tmp_path)
         fp = r"\\NAS\Movies\Already.mkv"
         orch.state.set_file(fp, FileStatus.DONE)
         entry = _h264_entry(fp, 2_000_000_000)
+        entry["video"] = {"codec_raw": "av1"}
         category, _ = categorise_entry(entry, {}, orch.state, orch.control)
         assert category == "skip"
 
@@ -443,11 +449,17 @@ class TestMergeNewFiles:
         assert len(full_q) == 1
 
     def test_terminal_status_files_not_added(self, tmp_path):
-        """A new entry in the report whose DB row is already DONE / FLAGGED
-        must NOT be appended — they're terminal and should stay out of the
-        queue. Otherwise we'd re-encode-stripped Bluey episodes into Swedish-
-        loss again, the exact incident the discipline contract was written
-        to prevent."""
+        """A new entry in the report whose DB row is already DONE
+        (and the file's on-disk codec is AV1) must NOT be appended —
+        they're terminal and should stay out of the queue. Otherwise
+        we'd re-encode-stripped Bluey episodes into Swedish-loss again,
+        the exact incident the discipline contract was written to
+        prevent.
+
+        2026-05-24 update: this test originally used an h264 entry,
+        but DONE+h264 is now a state-vs-disk mismatch and reset (see
+        test_done_non_av1_auto_reset.py). Use AV1 entry here for the
+        'genuine DONE' contract."""
         from pipeline.config import build_config
 
         orch = _orch(tmp_path)
@@ -457,6 +469,7 @@ class TestMergeNewFiles:
         fp = r"\\NAS\Movies\Done.mkv"
         orch.state.set_file(fp, FileStatus.DONE)
         entry = _h264_entry(fp, 2_000_000_000)
+        entry["video"] = {"codec_raw": "av1"}
         report = _write_report(tmp_path, [entry])
 
         added_full, added_gap = orch._merge_new_files([], [], report)

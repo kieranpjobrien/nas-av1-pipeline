@@ -235,10 +235,43 @@ def categorise_entry(
                 existing = state.get_file(filepath)
             else:
                 return ("skip", None)
+        elif st in ("done", "replaced"):
+            # DONE consistency check (2026-05-24). If the state row says
+            # DONE/REPLACED but the file on disk isn't AV1, the row is
+            # lying. Causes seen:
+            #   * priority-API auto-seed inserted PENDING rows that got
+            #     transitioned to DONE without an actual encode happening
+            #     (the file is still its original h264/hevc — pipeline
+            #     never touched it).
+            #   * Sonarr / qbittorrent / manual restore replaced our AV1
+            #     output with a non-AV1 release post-encode (Crash,
+            #     Toy Soldiers — mtime hours/days after done).
+            #   * cq_resync sweep marked DONE on files that were never
+            #     actually re-encoded.
+            # In all cases: codec on disk says we have work to do. Reset
+            # to pending with force_reencode so the pipeline picks it up.
+            # AV1 DONE rows are left alone — they're correctly complete.
+            if codec_raw and codec_raw != "av1":
+                logging.info(
+                    f"  Auto-reset {st} → pending: state was {st} but on-disk codec "
+                    f"is {codec_raw} (not AV1) — re-encoding "
+                    f"{os.path.basename(filepath)}"
+                )
+                state.set_file(
+                    filepath,
+                    FileStatus.PENDING,
+                    stage=None,
+                    error=None,
+                    reason=f"auto-reset from {st} — on-disk codec is {codec_raw}, not AV1",
+                    force_reencode=True,
+                )
+                # Fall through to normal categorisation against the fresh entry.
+                existing = state.get_file(filepath)
+            else:
+                return ("skip", None)
         else:
-            # DONE / flagged_manual — never auto-reset. DONE re-runs only
-            # via explicit force_reencode; flagged_manual is the user's
-            # park button and must require user action to clear.
+            # flagged_manual — never auto-reset. The user's park button
+            # must require user action to clear.
             return ("skip", None)
 
     # Unprobeable: ffprobe couldn't determine the video codec. Earlier
