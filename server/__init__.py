@@ -9,6 +9,17 @@ Usage:
     uv run uvicorn server:app --host 0.0.0.0 --port 8000
 """
 
+# Defensive re-set of JSONEncoder defaults (2026-05-23). Mirror of the
+# pipeline.__main__ guard. Two segfaults today on independent Python
+# processes (supervisor 13:19, uvicorn 13:29) — diagnostic captured
+# JSONEncoder.key_separator mutated to 'status' in the supervisor.
+# Working hypothesis: hardware/driver-level memory corruption flipping
+# interned-string pointers. Process-start reset gives a known-good
+# baseline.
+import json.encoder as _json_encoder
+_json_encoder.JSONEncoder.key_separator = ": "
+_json_encoder.JSONEncoder.item_separator = ", "
+
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
