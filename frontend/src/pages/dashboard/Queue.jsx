@@ -44,7 +44,18 @@ export function Queue({ data, pipelineData, onFileOpen }) {
   const rows = Object.entries(pipelineFiles)
     .filter(([, info]) => {
       const s = (info.status || "").toLowerCase();
-      return !["completed", "done", "encoded", "replaced", "skipped"].includes(s);
+      // Exclude terminal statuses. Pre-2026-05-24 flagged_* statuses
+      // weren't on this list — flagged_corrupt / flagged_foreign_audio /
+      // flagged_undetermined / flagged_manual files showed up in the
+      // encode queue indefinitely even though they're parked terminal
+      // states the operator has to act on (re-acquire, re-tag, clear).
+      // Their right home is the Flagged inspector view, not the queue.
+      const terminal = [
+        "completed", "done", "encoded", "replaced", "skipped",
+        "flagged_corrupt", "flagged_foreign_audio",
+        "flagged_undetermined", "flagged_manual",
+      ];
+      return !terminal.includes(s);
     })
     .map(([path, info]) => {
       const reportEntry = reportByPath.get(path);

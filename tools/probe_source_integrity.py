@@ -174,12 +174,27 @@ def probe_file(filepath: str) -> ProbeResult:
     return result
 
 
-def _files_from_state(only_pending_error: bool = True) -> list[str]:
-    """Return filepaths from pipeline_state.db. Default: pending + error rows."""
+def _files_from_state(only_pending_error: bool = True,
+                       statuses: list[str] | None = None) -> list[str]:
+    """Return filepaths from pipeline_state.db.
+
+    By default returns pending + error rows. If ``statuses`` is provided,
+    returns rows matching those statuses (case-insensitive). Used by
+    ``--probe-status`` to re-probe e.g. all flagged_corrupt rows on demand
+    when the operator has re-acquired sources or wants to clear stale
+    false positives.
+    """
     if not Path(PIPELINE_STATE_DB).exists():
         return []
     con = sqlite3.connect(str(PIPELINE_STATE_DB))
-    if only_pending_error:
+    if statuses:
+        placeholders = ",".join("?" for _ in statuses)
+        lowered = [s.lower() for s in statuses]
+        rows = con.execute(
+            f"SELECT filepath FROM pipeline_files WHERE LOWER(status) IN ({placeholders})",
+            lowered,
+        ).fetchall()
+    elif only_pending_error:
         rows = con.execute(
             "SELECT filepath FROM pipeline_files "
             "WHERE LOWER(status) IN ('pending', 'error')"
@@ -198,6 +213,60 @@ def _files_from_report() -> list[str]:
     with open(MEDIA_REPORT, "r", encoding="utf-8") as f:
         rep = json.load(f)
     return [f.get("filepath") for f in rep.get("files", []) if f.get("filepath")]
+
+
+def _heal_to_pending(filepath: str, result: ProbeResult) -> None:
+    """Resurrect a stale flagged_corrupt row to pending after a re-probe
+    confirmed the file is now healthy. Stamps source_probe_at so the
+    operator can see when the last verification ran (transparency:
+    every flag is timestamped, every clear is timestamped).
+
+    Common scenario: Sonarr re-grabs a corrupt release; the auto-reset
+    on mtime should fire next time the queue rebuilds, but if that
+    didn't trip (e.g., mtime didn't advance because Sonarr did a
+    hardlink-import, or the operator wants to force a re-check),
+    running this tool with --probe-status flagged_corrupt --heal clears
+    confirmed false positives in one shot.
+    """
+    from pipeline import state as st
+    ps = st.PipelineState(str(PIPELINE_STATE_DB))
+    ps.set_file(
+        filepath,
+        status=st.FileStatus.PENDING,
+        stage=None,
+        reason=(
+            f"resurrected by re-probe: healthy "
+            f"({result.duration_seconds:.0f}s probed, 3 windows decoded cleanly)"
+        ),
+        source_probe_at=time.time(),
+        source_probe_result="healthy",
+        source_probe_duration_secs=result.duration_seconds,
+        source_corrupt=False,
+        force_reencode=False,
+    )
+
+
+def _refresh_corrupt_probe_metadata(filepath: str, result: ProbeResult) -> None:
+    """Update source_probe_at + sample errors on a flagged_corrupt row
+    after a re-probe re-confirmed the corruption. No status change.
+    Lets the operator see this row WAS re-checked on this run — answers
+    the 'when was this last verified?' question that drives the
+    re-download frustration cycle."""
+    from pipeline import state as st
+    ps = st.PipelineState(str(PIPELINE_STATE_DB))
+    sample = result.sample_errors[0][:140] if result.sample_errors else ""
+    ps.set_file(
+        filepath,
+        status=st.FileStatus.FLAGGED_CORRUPT,
+        stage="prep_source_integrity",
+        reason=(
+            f"re-probe re-confirmed corruption at windows="
+            f"{','.join(result.windows_failed) or 'fatal'}: {sample or 'no signature'}"
+        ),
+        source_probe_at=time.time(),
+        source_probe_result="corrupt",
+        source_probe_windows_failed=result.windows_failed,
+    )
 
 
 def _flag_broken_in_state(filepath: str, result: ProbeResult) -> None:
@@ -231,6 +300,17 @@ def main(argv: Optional[list[str]] = None) -> int:
                            help="probe all pending+error rows in pipeline_state.db")
     src_group.add_argument("--from-report", action="store_true",
                            help="probe all files in media_report.json (slow sweep)")
+    src_group.add_argument("--probe-status", type=str, default=None,
+                           help="probe all state-DB rows with this status "
+                                "(comma-separated; e.g. flagged_corrupt). Use when "
+                                "you've re-acquired sources and want to clear stale "
+                                "false-positive flags.")
+    parser.add_argument("--heal", action="store_true",
+                        help="when used with --probe-status, files that probe "
+                             "HEALTHY are reset to pending (clears stale flags). "
+                             "Files that probe corrupt have their reason + "
+                             "source_probe_at timestamp refreshed so the operator "
+                             "sees when the last re-check ran.")
     parser.add_argument("--json", action="store_true",
                         help="emit each result as a JSONL line on stdout, "
                              "final summary at end. Progress on stderr regardless.")
@@ -244,6 +324,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         targets = [args.path]
     elif args.from_state:
         targets = _files_from_state(only_pending_error=True)
+    elif args.probe_status:
+        statuses = [s.strip() for s in args.probe_status.split(",") if s.strip()]
+        targets = _files_from_state(statuses=statuses)
     else:
         targets = _files_from_report()
 
@@ -278,6 +361,27 @@ def main(argv: Optional[list[str]] = None) -> int:
                 except Exception as e:  # noqa: BLE001
                     sys.stderr.write(f"  -> apply failed: {e}\n")
                     sys.stderr.flush()
+            elif args.heal:
+                # Still corrupt but --heal was passed — refresh the probe
+                # timestamp + sample errors so the operator sees this row
+                # WAS re-checked on this run, not just lingering from an
+                # old flag.
+                try:
+                    _refresh_corrupt_probe_metadata(fp, r)
+                except Exception as e:  # noqa: BLE001
+                    sys.stderr.write(f"  -> refresh failed: {e}\n")
+                    sys.stderr.flush()
+        elif args.heal:
+            # Probe says HEALTHY and --heal was passed — clear the stale
+            # flag and resurrect to pending. The pipeline will pick it up
+            # on next queue refresh.
+            try:
+                _heal_to_pending(fp, r)
+                sys.stderr.write(f"  -> HEALED: status=pending\n")
+                sys.stderr.flush()
+            except Exception as e:  # noqa: BLE001
+                sys.stderr.write(f"  -> heal failed: {e}\n")
+                sys.stderr.flush()
         # In --json mode, emit JSONL so callers can tail the stream.
         # The final summary still appears at the end.
         if args.json:
