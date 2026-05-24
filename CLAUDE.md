@@ -189,3 +189,157 @@ actual file and line being changed. Do not trust the summary.
 
 Say so explicitly. "I have not verified this" / "I cannot check this
 from here". Never invent confidence.
+
+---
+
+# Architecture quickref
+
+The four files below get touched constantly. This summary saves a
+read on every session — only re-open the file when the line ranges
+or invariants below are insufficient. (Generated 2026-05-25 after
+the harness flagged 35×Library.jsx + 32×orchestrator.py + 24×__main__.py
++ 15×state.py reads in 7 days.)
+
+## `pipeline/__main__.py` (~574 lines)
+
+CLI entry. `python -m pipeline --resume` boots here.
+
+Top of file (lines 1-30): faulthandler wiring + a defensive
+`json.encoder.JSONEncoder.key_separator = ": "` reset (works around
+the 5× runtime corruption events from 2026-05-22/23).
+
+Key functions:
+- `_build_full_gamut_item(entry)` (line 75) — flattens a media_report
+  entry into the queue-item dict shape the workers expect.
+- `_stamp_force_reencode(state, filepath, existing, *, reason)`
+  (line 114) — stamps `force_reencode=true` so the AV1-source guard
+  in `full_gamut.py:689` lets the encode proceed. Called from the
+  AV1 branches of `categorise_entry`.
+- `categorise_entry(entry, config, state, control, priority_paths=None)`
+  (line 149) — returns `("full_gamut", item)`, `("gap_filler", entry)`,
+  or `("skip", None)`. Auto-resets `flagged_*` rows on file_mtime
+  advance, and auto-resets DONE rows when on-disk codec isn't AV1.
+  Priority override fires for AV1 paths in `priority_paths` (also
+  stamps force_reencode). Source of policy decisions; ALWAYS re-read
+  before changing routing behaviour.
+- `_prune_done_from_priority` (line 372) — strips terminal entries
+  out of priority.json on each build. Writes atomically with the
+  read-back-parse guard pattern.
+- `_sort_full_gamut(queue, config, priority_paths)` (line 456) —
+  priority bucket smallest-first, the rest by `encode_queue_order`
+  (default largest-first).
+- `build_queues(report_path, config, state, control)` (line 488) —
+  startup queue build. Iterates `report['files']`, calls
+  `categorise_entry` per row, sorts. **Does NOT add orphan
+  priority paths** that aren't in media_report — only iterates
+  report.
+
+## `pipeline/state.py` (~700 lines)
+
+State DB wrapper. SQLite at `F:/AV1_Staging/pipeline_state.db`.
+
+Enum (line 19-60): `FileStatus` — PENDING/QUALIFYING/FETCHING/
+PROCESSING/UPLOADING/DONE/ERROR/FLAGGED_FOREIGN_AUDIO/
+FLAGGED_UNDETERMINED/FLAGGED_MANUAL/FLAGGED_CORRUPT. **No REPLACED
+enum** — "replaced" appears in some raw SQL but isn't in the enum.
+
+Groupings: `TERMINAL_STATUSES` (DONE + all FLAGGED_*),
+`ACTIVE_STATUSES` (QUALIFYING/FETCHING/PROCESSING/UPLOADING).
+
+Schema: `pipeline_files` table, `filepath` is PRIMARY KEY. Direct
+columns + `extras` JSON column. `idx_files_status` for state filtering.
+
+Key class:
+- `PipelineState` (line 247) — `set_file(filepath, status, **kwargs)`
+  is the canonical write. Guards inside `set_file`:
+  - Rejects DONE with deferred/skipped reason (rule 1 enforcement).
+  - On DONE transition, scrubs failure-flavoured reasons via
+    `__scrub_stale_reason` sentinel.
+  - Read-back-parse on the `extras` JSON before commit (catches the
+    `JSONEncoder.key_separator` corruption class).
+  - Uses `separators=(",", ": ")` explicitly to survive that
+    corruption when it fires.
+
+## `pipeline/orchestrator.py` (~1700 lines)
+
+`Orchestrator` class (line 38). Threading model: GPU worker(s) +
+fetch worker + prep worker(s) + upload worker + gap_filler +
+refresh worker. Shared state via `_dispatched`, `_gpu_wants_set`,
+`_prepping`, `_prep_skip` + dedicated locks.
+
+Worker entry points:
+- `_gpu_worker` (616) — picks via `_pick_next_locked`, runs
+  `full_gamut(...)` per file.
+- `_fetch_worker` (721) — two-pass loop: Priority 1 = whatever
+  GPU is blocked on (`_get_gpu_wants`), Priority 2 = pre-fetch
+  next queue items. Handles `SOURCE_MISSING` sentinel from
+  `fetch_file` via `_remove_missing_source` (line 813) which
+  drops the queue entry + flags state flagged_corrupt.
+- `_post_fetch` (855) — eager CPU work (language detect, sidecar
+  scan) so the GPU worker doesn't pay the cost.
+- `_gap_filler_worker` (938) — strip / mux / metadata fixes that
+  don't need full re-encode.
+- `_pick_next_locked(queue)` (1302) — first picks already-fetched
+  items (status=PROCESSING + local file exists), then pending.
+  Skips ACTIVE/ERROR/terminal.
+- `_upload_worker` (1351) + `_pick_for_upload` (1397).
+- `_prep_worker` (1423) — circuit-breaker counts consecutive prep
+  crashes per filepath. Three failures → flagged_manual or
+  in-memory `_prep_skip`.
+- `_refresh_worker` (1581) — periodically re-reads media_report
+  (1800s default) and priority.json (10s — `_apply_priority_resort`
+  at line 1638).
+- `_merge_new_files(full_queue, gap_queue, report_path)` (1675) —
+  iterates report, appends new entries to queues. Skips known paths
+  and terminal-state rows.
+
+## `frontend/src/pages/dashboard/Library.jsx` (~1800 lines)
+
+The Library browser + Inspector. Reads `data.files` (from
+`/api/media-report`) + `data.codecs` + `data.resolutions` +
+`pipelineData.files` (state DB summary).
+
+Top-level module exports + predicates:
+- `drillFailures` (line 73) — predicate-per-drill-key for the
+  Glance drill-ins. `grade_optimal` (121) matches `too_low |
+  too_high | unknown` (deliberately excludes `inferred_uncertain`
+  to align with the KPI denominator).
+- `parseCodecResDrill(key)` (156) — parses `codec:av1` / `res:4k`.
+- `_needsEncode(f)` (174) — MODULE SCOPE (was inside the component
+  before, TDZ crash 2026-05-22). Predicate for the "Needs encode"
+  Status chip: non-AV1 OR AV1 with cur != tgt.
+
+Component (line 185 `export function Library`):
+- Filter state at ~167: `{codec, res, hdr, atmos, foreignSubs,
+  status, library, hideDone}`.
+- `bucketCounts` useMemo (~338): counts files by `cq_audit_bucket`.
+- `rows` useMemo (~348): the filtered + sorted list. Filter chain:
+  drillFn → cqBucket → query → codec → res → hdr → atmos →
+  foreignSubs → status (needs_encode / errored / flagged_corrupt)
+  → hideDone → library. Hide set for grade-optimal in-flight
+  EXCLUDES "pending" (see commit 6626f40).
+- `toggleCodecChip` + `toggleResChip` (~415-422): chip-click clears
+  the matching drill so chip + drill don't conflict.
+- Bucket chip row at ~625 (grade_optimal drill only).
+- Codec / Res / Status chip rows ~720-840.
+- Action panel + "Queue re-encode" button ~1700: text becomes
+  "Queue encode" for non-AV1 sources.
+
+---
+
+# Cost / model selection
+
+Default to **Sonnet** for routine turns (status checks, dashboard
+glance answers, single-edit acknowledgements, "is X done?"
+questions, log-grep follow-ups, restart-and-reap dances). Reserve
+**Opus** for: multi-file refactors, complex debugging across
+modules, designing new abstractions, or anything spanning >3 files.
+
+Background: harness telemetry on 2026-05-25 flagged 437 short Opus
+turns in 7 days at ~$40 versus the same workload on Sonnet at ~$8.
+Short turns dominate this project (lots of "supervisor died → reap
++ restart" + "checked X, fine" patterns) — those don't need the
+extra model capability.
+
+Switch with `/model sonnet` in Claude Code. Stays per-session, so
+re-set at session start when working on this repo.
