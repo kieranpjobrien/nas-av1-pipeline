@@ -111,8 +111,29 @@ def get_free_space(path: str) -> int:
     return shutil.disk_usage(path).free
 
 
-def fetch_file(item: dict, staging_dir: str, config: dict, state: PipelineState, force: bool = False) -> Optional[str]:
-    """Copy file from NAS to local staging. Returns local path or None on failure."""
+# Sentinel returned by ``fetch_file`` when the source file isn't on
+# disk at the recorded path. Callers (the fetch worker in
+# orchestrator.py) treat this as "remove from in-memory queue + flag
+# the state row" rather than "transient failure, retry next tick".
+# 2026-05-24: introduced after a rename-ghost incident where 14
+# dashed-format paths sat in the in-memory queue producing one
+# error state row per fetch attempt until the queue was rebuilt by
+# a supervisor restart.
+SOURCE_MISSING = object()
+
+
+def fetch_file(item: dict, staging_dir: str, config: dict, state: PipelineState, force: bool = False):
+    """Copy file from NAS to local staging.
+
+    Returns:
+      * str local path on success
+      * SOURCE_MISSING sentinel if the source file isn't on disk at the
+        recorded path (caller should remove the item from the queue —
+        retrying won't help; the file's been renamed or deleted)
+      * None on transient/recoverable failure (buffer full, already
+        being fetched by another thread, copy error — caller waits
+        and retries on the next tick)
+    """
     source = item["filepath"]
     # Mirror directory structure under staging/fetch/
     fetch_dir = os.path.join(staging_dir, "fetch")
@@ -153,13 +174,13 @@ def fetch_file(item: dict, staging_dir: str, config: dict, state: PipelineState,
         time.sleep(2)
         if not os.path.exists(source):
             logging.warning(f"Source file not found after 2s re-probe: {item['filename']}")
-            state.set_file(
-                source,
-                FileStatus.ERROR,
-                stage="fetch",
-                error="source file not found",
-            )
-            return None
+            # 2026-05-24: don't INSERT an ERROR state row anymore — that
+            # poisoned the dashboard with rename-ghost rows. Return the
+            # SOURCE_MISSING sentinel so the caller can remove the item
+            # from the in-memory queue and (optionally) flag the state
+            # row as missing. The bare logging.warning above is the
+            # audit trail.
+            return SOURCE_MISSING
 
     # Atomically claim this file for fetching — prevents the prefetch thread
     # and main loop from copying the same file concurrently (WinError 32).

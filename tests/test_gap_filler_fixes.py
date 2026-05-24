@@ -91,12 +91,20 @@ class TestTrackStripFailure:
 
 
 class TestFetchMissingSource:
-    """FIX 3: fetch_file with a missing source must mark ERROR (after 2s re-probe), not DONE."""
+    """FIX 3: fetch_file with a missing source must NOT mark DONE — the
+    Bluey-via-deferred path that lost files. Original test (pre-2026-05-24)
+    asserted state.set_file(ERROR) and return None. Post-fix: returns
+    SOURCE_MISSING sentinel and lets the caller flag + clean up the queue
+    (see tests/test_fetch_source_missing.py for the new contract). The
+    underlying invariant — 'missing source must never be marked DONE' —
+    is preserved; only the failure surface changed."""
 
-    def test_fetch_missing_source_marks_error(self, tmp_state_db, tmp_path, min_config):
-        """os.path.exists returns False on both probes → ERROR with stage='fetch'."""
+    def test_fetch_missing_source_returns_sentinel(self, tmp_state_db, tmp_path, min_config):
+        """os.path.exists returns False on both probes → SOURCE_MISSING
+        sentinel (no state write — caller's job)."""
+        from pipeline.transfer import SOURCE_MISSING
+
         source = str(tmp_path / "missing.mkv")
-        # Don't create the file — it's genuinely missing
         item = {
             "filepath": source,
             "filename": "missing.mkv",
@@ -104,17 +112,21 @@ class TestFetchMissingSource:
         }
         state = PipelineState(tmp_state_db)
 
-        # Patch time.sleep so the 2s re-probe delay doesn't slow the test
         with patch("pipeline.transfer.time.sleep"):
             result = fetch_file(item, str(tmp_path), min_config, state)
 
         saved = state.get_file(source)
         state.close()
-        assert result is None
-        assert saved is not None
-        assert saved["status"] == FileStatus.ERROR.value
-        assert saved.get("stage") == "fetch"
-        assert "not found" in (saved.get("error") or "").lower()
+        assert result is SOURCE_MISSING, (
+            f"missing source must return SOURCE_MISSING sentinel; got {result!r}"
+        )
+        # Critically: NO DONE state row. The original incident was 'mark
+        # DONE on failure'; that's still forbidden. ERROR rows were the
+        # 2026-04-23 fix but produced rename-ghost pollution; now the
+        # caller handles cleanup.
+        assert saved is None or saved["status"] != FileStatus.DONE.value, (
+            "missing source must NEVER be marked DONE"
+        )
 
 
 class TestStateGuard:

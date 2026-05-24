@@ -15,7 +15,7 @@ from pipeline.circuit_breaker import CircuitBreaker, CircuitBreakerOpen
 from pipeline.ffmpeg import format_bytes
 from pipeline.full_gamut import finalize_upload, full_gamut
 from pipeline.state import ACTIVE_STATUSES, FileStatus, PipelineState, is_terminal
-from pipeline.transfer import fetch_file
+from pipeline.transfer import SOURCE_MISSING, fetch_file
 
 # Filename suffixes written by the pipeline's tmp-mux / staging steps.
 # Shared with tools.scanner so both sides agree on what to exclude from
@@ -763,6 +763,10 @@ class Orchestrator:
                         "library_type": "movie" if "Movies" in gpu_wants else "series",
                     }
                 result = fetch_file(entry, self.staging_dir, self.config, self.state)
+                if result is SOURCE_MISSING:
+                    self._remove_missing_source(queue, gpu_wants)
+                    did_work = True
+                    break
                 if result is not None:
                     self._post_fetch(entry)
                     did_work = True
@@ -792,6 +796,10 @@ class Orchestrator:
                 if self.control.should_skip(fp):
                     continue
                 result = fetch_file(item, self.staging_dir, self.config, self.state)
+                if result is SOURCE_MISSING:
+                    self._remove_missing_source(queue, fp)
+                    did_work = True
+                    break
                 if result is not None:
                     self._post_fetch(item)
                     did_work = True
@@ -801,6 +809,48 @@ class Orchestrator:
                 self._shutdown.wait(timeout=5)
 
         logging.info(f"{tag} finished")
+
+    def _remove_missing_source(self, queue: list[dict], filepath: str) -> None:
+        """Drop a missing-source entry from the in-memory queue + flag its
+        state row so the picker won't re-attempt it.
+
+        Called when ``fetch_file`` returns ``SOURCE_MISSING`` — the file
+        at the recorded path doesn't exist on disk and won't without a
+        re-acquire. Retrying every refresh tick produces a stream of
+        error state rows that clutter the dashboard (rename-ghost
+        incident, 2026-05-24).
+
+        Self-cleaning: removes the item from the in-memory queue, clears
+        gpu_wants if it points at this path, and stamps the state row
+        flagged_corrupt with a clear 'source missing' reason. The
+        flagged_corrupt status auto-resets on mtime advance — so if the
+        operator re-downloads the file at the SAME path the
+        categorise_entry flagged-auto-reset will resurrect it. If the
+        file's been renamed away (the usual case), the new name lands
+        in media_report on the next scanner pass and gets its own
+        fresh state row.
+        """
+        try:
+            with self._dispatched_lock:
+                # Remove every queue entry with this filepath. Defensive
+                # filter rather than .remove() in case of duplicates.
+                queue[:] = [it for it in queue if it.get("filepath") != filepath]
+            self._set_gpu_wants(None, previous=filepath)
+            self._dispatched.discard(filepath)
+            self.state.set_file(
+                filepath,
+                FileStatus.FLAGGED_CORRUPT,
+                stage="fetch",
+                reason="source missing on disk (renamed/deleted); "
+                       "auto-resets if a file reappears at this path",
+            )
+            logging.warning(
+                f"  → removed missing source from queue + flagged: "
+                f"{os.path.basename(filepath)}"
+            )
+        except Exception as e:  # noqa: BLE001
+            logging.warning(f"  → cleanup after SOURCE_MISSING failed for "
+                          f"{os.path.basename(filepath)}: {e}")
 
     def _post_fetch(self, item: dict) -> None:
         """Eager CPU work on a freshly-fetched file so the GPU worker doesn't pay the cost.
