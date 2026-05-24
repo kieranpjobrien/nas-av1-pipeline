@@ -114,13 +114,15 @@ const drillFailures = {
   filename: (f) => f.filename_matches_folder === false,
   // Folder doesn't match (English filename rule, same flag in current API)
   english_filename: (f) => f.filename_matches_folder === false,
-  // Grade-optimal: any file that's NOT in the optimal bucket. The audit
-  // bucket (optimal/too_low/too_high/unknown) is read from the audit
-  // sidecar JSON written by tools.audit_encode_cq. Without the sidecar we
-  // have no bucket info at all → show nothing rather than guess.
+  // Grade-optimal: align with the KPI denominator (server's
+  // grade_total_audited = optimal + too_low + too_high + unknown).
+  // The KPI explicitly EXCLUDES inferred_uncertain from the
+  // "to go" count, so the drill must too — otherwise the button
+  // says "753 to go" but the drill shows 1,541 files including the
+  // inferred ones (mismatch reported 2026-05-24).
   grade_optimal: (f) => {
     const b = f.cq_audit_bucket;
-    return b && b !== "optimal";
+    return b === "too_low" || b === "too_high" || b === "unknown";
   },
 };
 const drillLabel = {
@@ -347,13 +349,15 @@ export function Library({ data, pipelineData, onFileOpen, drillKey, onClearDrill
 
   const rows = useMemo(() => {
     const source = drillKey === "grade_optimal" ? annotatedAll : all;
-    // Pipeline statuses that mean "already being handled" — exclude from
-    // the grade-optimal drill so the user doesn't see the same files
-    // listed after they queue them. Anything pending/processing/in-flight
-    // will end up at the new grade target after its encode completes,
-    // so showing it as "needs work" is just stale-state noise.
+    // Pipeline statuses meaning "currently being worked on right now"
+    // — exclude from the grade-optimal drill since the encode is
+    // mid-flight. Pre-2026-05-24 this set included "pending" too, on
+    // the theory that a queued file doesn't need user action. That
+    // backfired: the KPI button advertised "753 to go" but the drill
+    // hid all 743 queued non-optimal rows, leaving the user with 7.
+    // "pending" stays visible — it IS the to-do list.
     const inFlightStatuses = new Set([
-      "pending", "processing", "encoding", "fetching",
+      "processing", "encoding", "fetching",
       "uploading", "qualifying", "queued",
     ]);
     const filtered = source.filter((f) => {
