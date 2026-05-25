@@ -2,6 +2,7 @@
 Extracted from encoding.py — pure functions that build ffmpeg commands.
 No state management, no file I/O beyond ffprobe queries."""
 
+import json
 import logging
 import os
 import subprocess
@@ -45,6 +46,49 @@ def format_duration(secs: float) -> str:
     if secs < 3600:
         return f"{secs / 60:.0f}m {secs % 60:.0f}s"
     return f"{secs / 3600:.0f}h {(secs % 3600) / 60:.0f}m"
+
+
+def _probe_source_color(input_path: str) -> dict[str, Optional[str]]:
+    """ffprobe the source's video colour tags. Returns a dict with
+    color_primaries / color_transfer / color_space — ``None`` for any
+    field the source doesn't tag explicitly.
+
+    Background: pre-2026-05-26 the encoder only emitted explicit
+    -color_primaries / -color_trc / -colorspace flags for HDR or
+    HDR-tonemap paths. SDR encodes got NO colour tags, so the AV1
+    stream went out with "unspecified" and players default-guessed
+    the matrix. On 10-bit SDR content (e.g. 4K SDR rips) players
+    often guess BT.2020 because of the bit depth → green / purple
+    tint. Confirmed on 1917 (2019) and The Drama (2026).
+
+    The fix passes the SOURCE's actual tags through; the SDR branch
+    in ``build_ffmpeg_cmd`` falls back to BT.709 when this returns
+    None — that matches virtually all SDR content correctly and
+    eliminates the player-guess hazard.
+    """
+    out = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "stream=color_primaries,color_transfer,color_space",
+         "-of", "json", input_path],
+        capture_output=True, text=True, timeout=15
+    )
+    if out.returncode != 0:
+        return {"color_primaries": None, "color_transfer": None, "color_space": None}
+    try:
+        info = json.loads(out.stdout)
+        s = (info.get("streams") or [{}])[0]
+    except (json.JSONDecodeError, IndexError, AttributeError):
+        return {"color_primaries": None, "color_transfer": None, "color_space": None}
+    # ffprobe returns "unknown" / "reserved" for unspecified; normalise.
+    def _norm(v: Optional[str]) -> Optional[str]:
+        if v in (None, "", "unknown", "reserved"):
+            return None
+        return v
+    return {
+        "color_primaries": _norm(s.get("color_primaries")),
+        "color_transfer": _norm(s.get("color_transfer")),
+        "color_space": _norm(s.get("color_space")),
+    }
 
 
 def get_duration(filepath: str) -> Optional[float]:
@@ -651,6 +695,28 @@ def build_ffmpeg_cmd(
                 "smpte2084",
                 "-colorspace",
                 "bt2020nc",
+            ]
+        )
+    else:
+        # SDR (2026-05-26): explicit colour tags are mandatory, not
+        # optional. Pre-fix the SDR branch emitted no -color_* flags
+        # so AV1 went out as "unspecified" and players guessed the
+        # matrix. 1917 came out green; The Drama came out purple —
+        # both classic guess-mismatch tints on 10-bit SDR content.
+        # Strategy: pass through the source's actual tags when
+        # tagged, fall back to BT.709 when not. Virtually all SDR
+        # content is BT.709 SDR so the fallback matches reality;
+        # the rare 4K-SDR-with-BT.2020-primaries class gets its
+        # source tags preserved.
+        src_color = _probe_source_color(input_path)
+        primaries = src_color["color_primaries"] or "bt709"
+        transfer = src_color["color_transfer"] or "bt709"
+        matrix = src_color["color_space"] or "bt709"
+        cmd.extend(
+            [
+                "-color_primaries", primaries,
+                "-color_trc", transfer,
+                "-colorspace", matrix,
             ]
         )
 
