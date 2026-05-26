@@ -473,7 +473,8 @@ def gap_fill(
         try:
             update_entry(filepath, library_type)
         except Exception as e:
-            logging.warning(f"  Report update failed: {e}")
+            # 2026-05-27: full traceback — see pipeline.report.update_entry.
+            logging.warning(f"  Report update failed: {e}", exc_info=True)
 
         # If track strip was deferred (SSH unavailable / rc=137 / exception), the file is
         # NOT done — its audio/sub tracks still need stripping. Marking DONE here lost 65

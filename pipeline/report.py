@@ -146,7 +146,13 @@ def update_entry(
             patch_report(_patch)
             return True
         except Exception as e:
-            logging.warning(f"Report update failed: {e}")
+            # 2026-05-27: log the full traceback so the recurring
+            # "'str' object is not an iterator" warning (which has
+            # preceded 4+ silent supervisor segfaults so far)
+            # captures its origin line on the next firing. Without
+            # this the warning message alone says nothing about
+            # where in the patch logic the type confusion happens.
+            logging.warning(f"Report update failed: {e}", exc_info=True)
             return False
 
 

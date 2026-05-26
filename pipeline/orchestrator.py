@@ -1221,7 +1221,11 @@ class Orchestrator:
 
                     update_entry(filepath, library_type)
                 except Exception as e:
-                    logging.warning(f"  Report update failed for {filename}: {e}")
+                    # 2026-05-27: full traceback — see pipeline.report.update_entry.
+                    logging.warning(
+                        f"  Report update failed for {filename}: {e}",
+                        exc_info=True,
+                    )
 
                 quick_queue.task_done()
 

@@ -1969,7 +1969,12 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
     try:
         update_entry(final_path, library_type, enriched_streams=enriched or None)
     except Exception as e:
-        logging.debug(f"  Report update failed: {e}")
+        # 2026-05-27: full traceback on this warning class — see
+        # pipeline.report.update_entry for the rationale. The
+        # "'str' object is not an iterator" message has been the
+        # canary preceding 4+ silent supervisor segfaults; we need
+        # the stack to find the actual offending line.
+        logging.warning(f"  Report update failed: {e}", exc_info=True)
 
     # === Plex scan ===
     _trigger_plex_scan(final_path)
