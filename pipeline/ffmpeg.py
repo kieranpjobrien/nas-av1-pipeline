@@ -50,35 +50,40 @@ def format_duration(secs: float) -> str:
 
 def _probe_source_color(input_path: str) -> dict[str, Optional[str]]:
     """ffprobe the source's video colour tags. Returns a dict with
-    color_primaries / color_transfer / color_space — ``None`` for any
-    field the source doesn't tag explicitly.
+    color_primaries / color_transfer / color_space / color_range —
+    ``None`` for any field the source doesn't tag explicitly.
 
-    Background: pre-2026-05-26 the encoder only emitted explicit
-    -color_primaries / -color_trc / -colorspace flags for HDR or
-    HDR-tonemap paths. SDR encodes got NO colour tags, so the AV1
-    stream went out with "unspecified" and players default-guessed
-    the matrix. On 10-bit SDR content (e.g. 4K SDR rips) players
-    often guess BT.2020 because of the bit depth → green / purple
-    tint. Confirmed on 1917 (2019) and The Drama (2026).
+    Background — two recurring bugs solved by passing source tags through:
 
-    The fix passes the SOURCE's actual tags through; the SDR branch
-    in ``build_ffmpeg_cmd`` falls back to BT.709 when this returns
-    None — that matches virtually all SDR content correctly and
-    eliminates the player-guess hazard.
+    1. 2026-05-26: SDR encodes had no -color_primaries / -color_trc /
+       -colorspace flags. AV1 stream went out tagged "unspecified",
+       players default-guessed the matrix, 10-bit SDR landed on
+       BT.2020 → green / purple tint (1917, The Drama, Avatar, etc.).
+    2. 2026-05-28: SDR encodes had no -color_range flag. NVENC silently
+       re-scaled limited-range inputs, lifting the black floor from
+       Y=16 to ~Y=43-53. User noticed "blacks not black enough" on
+       Lion (2016). signalstats confirmed the lift.
+
+    The fix passes the SOURCE's actual tags through; the SDR branch in
+    ``build_ffmpeg_cmd`` falls back to BT.709 + tv (limited) range when
+    the source is untagged — matches virtually all SDR content correctly.
     """
     out = subprocess.run(
         ["ffprobe", "-v", "error", "-select_streams", "v:0",
-         "-show_entries", "stream=color_primaries,color_transfer,color_space",
+         "-show_entries",
+         "stream=color_primaries,color_transfer,color_space,color_range",
          "-of", "json", input_path],
         capture_output=True, text=True, timeout=15
     )
     if out.returncode != 0:
-        return {"color_primaries": None, "color_transfer": None, "color_space": None}
+        return {"color_primaries": None, "color_transfer": None,
+                "color_space": None, "color_range": None}
     try:
         info = json.loads(out.stdout)
         s = (info.get("streams") or [{}])[0]
     except (json.JSONDecodeError, IndexError, AttributeError):
-        return {"color_primaries": None, "color_transfer": None, "color_space": None}
+        return {"color_primaries": None, "color_transfer": None,
+                "color_space": None, "color_range": None}
     # ffprobe returns "unknown" / "reserved" for unspecified; normalise.
     def _norm(v: Optional[str]) -> Optional[str]:
         if v in (None, "", "unknown", "reserved"):
@@ -88,6 +93,7 @@ def _probe_source_color(input_path: str) -> dict[str, Optional[str]]:
         "color_primaries": _norm(s.get("color_primaries")),
         "color_transfer": _norm(s.get("color_transfer")),
         "color_space": _norm(s.get("color_space")),
+        "color_range": _norm(s.get("color_range")),
     }
 
 
@@ -684,9 +690,14 @@ def build_ffmpeg_cmd(
                 "bt709",
                 "-colorspace",
                 "bt709",
+                "-color_range",
+                "tv",
             ]
         )
     elif is_hdr:
+        # HDR preserved: probe source for actual range (most HDR is tv,
+        # but some HDR10+ / Dolby Vision masters are full).
+        src_color = _probe_source_color(input_path)
         cmd.extend(
             [
                 "-color_primaries",
@@ -695,28 +706,35 @@ def build_ffmpeg_cmd(
                 "smpte2084",
                 "-colorspace",
                 "bt2020nc",
+                "-color_range",
+                src_color["color_range"] or "tv",
             ]
         )
     else:
-        # SDR (2026-05-26): explicit colour tags are mandatory, not
-        # optional. Pre-fix the SDR branch emitted no -color_* flags
-        # so AV1 went out as "unspecified" and players guessed the
-        # matrix. 1917 came out green; The Drama came out purple —
-        # both classic guess-mismatch tints on 10-bit SDR content.
+        # SDR (2026-05-26 + 2026-05-28): explicit colour tags are
+        # mandatory. Pre-fix the SDR branch emitted no -color_*
+        # flags at all; first iteration added primaries/trc/colorspace
+        # (fixed purple tints on 1917/Drama/Avatar/Groundhog Day).
+        # Second iteration adds -color_range — NVENC was silently
+        # re-scaling limited-range inputs and lifting the black floor
+        # from Y=16 to ~Y=43-53 (Lion 2016 case; user reported
+        # "blacks not black enough").
         # Strategy: pass through the source's actual tags when
-        # tagged, fall back to BT.709 when not. Virtually all SDR
-        # content is BT.709 SDR so the fallback matches reality;
-        # the rare 4K-SDR-with-BT.2020-primaries class gets its
+        # tagged, fall back to BT.709 + tv (limited range) when not.
+        # Virtually all SDR content is BT.709 limited-range so the
+        # fallback matches reality; rare exceptions get their
         # source tags preserved.
         src_color = _probe_source_color(input_path)
         primaries = src_color["color_primaries"] or "bt709"
         transfer = src_color["color_transfer"] or "bt709"
         matrix = src_color["color_space"] or "bt709"
+        rng = src_color["color_range"] or "tv"
         cmd.extend(
             [
                 "-color_primaries", primaries,
                 "-color_trc", transfer,
                 "-colorspace", matrix,
+                "-color_range", rng,
             ]
         )
 

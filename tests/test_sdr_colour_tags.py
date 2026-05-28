@@ -54,7 +54,10 @@ def _build_sdr_cmd(source_color_tags: dict[str, str | None] | None = None) -> li
         "color_primaries": None,
         "color_transfer": None,
         "color_space": None,
+        "color_range": None,
     }
+    # Ensure color_range key exists for older callers
+    tags.setdefault("color_range", None)
     cfg = build_config()
     item = _sdr_item()
     with patch("pipeline.ffmpeg._probe_source_color", return_value=tags):
@@ -106,17 +109,58 @@ def test_sdr_partial_source_tags_mix_with_bt709():
         "color_primaries": "bt709",
         "color_transfer": None,  # missing
         "color_space": "bt709",
+        "color_range": "tv",
     })
     assert _flag_value(cmd, "-color_primaries") == "bt709"
     assert _flag_value(cmd, "-color_trc") == "bt709"  # fell back
     assert _flag_value(cmd, "-colorspace") == "bt709"
 
 
+def test_sdr_color_range_defaults_to_tv_when_source_untagged():
+    """2026-05-28: Lion (2016) class. Source untagged → fallback to tv
+    (limited 16-235). Without -color_range, NVENC silently lifted blacks
+    from Y=16 to ~Y=43-53 on Lion."""
+    cmd = _build_sdr_cmd()  # all None
+    assert _flag_value(cmd, "-color_range") == "tv", (
+        f"missing source range must default to tv (limited); cmd={cmd!r}"
+    )
+
+
+def test_sdr_color_range_passes_source_full_through():
+    """Rare: source explicitly tagged full range (pc) → preserve."""
+    cmd = _build_sdr_cmd({
+        "color_primaries": "bt709",
+        "color_transfer": "bt709",
+        "color_space": "bt709",
+        "color_range": "pc",
+    })
+    assert _flag_value(cmd, "-color_range") == "pc"
+
+
+def test_probe_normalises_color_range_unknown_to_none():
+    """ffprobe returns 'unknown' for unset color_range; must normalise."""
+    fake_stdout = (
+        '{"streams":[{"color_primaries":"bt709","color_transfer":"bt709",'
+        '"color_space":"bt709","color_range":"unknown"}]}'
+    )
+    with patch("pipeline.ffmpeg.subprocess.run") as mock_run:
+        mock_run.return_value.returncode = 0
+        mock_run.return_value.stdout = fake_stdout
+        result = _probe_source_color("/fake.mkv")
+    assert result["color_range"] is None, (
+        f"'unknown' must normalise to None so the SDR fallback (tv) fires; "
+        f"got {result['color_range']!r}"
+    )
+
+
 def test_probe_normalises_unknown_to_none():
     """ffprobe returns 'unknown' / 'reserved' for unset fields. The
     probe helper must normalise those to None so the SDR fallback
     fires for them."""
-    fake_stdout = '{"streams":[{"color_primaries":"unknown","color_transfer":"reserved","color_space":""}]}'
+    fake_stdout = (
+        '{"streams":[{"color_primaries":"unknown","color_transfer":"reserved",'
+        '"color_space":"","color_range":"unknown"}]}'
+    )
     with patch("pipeline.ffmpeg.subprocess.run") as mock_run:
         mock_run.return_value.returncode = 0
         mock_run.return_value.stdout = fake_stdout
@@ -125,12 +169,16 @@ def test_probe_normalises_unknown_to_none():
         "color_primaries": None,
         "color_transfer": None,
         "color_space": None,
+        "color_range": None,
     }
 
 
 def test_probe_returns_real_tags_unchanged():
     """When ffprobe returns concrete colour names, they pass through."""
-    fake_stdout = '{"streams":[{"color_primaries":"bt709","color_transfer":"bt709","color_space":"bt709"}]}'
+    fake_stdout = (
+        '{"streams":[{"color_primaries":"bt709","color_transfer":"bt709",'
+        '"color_space":"bt709","color_range":"tv"}]}'
+    )
     with patch("pipeline.ffmpeg.subprocess.run") as mock_run:
         mock_run.return_value.returncode = 0
         mock_run.return_value.stdout = fake_stdout
@@ -139,4 +187,5 @@ def test_probe_returns_real_tags_unchanged():
         "color_primaries": "bt709",
         "color_transfer": "bt709",
         "color_space": "bt709",
+        "color_range": "tv",
     }
