@@ -125,3 +125,78 @@ def test_flagged_manual_stays_skipped(tmp_path):
     cat, _ = categorise_entry(entry, {}, state, control)
     assert cat == "skip"
     assert state.get_file(fp)["status"] == "flagged_manual"
+
+
+# ---------------------------------------------------------------------------
+# 2026-06-01: ffprobe verification before trusting report's stale codec data
+# ---------------------------------------------------------------------------
+
+
+def test_done_with_stale_report_codec_does_not_reset_when_ffprobe_says_av1(tmp_path, monkeypatch):
+    """The 2026-06-01 incident: media_report had codec_raw='hevc' on 15
+    DONE rows where ffprobe confirmed the file was actually AV1 (the
+    report was stale post-re-encode). My auto-reset rule wrongly kicked
+    them back into the queue → fetch/encode failed → 15 spurious error
+    rows in the dashboard.
+
+    Fix: ffprobe the file before trusting the report. When the report's
+    codec disagrees with ffprobe, ffprobe wins (it's the live truth)."""
+    state = _state(tmp_path)
+    control = _control(tmp_path)
+    fp = r"\NAS\Movies\StaleReport\StaleReport.mkv"
+
+    state.set_file(fp, FileStatus.DONE, reason="real prior encode")
+    entry = _entry(fp, codec_raw="hevc")  # report claims hevc (STALE)
+
+    # Stub ffprobe to return av1 (the truth)
+    from pipeline import __main__ as main_mod
+    monkeypatch.setattr(main_mod, "_ffprobe_video_codec", lambda fp, **kw: "av1")
+
+    cat, _ = categorise_entry(entry, {}, state, control)
+    assert cat == "skip", (
+        f"stale report codec must NOT trigger reset when ffprobe confirms "
+        f"the file is already AV1; got cat={cat!r}"
+    )
+    # Status should be unchanged
+    assert state.get_file(fp)["status"] == "done"
+
+
+def test_done_with_report_codec_hevc_resets_when_ffprobe_confirms_hevc(tmp_path, monkeypatch):
+    """The genuine case: report says hevc AND ffprobe confirms hevc.
+    The reset should still fire — both agree the file needs work."""
+    state = _state(tmp_path)
+    control = _control(tmp_path)
+    fp = r"\NAS\Movies\GenuineHevc\GenuineHevc.mkv"
+
+    state.set_file(fp, FileStatus.DONE, reason="hevc-stale-DONE class")
+    entry = _entry(fp, codec_raw="hevc")
+
+    from pipeline import __main__ as main_mod
+    monkeypatch.setattr(main_mod, "_ffprobe_video_codec", lambda fp, **kw: "hevc")
+
+    cat, _ = categorise_entry(entry, {}, state, control)
+    assert cat == "full_gamut", (
+        f"genuine hevc DONE must reset for re-encode; got cat={cat!r}"
+    )
+    row = state.get_file(fp)
+    assert row["status"] == "pending"
+    assert row.get("force_reencode") is True
+
+
+def test_done_ffprobe_failure_falls_back_to_report(tmp_path, monkeypatch):
+    """If ffprobe can't read the file (returns None), trust the report.
+    Conservative: don't skip-reset just because the probe failed —
+    that would mask genuine codec mismatches."""
+    state = _state(tmp_path)
+    control = _control(tmp_path)
+    fp = r"\NAS\Movies\ProbeFail\ProbeFail.mkv"
+
+    state.set_file(fp, FileStatus.DONE, reason="probe-fail class")
+    entry = _entry(fp, codec_raw="h264")
+
+    from pipeline import __main__ as main_mod
+    monkeypatch.setattr(main_mod, "_ffprobe_video_codec", lambda fp, **kw: None)
+
+    cat, _ = categorise_entry(entry, {}, state, control)
+    # Probe failed → trust report → h264 → reset to pending
+    assert cat == "full_gamut"

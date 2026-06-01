@@ -111,6 +111,36 @@ def _build_full_gamut_item(entry: dict) -> dict:
     }
 
 
+def _ffprobe_video_codec(filepath: str, *, timeout: int = 15) -> str | None:
+    """Return the live on-disk video codec name (e.g. 'av1', 'hevc', 'h264'),
+    or None on probe failure.
+
+    Used by the codec-mismatch auto-reset rule in ``categorise_entry`` to
+    verify that the report's codec field actually matches the file. The
+    report rebuilds on a schedule and can be stale after a re-encode lands;
+    relying on it alone caused 15 DONE-AV1 rows to be wrongly reset on
+    2026-06-01 (media_report still said 'hevc' for them).
+
+    Light call — ~50 ms per probe, only fires on DONE rows whose report
+    codec disagrees with 'av1'. Small set, infrequent path, cost negligible.
+    """
+    import subprocess
+    if not os.path.exists(filepath):
+        return None
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=codec_name",
+             "-of", "csv=p=0", filepath],
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if out.returncode != 0:
+        return None
+    return (out.stdout or "").strip().rstrip(",").lower() or None
+
+
 def _stamp_force_reencode(
     state: PipelineState,
     filepath: str,
@@ -251,18 +281,36 @@ def categorise_entry(
             # In all cases: codec on disk says we have work to do. Reset
             # to pending with force_reencode so the pipeline picks it up.
             # AV1 DONE rows are left alone — they're correctly complete.
+            #
+            # 2026-06-01: codec_raw comes from media_report.json which is
+            # rebuilt by the scanner on a schedule and can be stale. The
+            # auto-reset misfired on 15 DONE rows where report said "hevc"
+            # but ffprobe (truth) said "av1". To prevent this, ffprobe the
+            # file before trusting the report. Cheap (~50 ms per row,
+            # fires only on DONE-claimed-non-AV1 entries — small set).
             if codec_raw and codec_raw != "av1":
+                # Verify via ffprobe before resetting — report may be stale.
+                live_codec = _ffprobe_video_codec(filepath)
+                if live_codec and "av1" in live_codec:
+                    # Report is stale; on-disk file IS AV1. Leave DONE alone.
+                    logging.info(
+                        f"  Auto-reset skipped: report says codec={codec_raw} "
+                        f"but ffprobe says {live_codec} (already AV1) — "
+                        f"media_report is stale, no action: "
+                        f"{os.path.basename(filepath)}"
+                    )
+                    return ("skip", None)
                 logging.info(
-                    f"  Auto-reset {st} → pending: state was {st} but on-disk codec "
-                    f"is {codec_raw} (not AV1) — re-encoding "
-                    f"{os.path.basename(filepath)}"
+                    f"  Auto-reset {st} → pending: state was {st}, report "
+                    f"codec={codec_raw}, ffprobe codec={live_codec or 'unknown'} — "
+                    f"genuinely not AV1, re-encoding {os.path.basename(filepath)}"
                 )
                 state.set_file(
                     filepath,
                     FileStatus.PENDING,
                     stage=None,
                     error=None,
-                    reason=f"auto-reset from {st} — on-disk codec is {codec_raw}, not AV1",
+                    reason=f"auto-reset from {st} — ffprobe-verified codec is {live_codec or codec_raw}, not AV1",
                     force_reencode=True,
                 )
                 # Fall through to normal categorisation against the fresh entry.
