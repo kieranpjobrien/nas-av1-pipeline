@@ -653,6 +653,26 @@ def build_ffmpeg_cmd(
     if not use_hwaccel:
         cmd.extend(["-pix_fmt", pix_fmt])
 
+    # Keyframe interval (GOP cap). 2026-06-01: discovered In the Mood for
+    # Love (4K HDR AV1) had ZERO keyframes in a 60s / 1439-frame window —
+    # av1_nvenc with no explicit -g uses a default GOP so long the stream
+    # is effectively all-inter after the opening IDR. Symptom: video
+    # freezes / skips while audio plays fine, because any dropped frame or
+    # seek can't resync until the (distant) next keyframe. 4K 10-bit HDR is
+    # worst-hit (highest decode load + no recovery points). This gap is
+    # UNCONDITIONAL — every AV1 file we've encoded lacks a keyframe cap.
+    #
+    # Fix: cap the GOP. `-g` is a frame count; a fixed 240 gives a keyframe
+    # at least every 10s @ 24fps / 8s @ 30fps / 4s @ 60fps — all healthy
+    # for seek granularity + error recovery. NVENC still inserts extra
+    # keyframes at scene cuts on top of this cap. Negligible size cost
+    # (a few % more keyframes), and keyframes are higher-quality anyway, so
+    # no conflict with the quality-first policy. Configurable via
+    # `gop_max_frames` (default 240).
+    gop = int(config.get("gop_max_frames", 240) or 0)
+    if gop > 0:
+        cmd.extend(["-g", str(gop)])
+
     # Multipass
     if params["multipass"] != "disabled":
         cmd.extend(["-multipass", params["multipass"]])

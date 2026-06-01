@@ -127,6 +127,41 @@ class TestBuildFfmpegCmdInvariants:
         _assert_no_optional_audio_map(cmd)
         _assert_err_detect_scoped_to_video(cmd)
 
+    def test_gop_cap_present_by_default(self) -> None:
+        """2026-06-01: every AV1 encode must cap the GOP with -g, else
+        av1_nvenc produces a pathologically long keyframe interval (In the
+        Mood for Love had 0 keyframes in a 60s window → video freezes/skips
+        on playback while audio is fine). Default cap is 240 frames."""
+        cmd = build_ffmpeg_cmd(
+            input_path="in.mkv",
+            output_path="out.mkv",
+            item=_base_item(),
+            config=_base_config(),
+        )
+        assert "-g" in cmd, "encode command MUST set -g (keyframe interval cap)"
+        g_val = cmd[cmd.index("-g") + 1]
+        assert g_val == "240", f"default GOP cap should be 240; got {g_val}"
+
+    def test_gop_cap_configurable(self) -> None:
+        """gop_max_frames config overrides the default."""
+        cfg = _base_config()
+        cfg["gop_max_frames"] = 120
+        cmd = build_ffmpeg_cmd(
+            input_path="in.mkv", output_path="out.mkv",
+            item=_base_item(), config=cfg,
+        )
+        assert cmd[cmd.index("-g") + 1] == "120"
+
+    def test_gop_cap_disabled_when_zero(self) -> None:
+        """gop_max_frames=0 disables the cap (escape hatch); no -g emitted."""
+        cfg = _base_config()
+        cfg["gop_max_frames"] = 0
+        cmd = build_ffmpeg_cmd(
+            input_path="in.mkv", output_path="out.mkv",
+            item=_base_item(), config=cfg,
+        )
+        assert "-g" not in cmd
+
 
 class TestBuildAudioRemuxCmdInvariants:
     """Invariants for the audio-remux-only ffmpeg command builder."""
