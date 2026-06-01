@@ -266,6 +266,26 @@ def categorise_entry(
             else:
                 return ("skip", None)
         elif st in ("done", "replaced"):
+            # Explicit re-encode request wins over terminal-skip (2026-06-01).
+            # force_reencode=true on a DONE row means the operator wants
+            # this file re-done despite being complete — e.g. an AV1 file
+            # that needs the colour-tag / black-level fix or a CQ change,
+            # added via priority or the requeue button. WITHOUT this, a
+            # done AV1 file can NEVER be re-encoded through priority: this
+            # terminal-skip fires (returning skip at the bottom of the
+            # branch) before the priority override / force_reencode routing
+            # in the av1 block below ever runs. That's the bug behind "I
+            # keep adding the 7 remaining AV1 re-encodes to priority and
+            # they never get sorted" — they skipped here, then the prune
+            # dropped them from priority.json within 10s.
+            if existing.get("force_reencode"):
+                # Fall through (do NOT return) to the codec-routing blocks
+                # below, which send force_reencode AV1 (and any non-AV1) to
+                # full_gamut. Note this is a bare `if` with `pass`-by-
+                # omission: the subsequent codec checks are `elif`, so when
+                # force_reencode is set we skip them entirely and drop out
+                # of the terminal block to normal routing.
+                existing = state.get_file(filepath)  # refresh, no-op but explicit
             # DONE consistency check (2026-05-24). If the state row says
             # DONE/REPLACED but the file on disk isn't AV1, the row is
             # lying. Causes seen:
@@ -288,7 +308,7 @@ def categorise_entry(
             # but ffprobe (truth) said "av1". To prevent this, ffprobe the
             # file before trusting the report. Cheap (~50 ms per row,
             # fires only on DONE-claimed-non-AV1 entries — small set).
-            if codec_raw and codec_raw != "av1":
+            elif codec_raw and codec_raw != "av1":
                 # Verify via ffprobe before resetting — report may be stale.
                 live_codec = _ffprobe_video_codec(filepath)
                 if live_codec and "av1" in live_codec:
@@ -450,6 +470,18 @@ def _prune_done_from_priority(staging_dir: str | None = None,
     for fp in paths:
         row = state.get_file(fp)
         if row and (row.get("status") or "").lower() in TERMINAL:
+            # KEEP a terminal row the operator explicitly wants re-encoded.
+            # A DONE row with force_reencode=true is an ACTIVE re-encode
+            # request (priority-add / requeue of an already-done AV1 file
+            # for the colour-tag / black-level / CQ fixes), not a completed
+            # item. Pruning it drops the operator's intent — the exact bug
+            # behind "the 7 AV1 re-encodes keep vanishing from priority".
+            # The flag clears (force_reencode=False) on the next successful
+            # DONE in full_gamut, so the row prunes normally once the
+            # re-encode actually lands. 2026-06-01.
+            if row.get("force_reencode"):
+                kept.append(fp)
+                continue
             removed += 1
             continue
         kept.append(fp)

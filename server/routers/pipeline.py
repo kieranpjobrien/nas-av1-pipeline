@@ -114,6 +114,7 @@ def set_priority(req: PriorityRequest) -> dict:
     from paths import NAS_MOVIES, NAS_SERIES, PIPELINE_STATE_DB
 
     current = read_json_safe(CONTROL_DIR / "priority.json") or {}
+    prev_paths = set(current.get("paths") or [])
     merged = {
         "force": req.force if req.force else current.get("force", []),
         "paths": req.paths,
@@ -121,20 +122,31 @@ def set_priority(req: PriorityRequest) -> dict:
     }
     drop_file("priority.json", merged)
 
-    # Seed state DB for any priority path that isn't there yet. Keep
-    # this best-effort: a DB error doesn't fail the priority set
-    # (which we already wrote to disk above).
+    # State-DB sync for priority paths. Two cases, both keyed on the
+    # NEWLY-added delta (paths in this request not already on the list)
+    # so we never disturb files already prioritised:
+    #   * NOT_IN_STATE → insert pending + force_reencode=true (original
+    #     2026-05-13 behaviour: a fresh priority add is immediately
+    #     visible to the queue builder).
+    #   * EXISTING terminal/DONE row → stamp force_reencode=true. WITHOUT
+    #     this, prioritising an already-DONE AV1 file was a silent no-op:
+    #     categorise_entry skipped it (terminal) and the prune dropped it
+    #     from priority.json within 10s. This is the fix for "I keep
+    #     adding the 7 AV1 re-encodes to priority and they never get
+    #     sorted" (2026-06-01). Only the delta is stamped, so files
+    #     already on the priority list keep their existing state.
     seeded = 0
-    if merged["paths"]:
+    newly_added = [p for p in (merged["paths"] or []) if p not in prev_paths]
+    if newly_added:
         nas_movies = os.path.normpath(str(NAS_MOVIES))
         nas_series = os.path.normpath(str(NAS_SERIES))
         try:
             con = _sqlite3.connect(str(PIPELINE_STATE_DB))
             cur = con.cursor()
-            for raw_path in merged["paths"]:
+            for raw_path in newly_added:
                 if not isinstance(raw_path, str) or not raw_path:
                     continue
-                # Safety: only seed NAS-rooted paths so a malformed
+                # Safety: only touch NAS-rooted paths so a malformed
                 # priority entry can't pollute the DB.
                 norm = os.path.normpath(raw_path)
                 if not (norm.startswith(nas_movies) or norm.startswith(nas_series)):
@@ -143,7 +155,8 @@ def set_priority(req: PriorityRequest) -> dict:
                 if not os.path.exists(norm):
                     continue
                 row = cur.execute(
-                    "SELECT 1 FROM pipeline_files WHERE filepath = ?", (raw_path,)
+                    "SELECT status, extras FROM pipeline_files WHERE filepath = ?",
+                    (raw_path,),
                 ).fetchone()
                 if row is None:
                     cur.execute(
@@ -153,6 +166,31 @@ def set_priority(req: PriorityRequest) -> dict:
                          "auto-seeded by priority API"),
                     )
                     seeded += 1
+                else:
+                    # Existing row. Only stamp force_reencode when it's a
+                    # DONE/REPLACED row — that's the no-op case: prioritising
+                    # an already-complete AV1 file did nothing because
+                    # categorise_entry skipped it (terminal) and the prune
+                    # dropped it. PENDING/active rows are left alone — they'll
+                    # encode anyway; priority just reorders them, no force
+                    # needed. flagged_* rows are deliberate parks — don't
+                    # silently un-park them via a priority add.
+                    status, extras_raw = row
+                    if (status or "").lower() in ("done", "replaced"):
+                        try:
+                            ex = _json.loads(extras_raw or "{}")
+                        except (TypeError, ValueError):
+                            ex = {}
+                        if not ex.get("force_reencode"):
+                            ex["force_reencode"] = True
+                            cur.execute(
+                                "UPDATE pipeline_files SET extras = ?, "
+                                "reason = ? WHERE filepath = ?",
+                                (_json.dumps(ex),
+                                 "force_reencode stamped by priority API (re-encode request)",
+                                 raw_path),
+                            )
+                            seeded += 1
             con.commit()
             con.close()
         except _sqlite3.Error:

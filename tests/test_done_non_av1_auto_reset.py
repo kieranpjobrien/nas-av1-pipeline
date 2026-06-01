@@ -25,6 +25,7 @@ up and encodes it properly. AV1 DONE rows are left alone.
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -200,3 +201,89 @@ def test_done_ffprobe_failure_falls_back_to_report(tmp_path, monkeypatch):
     cat, _ = categorise_entry(entry, {}, state, control)
     # Probe failed → trust report → h264 → reset to pending
     assert cat == "full_gamut"
+
+
+# ---------------------------------------------------------------------------
+# 2026-06-01: force_reencode on a DONE row must survive terminal-skip + prune
+# (the "7 AV1 re-encodes keep vanishing from priority" bug)
+# ---------------------------------------------------------------------------
+
+
+def test_done_av1_with_force_reencode_routes_to_full_gamut(tmp_path, monkeypatch):
+    """A DONE AV1 row with force_reencode=true (operator prioritised it for
+    a colour-tag / black-level / CQ re-encode) must route to full_gamut,
+    NOT skip. Pre-fix the terminal-skip block returned skip before the
+    priority/force routing ever ran."""
+    state = _state(tmp_path)
+    control = _control(tmp_path)
+    fp = r"\NAS\Movies\DoneAV1\DoneAV1.mkv"
+
+    state.set_file(fp, FileStatus.DONE, force_reencode=True)
+    entry = _entry(fp, codec_raw="av1")
+
+    from pipeline import __main__ as main_mod
+    monkeypatch.setattr(main_mod, "_ffprobe_video_codec", lambda fp, **kw: "av1")
+
+    cat, item = categorise_entry(entry, {}, state, control, priority_paths={fp})
+    assert cat == "full_gamut", (
+        f"done AV1 + force_reencode must re-encode; got {cat!r}"
+    )
+
+
+def test_done_av1_without_force_reencode_still_skips(tmp_path, monkeypatch):
+    """Negative control: a plain DONE AV1 row (no force_reencode) must
+    still skip — we don't want to re-encode every completed file."""
+    state = _state(tmp_path)
+    control = _control(tmp_path)
+    fp = r"\NAS\Movies\PlainDone\PlainDone.mkv"
+
+    state.set_file(fp, FileStatus.DONE)
+    entry = _entry(fp, codec_raw="av1")
+
+    from pipeline import __main__ as main_mod
+    monkeypatch.setattr(main_mod, "_ffprobe_video_codec", lambda fp, **kw: "av1")
+
+    cat, _ = categorise_entry(entry, {}, state, control)
+    assert cat == "skip", f"plain done AV1 must skip; got {cat!r}"
+
+
+def test_prune_keeps_done_with_force_reencode(tmp_path):
+    """_prune_done_from_priority must KEEP a DONE row that has
+    force_reencode=true — it's an active re-encode request, not a
+    completed item. Pre-fix the prune removed it within 10s, which is
+    why the 7 AV1 re-encodes kept vanishing from priority.json."""
+    import json as _json
+    from pipeline.__main__ import _prune_done_from_priority
+
+    state = _state(tmp_path)
+    os.makedirs(tmp_path / "control", exist_ok=True)
+    fp = r"\NAS\Movies\DoneAV1\DoneAV1.mkv"
+    state.set_file(fp, FileStatus.DONE, force_reencode=True)
+
+    prio = tmp_path / "control" / "priority.json"
+    prio.write_text(_json.dumps({"paths": [fp], "force": [], "patterns": []}))
+
+    removed = _prune_done_from_priority(staging_dir=str(tmp_path), state=state)
+    after = _json.loads(prio.read_text())
+    assert removed == 0, f"force_reencode row must NOT be pruned; removed={removed}"
+    assert fp in after["paths"]
+
+
+def test_prune_removes_plain_done(tmp_path):
+    """Negative control: a plain DONE row (no force_reencode) must still
+    be pruned — that's the legitimate self-cleaning behaviour."""
+    import json as _json
+    from pipeline.__main__ import _prune_done_from_priority
+
+    state = _state(tmp_path)
+    os.makedirs(tmp_path / "control", exist_ok=True)
+    fp = r"\NAS\Movies\PlainDone\PlainDone.mkv"
+    state.set_file(fp, FileStatus.DONE)
+
+    prio = tmp_path / "control" / "priority.json"
+    prio.write_text(_json.dumps({"paths": [fp], "force": [], "patterns": []}))
+
+    removed = _prune_done_from_priority(staging_dir=str(tmp_path), state=state)
+    after = _json.loads(prio.read_text())
+    assert removed == 1, f"plain done row must be pruned; removed={removed}"
+    assert fp not in after["paths"]
