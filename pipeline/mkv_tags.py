@@ -4,8 +4,8 @@ mkvpropedit's ``--tags global:file.xml`` flag *replaces* the entire
 global-tag block. Multiple writers in this codebase want to own
 different parts of the global tag set:
 
-  * ``pipeline.full_gamut._stamp_encode_metadata`` writes
-    ``ENCODER`` / ``CQ`` / ``CONTENT_GRADE``
+  * the compliance-fix encode-tag stamp (``pipeline.compliance_fixers``)
+    writes ``ENCODER`` / ``CQ`` / ``CONTENT_GRADE``
   * ``pipeline.metadata.write_tmdb_to_mkv`` writes
     ``DIRECTOR`` / ``GENRE`` / ``ACTOR`` / ``WRITTEN_BY`` / etc.
   * ``pipeline.grade_review`` writes ``GRADE_REVIEW`` / ``GRADE_REVIEW_AT``

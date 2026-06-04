@@ -537,10 +537,6 @@ class PipelineState:
         self._stats_cache = value
         self._stats_dirty = True
 
-    def mark_stats_dirty(self):
-        """Mark stats as needing a flush. Call after modifying stats dict in-place."""
-        self._stats_dirty = True
-
     def count_active_with_local(self, statuses: list[str]) -> int:
         """Count rows in given statuses that have a non-empty local_path.
 

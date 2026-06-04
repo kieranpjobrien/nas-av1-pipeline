@@ -146,14 +146,6 @@ def _should_transcode_audio(audio: dict, config: dict) -> bool:
     return True
 
 
-def has_bulky_audio(item: dict, config: dict) -> bool:
-    """Check if any audio stream in an item would benefit from transcoding."""
-    for audio in item.get("audio_streams", []):
-        if _should_transcode_audio(audio, config):
-            return True
-    return False
-
-
 def _select_audio_streams(item: dict, config: dict) -> list[int] | None:
     """Determine which audio stream indices to keep.
 

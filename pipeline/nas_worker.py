@@ -153,18 +153,6 @@ def remote_mkvmerge(machine: dict, args: list[str], timeout: int = 900) -> subpr
     return _ssh_docker(machine, "mkvmerge", args, timeout)
 
 
-def remote_mkvpropedit(
-    machine: dict, filepath: str, edit_args: list[str], timeout: int = 60
-) -> subprocess.CompletedProcess:
-    """Run mkvpropedit on a remote machine.
-
-    filepath: container path (/media/...)
-    edit_args: e.g. ['--edit', 'track:s1', '--set', 'language=eng']
-    """
-    args = [filepath] + edit_args
-    return _ssh_docker(machine, "mkvpropedit", args, timeout)
-
-
 def remote_identify(machine: dict, filepath: str, timeout: int = 60) -> Optional[dict]:
     """Run mkvmerge --identify on a remote machine, return parsed JSON."""
     args = ["--identify", "--identification-format", "json", filepath]

@@ -241,3 +241,19 @@ def test_pick_next_locked_skips_prepping_files():
     assert prepping_pos != -1 and first_return != -1 and prepping_pos < first_return, (
         "the _prepping skip must come before the first-pass 'return item'"
     )
+
+
+# --- LOW pass: latent NameError found during dead-code sweep ----------------
+
+
+def test_circuit_breaker_logs_use_defined_variable():
+    """The compliance + integrity circuit-breaker error logs referenced an
+    undefined ``filename`` (only ``filepath`` is in scope at those sites) — a
+    latent NameError that would crash the error-recovery path instead of
+    parking the file as flagged_corrupt. They must use a defined name. Found
+    via ruff F821 while removing dead code; fixed to os.path.basename(filepath)."""
+    src = _src("pipeline/full_gamut.py")
+    assert "CIRCUIT BREAKER: {filename}" not in src, (
+        "circuit-breaker log references undefined `filename` — NameError in the "
+        "error-recovery path; use os.path.basename(filepath)"
+    )

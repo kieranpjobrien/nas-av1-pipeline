@@ -147,56 +147,6 @@ def _parse_release_info(filename: str) -> dict:
     }
 
 
-# Tag names this writer owns. The merge helper drops existing entries
-# with these names before appending the encoder's new values, so a
-# subsequent re-encode replaces the encoder block cleanly without
-# touching DIRECTOR / GENRE / GRADE_REVIEW / etc.
-_ENCODER_OWNED_TAGS = frozenset({"ENCODER", "CQ", "CONTENT_GRADE"})
-
-
-def _stamp_encode_metadata(
-    filepath: str,
-    *,
-    encoder: str,
-    cq: int | None = None,
-    content_grade: str | None = None,
-) -> bool:
-    """Write encode parameters into the MKV's global tags via mkvpropedit.
-
-    Three SimpleTags get added at the global (movie/episode) level:
-      * ``ENCODER``         — full param string for human inspection
-      * ``CQ``              — integer CQ used (machine-readable)
-      * ``CONTENT_GRADE``   — string from content_grade.derive_grade()
-
-    Uses :func:`pipeline.mkv_tags.merge_global_tags` so existing tags
-    (TMDb metadata, GRADE_REVIEW, etc.) are preserved. Pre-2026-05-04
-    this function naked-wrote --tags global, which mkvpropedit honoured
-    by REPLACING the entire global tag block — the subsequent
-    write_tmdb_to_mkv pass then wiped this stamp. Sample of 50 latest
-    done encodes: 0/50 had CQ tag stamped because of that clobber.
-
-    The audit tool now reads tags via mkvextract (mkvmerge --identify
-    only surfaces global-tag *counts*, not values) and compares the
-    stamped CQ to what the current grade rules say it should be.
-
-    Returns True on success, False on any tooling error (caller logs and
-    moves on — the encode itself already succeeded).
-    """
-    from pipeline.mkv_tags import merge_global_tags
-
-    new_tags: list[dict] = [{"name": "ENCODER", "value": encoder}]
-    if cq is not None:
-        new_tags.append({"name": "CQ", "value": str(int(cq))})
-    if content_grade:
-        new_tags.append({"name": "CONTENT_GRADE", "value": content_grade})
-
-    return merge_global_tags(
-        filepath,
-        owned_names=_ENCODER_OWNED_TAGS,
-        new_tags=new_tags,
-    )
-
-
 def _append_history_jsonl(path, entry: dict) -> None:
     """Append a single JSONL entry with fsync. JSONL tolerates partial writes at the
     line level — the worst case from a crash is one truncated trailing line, which
@@ -1276,7 +1226,7 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
             )
             if refuse_count >= COMPLIANCE_REFUSE_BREAKER:
                 logging.error(
-                    f"  CIRCUIT BREAKER: {filename} has been refused by the "
+                    f"  CIRCUIT BREAKER: {os.path.basename(filepath)} has been refused by the "
                     f"compliance gate {refuse_count} times — parking as "
                     f"flagged_corrupt. Cause: {refuse[0].message}"
                 )
@@ -1401,7 +1351,7 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
                 refuse_count = int(prev_extras.get("compliance_refuse_count", 0) or 0) + 1
                 if refuse_count >= COMPLIANCE_REFUSE_BREAKER:
                     logging.error(
-                        f"  CIRCUIT BREAKER: {filename} fixers failed to "
+                        f"  CIRCUIT BREAKER: {os.path.basename(filepath)} fixers failed to "
                         f"resolve compliance violations {refuse_count} times "
                         f"— parking as flagged_corrupt."
                     )
@@ -1489,7 +1439,7 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
         total_failures = int(prev_extras.get("integrity_failure_count", 0) or 0) + 1
         if total_failures >= INTEGRITY_FAIL_BREAKER:
             logging.error(
-                f"  CIRCUIT BREAKER: {filename} has hit integrity failure "
+                f"  CIRCUIT BREAKER: {os.path.basename(filepath)} has hit integrity failure "
                 f"{total_failures} times across history — parking as "
                 f"flagged_corrupt. User must re-acquire source to retry."
             )

@@ -29,7 +29,6 @@ from pathlib import Path
 
 import pytest
 
-from pipeline import gap_filler
 from pipeline.gap_filler import GapAnalysis, gap_fill
 from pipeline.state import FileStatus
 

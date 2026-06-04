@@ -37,7 +37,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from pipeline.config import ENG_LANGS, KEEP_LANGS
+from pipeline.config import ENG_LANGS
 
 # ---------------------------------------------------------------------------
 # HI (hearing-impaired) detection
@@ -124,40 +124,6 @@ def normalise_codec(raw: str | None) -> str:
         return ""
     key = raw.strip().lower()
     return _CODEC_ALIAS.get(key, key)
-
-
-# Map common English variants (including a handful of full names) to a canonical
-# short code. Used only inside normalise_language — callers wanting "is English?"
-# should use ``KEEP_LANGS`` / ``ENG_LANGS`` from pipeline.config.
-_LANG_ALIAS: dict[str, str] = {
-    "english": "eng",
-    "french": "fre",
-    "german": "ger",
-    "spanish": "spa",
-    "italian": "ita",
-    "japanese": "jpn",
-    "korean": "kor",
-    "chinese": "chi",
-    "russian": "rus",
-    "portuguese": "por",
-    "dutch": "dut",
-    "arabic": "ara",
-    "hindi": "hin",
-}
-
-
-def normalise_language(raw: str | None) -> str:
-    """Normalise a language string to lowercase, mapping full names to ISO codes.
-
-    Examples:
-        ``"EN"`` -> ``"en"``
-        ``"English"`` -> ``"eng"``
-        ``None`` -> ``""``
-    """
-    if not raw:
-        return ""
-    key = raw.strip().lower()
-    return _LANG_ALIAS.get(key, key)
 
 
 # ISO 639-1 (TMDb) -> ISO 639-2/B (ffprobe) for the languages we actually see.
@@ -350,41 +316,6 @@ def parse_sub_stream(raw: dict[str, Any], index: int = 0) -> SubStream:
 # ---------------------------------------------------------------------------
 # Selection policies
 # ---------------------------------------------------------------------------
-
-
-def select_audio_keep_indices(
-    streams: list[AudioStream],
-    keep_langs: set[str] | None = None,
-) -> list[int]:
-    """Return the audio stream indices to keep under the library's "original + english/und" rule.
-
-    Always keeps stream 0 (original language). Also keeps any stream whose
-    language is in ``keep_langs`` (defaults to :data:`pipeline.config.KEEP_LANGS`).
-
-    Callers decide whether the resulting list implies a strip:
-      - ``len(kept) < len(streams)`` — strip needed
-      - ``len(kept) >= len(streams)`` — no-op, everything kept
-
-    NOTE: This function does NOT implement the ffmpeg.py historical short-circuit
-    of ``return None`` when ``len(streams) <= 2``. Callers that want that behaviour
-    (skip stripping 1-2 tracks as "not worth it") must check it themselves.
-    Similarly, gap_filler's historical short-circuit was ``len(streams) > 1``.
-    Keeping this module single-purpose avoids conflating those policies.
-    """
-    if keep_langs is None:
-        keep_langs = KEEP_LANGS
-
-    if not streams:
-        return []
-
-    keep: set[int] = {0}  # always keep stream 0 (original language)
-    for s in streams:
-        lang = s.language or (s.detected_language or "")
-        lang = lang.lower().strip()
-        if lang in keep_langs:
-            keep.add(s.index)
-
-    return sorted(keep)
 
 
 # ISO 639-1 ↔ 639-2/3 ↔ name equivalence buckets. Used by the

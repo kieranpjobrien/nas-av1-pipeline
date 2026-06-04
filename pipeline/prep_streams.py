@@ -241,5 +241,3 @@ def strip_streams_locally(
     # Success — return the stripped sibling path. The encoder consumes
     # that path. Caller owns cleanup of both files when encode is done.
     return (True, stripped_path)
-
-    return (True, f"stripped {len(drop_audio)} audio + {len(drop_sub)} sub track(s)")

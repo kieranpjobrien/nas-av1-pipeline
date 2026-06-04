@@ -18,8 +18,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from pipeline import compliance_fixers
-
 
 def test_drop_streams_size_threshold_relaxed_to_ten_percent():
     """The hard-coded size ratio threshold must allow heavy-strip

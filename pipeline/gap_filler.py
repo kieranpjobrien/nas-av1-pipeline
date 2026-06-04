@@ -39,16 +39,6 @@ _MKVPROPEDIT_SEARCH = [
 ]
 
 
-def _find_tool(name: str, search_paths: list[str]) -> Optional[str]:
-    found = shutil.which(name)
-    if found:
-        return found
-    for path in search_paths:
-        if os.path.isfile(path):
-            return path
-    return None
-
-
 @dataclass
 class GapAnalysis:
     """What a file needs to be fully 'done'."""
