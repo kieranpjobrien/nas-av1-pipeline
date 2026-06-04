@@ -124,6 +124,14 @@ export const normalizeFile = (f) => {
     // field wasn't forwarded — AV1 contribution to "Needs encode" was
     // always 0 because every f.audit looked undefined client-side.
     audit: f.audit || null,
+    // TMDb blob + folder-match flag. 2026-06-05 fix: these were dropped by
+    // normalizeFile, so the Glance drill-in predicates drillFailures.tmdb
+    // (reads f.tmdb.tmdb_id) and drillFailures.filename (reads
+    // f.filename_matches_folder) operated on undefined and gave wrong
+    // results (every file "missing TMDb"). The server sends both on every
+    // entry (tmdb.tmdb_id on ~99%, filename_matches_folder on all).
+    tmdb: f.tmdb || null,
+    filename_matches_folder: f.filename_matches_folder ?? null,
   };
 };
 
