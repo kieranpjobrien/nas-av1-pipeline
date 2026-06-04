@@ -666,6 +666,74 @@ class TestSubtitleMapOptional:
                     "stale metadata after remux will crash ffmpeg"
                 )
 
+    def test_map_subtitle_streams_returns_mapped_input_indices(self) -> None:
+        """2026-06-05: _map_subtitle_streams is the single source of truth for
+        which input subs are mapped, in output order. It returns that list (or
+        None for a blanket ``-map 0:s?``) so the caller stamps metadata on the
+        right output index instead of re-deriving (and drifting from) the
+        decision."""
+        from pipeline.ffmpeg import _map_subtitle_streams
+
+        cfg = _base_config()
+        item = {"subtitle_streams": [
+            {"language": "eng", "title": "Forced", "codec": "subrip"},   # kept (forced)
+            {"language": "eng", "title": "", "codec": "subrip"},          # kept (regular)
+            {"language": "fre", "title": "", "codec": "subrip"},          # dropped (foreign)
+        ]}
+        cmd: list[str] = []
+        assert _map_subtitle_streams(cmd, item, cfg) == [0, 1]
+        # With an external English sidecar the regular-eng slot is ceded — only
+        # the forced internal survives.
+        cmd2: list[str] = []
+        assert _map_subtitle_streams(cmd2, item, cfg, external_subs_present=True) == [0]
+        # Blanket cases (no subs / strip disabled) return None = "all, input order".
+        assert _map_subtitle_streams([], {"subtitle_streams": []}, cfg) is None
+        cfg_nostrip = _base_config()
+        cfg_nostrip["strip_non_english_subs"] = False
+        assert _map_subtitle_streams([], item, cfg_nostrip) is None
+
+    def test_external_sub_outidx_uses_mapped_count_not_source_count(self) -> None:
+        """2026-06-05 fix: the external sidecar's output index must continue
+        after the INTERNAL subs ACTUALLY mapped, not after len(source subs).
+
+        Layout: [forced eng, regular eng, foreign fre] + 1 external en.srt.
+        With the sidecar present the mapper keeps only the forced internal
+        (regular-eng slot ceded to the sidecar; foreign dropped) → 1 internal
+        sub at output index 0, so the external belongs at output index 1.
+        Pre-fix ``internal_sub_count = len(3 source subs)`` stamped it at
+        index 3 — a non-existent output stream — so ffmpeg silently dropped
+        the sidecar's language tag and HI disposition.
+        """
+        item = _base_item()
+        item["subtitle_streams"] = [
+            {"language": "eng", "title": "Forced", "codec": "subrip"},
+            {"language": "eng", "title": "", "codec": "subrip"},
+            {"language": "fre", "title": "", "codec": "subrip"},
+        ]
+        cmd = build_ffmpeg_cmd(
+            input_path="in.mkv",
+            output_path="out.mkv",
+            item=item,
+            config=_base_config(),
+            external_subs=["/path/to/movie.en.srt"],
+        )
+        # External sidecar metadata must target output index 1 (only the internal
+        # forced sub precedes it, at index 0). The internal metadata loop never
+        # touches index 1, so this stamp is unambiguously the sidecar's.
+        assert "-metadata:s:s:1" in cmd, (
+            f"external sub must be stamped at output index 1; cmd: {cmd}"
+        )
+        # The buggy old index (len(source subs) == 3) must NOT appear.
+        assert "-metadata:s:s:3" not in cmd, (
+            "external sub stamped at index 3 = the source-sub-count bug is back"
+        )
+        # No phantom index 2 either (only 2 output subs exist: 0 internal, 1 ext).
+        assert "-metadata:s:s:2" not in cmd
+        # The internal forced sub keeps its index-0 forced disposition.
+        assert "-disposition:s:0" in cmd
+        disp_idx = cmd.index("-disposition:s:0")
+        assert cmd[disp_idx + 1] == "forced"
+
 
 class TestAudioPassthroughPolicy:
     """Codecs that must NEVER be transcoded (rule 9a + audio policy)."""

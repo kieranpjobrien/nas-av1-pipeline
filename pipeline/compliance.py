@@ -221,7 +221,7 @@ def check_compliance(
     # the right thing (excludes both forced AND SDH from the regular
     # count); compliance must match or files survive prep cleanly and
     # then loop on the breaker here.
-    from pipeline.streams import is_hi_internal
+    from pipeline.streams import is_forced_internal, is_hi_internal
 
     foreign_sub_indices: list[int] = []
     extra_eng_sub_indices: list[int] = []
@@ -232,9 +232,12 @@ def check_compliance(
             foreign_sub_indices.append(i)
             continue
         # Forced subs — different slot, don't count toward the regular cap.
-        title = (s.get("title") or "").lower()
-        is_forced = "forced" in title or "foreign" in title
-        if is_forced:
+        # Use the canonical disposition+title helper (is_forced_internal) so
+        # this matches the encoder's keep-decision (parse_sub_stream). A
+        # disposition-forced track with no "forced" in its title must not be
+        # miscounted as a regular English sub — that trips extra_eng_subs and
+        # loops the prep circuit breaker (the 2026-05-14 Slow Horses class).
+        if is_forced_internal(s):
             continue
         # SDH / HI subs — also a different slot. Use the canonical
         # disposition + title regex from pipeline.streams so this stays

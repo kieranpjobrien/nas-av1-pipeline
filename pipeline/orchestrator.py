@@ -1317,11 +1317,23 @@ class Orchestrator:
 
         Caller MUST hold `_dispatched_lock`. Skips items already in `_dispatched`.
         """
-        # First pass: find a file that's already fetched (status=PROCESSING, local file exists)
+        # First pass: find a file that's already fetched (status=PROCESSING,
+        # local file exists) and NOT currently being prepped. Skipping
+        # _prepping files closes a GPU-vs-prep double-pick race: the prep
+        # worker holds the file in _prepping while status stays PROCESSING and
+        # it's NOT in _dispatched, so without this guard the GPU worker grabs
+        # the same file, both run prep/encode on it, and they collide on the
+        # stripped-temp / encode output. When prep finishes it releases
+        # _prepping (prep_done=True) and the file becomes pickable here. Lock
+        # order is _dispatched_lock (held by caller) -> _prepping_lock, which
+        # matches every other site (no path takes them the other way round).
         for item in queue:
             fp = item["filepath"]
             if fp in self._dispatched:
                 continue
+            with self._prepping_lock:
+                if fp in self._prepping:
+                    continue
             existing = self.state.get_file(fp)
             status = existing["status"] if existing else None
             if status == FileStatus.PROCESSING.value:

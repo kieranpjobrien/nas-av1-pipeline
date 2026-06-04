@@ -46,12 +46,15 @@ async def websocket_endpoint(ws: WebSocket) -> None:
     """
     await ws_manager.connect(ws)
     try:
-        # Send initial state
-        state_data = _get_pipeline_state()
+        # Send initial state. _get_pipeline_state (SQLite read) and _query_gpu
+        # (nvidia-smi subprocess) are BLOCKING — run them in a worker thread so
+        # they don't stall the event loop (and every other WS client + async
+        # HTTP handler) for the duration of the subprocess / DB read.
+        state_data = await asyncio.to_thread(_get_pipeline_state)
         if state_data:
             await ws.send_json({"type": "pipeline", "data": state_data})
 
-        gpu_data = _query_gpu()
+        gpu_data = await asyncio.to_thread(_query_gpu)
         await ws.send_json({"type": "gpu", "data": gpu_data})
 
         control_data = {
@@ -94,7 +97,7 @@ async def websocket_endpoint(ws: WebSocket) -> None:
             if mtime != last_mtime or ticks_since_push >= HEARTBEAT_TICKS:
                 last_mtime = mtime
                 ticks_since_push = 0
-                data = _get_pipeline_state()
+                data = await asyncio.to_thread(_get_pipeline_state)
                 if data:
                     await ws.send_json({"type": "pipeline", "data": data})
 
@@ -102,7 +105,7 @@ async def websocket_endpoint(ws: WebSocket) -> None:
             gpu_tick += 1
             if gpu_tick >= 5:
                 gpu_tick = 0
-                await ws.send_json({"type": "gpu", "data": _query_gpu()})
+                await ws.send_json({"type": "gpu", "data": await asyncio.to_thread(_query_gpu)})
 
             # Control status every tick
             new_control = {

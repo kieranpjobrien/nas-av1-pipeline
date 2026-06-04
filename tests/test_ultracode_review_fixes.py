@@ -6,6 +6,17 @@ Covers the verified HIGH findings:
   * orchestrator: errors counter only increments on real upload failure
   * full_gamut: encode-retry chain advances past attempt 0 (tried-set)
 
+And the verified MEDIUM findings (second pass):
+  * compliance: forced-sub detection uses disposition+title (is_forced_internal),
+    not title-only — a disposition-forced untitled track must not be miscounted
+    as a regular English sub (extra_eng_subs breaker loop).
+  * streams: DTS *core* is lossy; only DTS-HD MA (via profile) is lossless.
+  * ws.py: blocking SQLite read + nvidia-smi subprocess are offloaded via
+    asyncio.to_thread so they don't stall the event loop.
+  * orchestrator: GPU first-pass skips files a prep worker holds in _prepping
+    (GPU-vs-prep double-pick race).
+
+The external-sidecar out_idx fix (ffmpeg) is pinned in tests/test_ffmpeg_builder.py.
 content_grade._entry_year and the frontend normalizeFile fixes are pinned
 in tests/test_content_grade.py and the frontend build respectively.
 """
@@ -114,3 +125,119 @@ def test_full_gamut_retry_uses_tried_modes_not_attempt0():
     assert '"no_hwaccel" not in tried_modes' in src
     assert '"no_subs" not in tried_modes' in src
     assert '"audio_copy" not in tried_modes' in src
+
+
+# --- MEDIUM: compliance forced-sub detection (disposition + title) ----------
+
+
+def test_compliance_forced_sub_detected_by_disposition_not_just_title():
+    """A forced sub flagged only by ``disposition.forced`` (empty title) must
+    be excluded from the regular-English count, matching the encoder's
+    is_forced detection. Pre-fix compliance checked the title only, miscounted
+    it as a 2nd regular English sub, and tripped ``extra_eng_subs`` forever
+    (the prep circuit-breaker loop)."""
+    from pipeline.compliance import check_compliance
+
+    def _run(subs: list[dict]) -> list:
+        return check_compliance(
+            filepath=r"\\KieranNAS\Test.mkv",
+            item={"tmdb": {}, "library_type": "movie",
+                  "filename": "Test.mkv", "final_name": "Test.mkv"},
+            encode_params={"cq": 22, "content_grade": "default"},
+            output_probe={
+                "video": {"codec": "av1"},
+                "audio": [{"codec": "eac3", "language": "eng", "title": ""}],
+                "subs": subs,
+            },
+            mkv_tags={"ENCODER": "x", "CQ": "22", "CONTENT_GRADE": "default"},
+            input_size_bytes=10_000_000_000,
+            output_size_bytes=8_000_000_000,
+            source_was_av1=False,
+            config={"lossless_audio_codecs": []},
+        )
+
+    # disposition-forced (untitled) + 1 regular eng → only 1 regular → OK.
+    out = _run([
+        {"language": "eng", "title": "", "disposition": {"forced": 1}},
+        {"language": "eng", "title": ""},
+    ])
+    assert not any(v.tag == "extra_eng_subs" for v in out), (
+        "disposition-forced sub wrongly counted as a regular English sub — "
+        "compliance forced detection must use disposition, not title only"
+    )
+
+    # Control: two genuine regular English subs SHOULD still trip extra_eng_subs
+    # (proves the assertion above can actually fail — guards against a no-op test).
+    out2 = _run([
+        {"language": "eng", "title": ""},
+        {"language": "eng", "title": ""},
+    ])
+    assert any(v.tag == "extra_eng_subs" for v in out2), (
+        "two regular English subs must still be flagged (test sanity check)"
+    )
+
+
+# --- MEDIUM: DTS core is lossy, DTS-HD MA is lossless -----------------------
+
+
+def test_dts_core_lossy_dts_hd_ma_lossless():
+    from pipeline.streams import parse_audio_stream
+
+    # DTS core (no HD MA profile) is LOSSY — must not be marked lossless.
+    assert parse_audio_stream({"codec": "dts", "profile": ""}).lossless is False
+    assert parse_audio_stream({"codec": "dts"}).lossless is False
+    # DTS-HD MA is lossless — detected via the profile string ("hd ma").
+    assert parse_audio_stream({"codec": "dts", "profile": "DTS-HD MA"}).lossless is True
+    assert parse_audio_stream({"codec": "dts", "profile": "DTS-HD Master Audio"}).lossless is True
+    # TrueHD / FLAC / PCM remain lossless.
+    assert parse_audio_stream({"codec": "truehd"}).lossless is True
+    assert parse_audio_stream({"codec": "flac"}).lossless is True
+    assert parse_audio_stream({"codec": "pcm_s24le"}).lossless is True
+    # An explicit lossless=True flag from the media report is still honoured.
+    assert parse_audio_stream({"codec": "dts", "lossless": True}).lossless is True
+
+
+def test_is_forced_internal_helper():
+    from pipeline.streams import is_forced_internal
+
+    assert is_forced_internal({"disposition": {"forced": 1}, "title": ""}) is True
+    assert is_forced_internal({"title": "English (Forced)"}) is True
+    assert is_forced_internal({"title": "Foreign Parts Only"}) is True
+    assert is_forced_internal({"title": "English"}) is False
+    assert is_forced_internal({"title": "", "disposition": {}}) is False
+
+
+# --- MEDIUM: ws.py offloads blocking calls off the event loop ---------------
+
+
+def test_ws_offloads_blocking_calls_to_thread():
+    """The websocket handler's SQLite read (_get_pipeline_state) and nvidia-smi
+    subprocess (_query_gpu) must run via asyncio.to_thread, never bare on the
+    event loop (which would freeze every other WS client + async HTTP route
+    for the subprocess duration)."""
+    src = _src("server/routers/ws.py")
+    assert "asyncio.to_thread(_get_pipeline_state)" in src
+    assert "asyncio.to_thread(_query_gpu)" in src
+    # The bare blocking call forms must be gone from the handler body.
+    assert "_get_pipeline_state()" not in src, "bare blocking SQLite read still present"
+    assert "_query_gpu()" not in src, "bare blocking nvidia-smi call still present"
+
+
+# --- MEDIUM: GPU picker skips files a prep worker is mid-prep on ------------
+
+
+def test_pick_next_locked_skips_prepping_files():
+    """`_pick_next_locked`'s first pass must skip files held in `_prepping` by a
+    prep worker — otherwise the GPU worker grabs the same PROCESSING+local file
+    (it's NOT in _dispatched yet) and both run prep/encode on it."""
+    src = _src("pipeline/orchestrator.py")
+    start = src.find("def _pick_next_locked(")
+    assert start != -1, "_pick_next_locked not found"
+    end = src.find("\n    def ", start + 1)
+    body = src[start: end if end != -1 else len(src)]
+    assert "_prepping" in body, "first pass must consult _prepping"
+    prepping_pos = body.find("self._prepping")
+    first_return = body.find("return item")
+    assert prepping_pos != -1 and first_return != -1 and prepping_pos < first_return, (
+        "the _prepping skip must come before the first-pass 'return item'"
+    )

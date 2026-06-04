@@ -64,6 +64,25 @@ def is_hi_internal(sub: dict[str, Any]) -> bool:
     return bool(_HI_TITLE_RE.search(title))
 
 
+def is_forced_internal(sub: dict[str, Any]) -> bool:
+    """Return True if an internal subtitle stream is forced.
+
+    Checks the ``disposition.forced`` flag first, then falls back to a
+    title-substring check (``forced`` / ``foreign``). This is the single
+    source of truth for forced detection — ``parse_sub_stream`` and
+    ``compliance.check_compliance`` both call it so the encoder's
+    keep-decision and the post-encode gate can never disagree (a
+    disposition-forced-but-untitled track must not be miscounted as a
+    regular English sub, which would trip ``extra_eng_subs`` and loop
+    the prep circuit breaker).
+    """
+    disp = sub.get("disposition") or {}
+    if disp.get("forced"):
+        return True
+    title = (sub.get("title") or "").lower()
+    return "forced" in title or "foreign" in title
+
+
 def is_hi_external(sidecar_filename: str) -> bool:
     """Return True if an external sidecar filename contains HI/SDH/CC tokens.
 
@@ -243,8 +262,14 @@ class SubStream:
     detected_language: str | None
 
 
-# Codecs treated as lossless — matches scanner.py and compliance.py usage.
-_LOSSLESS_CODECS: frozenset[str] = frozenset({"truehd", "flac", "pcm_s16le", "pcm_s24le", "pcm_s32le", "dts"})
+# Codecs treated as lossless for the dedup "lossless wins over lossy" pass.
+# NOTE: bare ``dts`` is deliberately EXCLUDED. DTS *core* is lossy; only
+# DTS-HD MA is lossless, and that is detected via the profile check in
+# parse_audio_stream ("hd ma"/"hd-ma" in profile). Listing "dts" here
+# wrongly classified every lossy DTS core track as lossless, which skewed
+# the same-channels/language dedup (a lossy core could "win" over another
+# lossy track purely because of the mislabel).
+_LOSSLESS_CODECS: frozenset[str] = frozenset({"truehd", "flac", "pcm_s16le", "pcm_s24le", "pcm_s32le"})
 
 
 def parse_audio_stream(raw: dict[str, Any], index: int = 0) -> AudioStream:
@@ -309,13 +334,7 @@ def parse_sub_stream(raw: dict[str, Any], index: int = 0) -> SubStream:
     if not title:
         title = (raw.get("tags") or {}).get("title", "") or ""
 
-    title_lower = title.lower()
-    is_forced = "forced" in title_lower or "foreign" in title_lower
-    if not is_forced:
-        # Check disposition for forced flag as well
-        disp = raw.get("disposition") or {}
-        if disp.get("forced"):
-            is_forced = True
+    is_forced = is_forced_internal(raw)
 
     return SubStream(
         index=index,

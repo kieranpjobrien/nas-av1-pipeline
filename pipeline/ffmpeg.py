@@ -248,8 +248,17 @@ def _map_subtitle_streams(
     config: dict,
     *,
     external_subs_present: bool = False,
-) -> None:
+) -> list[int] | None:
     """Add per-stream subtitle mappings, keeping only English/undefined tracks.
+
+    Returns the list of INPUT subtitle indices that were mapped, in output
+    order, so the caller can stamp matching per-stream metadata on the right
+    output index. Returns ``None`` when it emitted a blanket ``-map 0:s?``
+    (all source subs, input order preserved). This is the single source of
+    truth for the keep-decision — the metadata-stamping loop in the caller
+    consumes this list rather than re-deriving it, so the two can never drift
+    (pre-fix the loop ignored ``external_subs_present`` and the forced-language
+    gate, mis-indexing the external sidecar's language/disposition metadata).
 
     If strip_non_english_subs is disabled, maps all subs with -map 0:s?.
 
@@ -268,12 +277,12 @@ def _map_subtitle_streams(
     """
     if not config.get("strip_non_english_subs", True):
         cmd.extend(["-map", "0:s?"])
-        return
+        return None
 
     raw_subs = item.get("subtitle_streams", [])
     if not raw_subs:
         cmd.extend(["-map", "0:s?"])  # no metadata — let ffmpeg figure it out
-        return
+        return None
 
     # Inviolate rule (2026-04-29): never strip a sub track without first
     # knowing its language. If ANY track is `und`/empty with no whisper
@@ -292,7 +301,7 @@ def _map_subtitle_streams(
             f"have unresolved language. Mapping all subs as-is."
         )
         cmd.extend(["-map", "0:s?"])
-        return
+        return None
 
     # Keep exactly 1 regular English sub + forced. Strip HI, duplicates, foreign.
     #
@@ -331,7 +340,7 @@ def _map_subtitle_streams(
     # here and refused at the gate (which would loop forever).
     allowed_forced_langs: set[str] = set(KEEP_LANGS)
 
-    mapped = 0
+    mapped_indices: list[int] = []
     # If an external English sidecar is being muxed in by the caller, treat
     # the regular-English slot as already-claimed so we don't keep a second
     # internal English. Forced subs in an allowed language are still mapped
@@ -341,21 +350,23 @@ def _map_subtitle_streams(
         if sub.is_forced:
             if sub.language in allowed_forced_langs:
                 cmd.extend(["-map", f"0:s:{i}?"])
-                mapped += 1
+                mapped_indices.append(i)
             # else: foreign-language forced narrative — drop, matching
             # prep_streams.compute_sub_drop_indices and compliance.py.
         elif sub.language in ENG_LANGS and not sub.is_hi and not found_regular_eng:
             cmd.extend(["-map", f"0:s:{i}?"])
-            mapped += 1
+            mapped_indices.append(i)
             found_regular_eng = True
 
-    if mapped == 0 and not external_subs_present:
+    if not mapped_indices and not external_subs_present:
         # No English subs found AND no external sidecar — map all to be safe
         # (the source might have unlabelled English subs).
         cmd.extend(["-map", "0:s?"])
-    elif mapped < len(raw_subs):
-        stripped = len(raw_subs) - mapped
+        return None
+    if len(mapped_indices) < len(raw_subs):
+        stripped = len(raw_subs) - len(mapped_indices)
         logging.info(f"  Stripped {stripped} non-English subtitle stream(s)")
+    return mapped_indices
 
 
 def _parse_sub_language(filepath: str) -> str:
@@ -606,8 +617,9 @@ def build_ffmpeg_cmd(
     else:
         cmd.extend(["-map", "0:a"])
 
+    mapped_sub_inputs: list[int] | None = None
     if include_subs:
-        _map_subtitle_streams(
+        mapped_sub_inputs = _map_subtitle_streams(
             cmd, item, config, external_subs_present=bool(external_subs)
         )
 
@@ -826,33 +838,19 @@ def build_ffmpeg_cmd(
                 cmd.extend([f"-metadata:s:a:{out_idx}", f"title={title}"])
 
     # Same treatment for INTERNAL subtitle streams. _map_subtitle_streams
-    # decided which input indices to keep above; we re-derive that decision
-    # here so we can stamp the matching languages on the output indices.
+    # is the single source of truth for which input indices were mapped and
+    # in what output order; we consume its return value directly rather than
+    # re-deriving the keep-decision (the old re-derivation ignored the
+    # external-sidecar regular-eng skip AND the forced-language gate, so it
+    # drifted from the real mapping and mis-indexed the metadata stamps —
+    # including the external sidecar's out_idx below).
     if include_subs:
         sub_data = item.get("subtitle_streams") or []
-        if sub_data and config.get("strip_non_english_subs", True):
-            from pipeline.streams import all_languages_known, parse_sub_stream
-            from pipeline.config import ENG_LANGS
-
-            parsed_subs = [parse_sub_stream(raw, index=i) for i, raw in enumerate(sub_data)]
-            if all_languages_known(parsed_subs):
-                kept_sub_indices: list[int] = []
-                found_regular_eng = False
-                for i, sub in enumerate(parsed_subs):
-                    if sub.is_forced:
-                        kept_sub_indices.append(i)
-                    elif sub.language in ENG_LANGS and not sub.is_hi and not found_regular_eng:
-                        kept_sub_indices.append(i)
-                        found_regular_eng = True
-                if not kept_sub_indices:
-                    # Fallthrough case: -map 0:s? mapped all subs, output
-                    # index order matches input order.
-                    kept_sub_indices = list(range(len(sub_data)))
-            else:
-                # Deferred case: -map 0:s? — same input/output order.
-                kept_sub_indices = list(range(len(sub_data)))
-        else:
+        if mapped_sub_inputs is None:
+            # Blanket ``-map 0:s?`` — all source subs, output order == input.
             kept_sub_indices = list(range(len(sub_data)))
+        else:
+            kept_sub_indices = mapped_sub_inputs
 
         for out_idx, in_idx in enumerate(kept_sub_indices):
             if in_idx >= len(sub_data):
@@ -899,9 +897,14 @@ def build_ffmpeg_cmd(
 
     # Set language metadata for EXTERNAL subtitle streams (Bazarr sidecars
     # we mapped as additional inputs above). Output index continues after
-    # the internal subs.
+    # the internal subs — use the COUNT ACTUALLY MAPPED (len of kept indices),
+    # not len(source subs). When the strip dropped tracks (or the external
+    # sidecar claimed the regular-eng slot), source-count overshoots and the
+    # external sub's metadata lands on a non-existent output index, so ffmpeg
+    # silently no-ops it and the sidecar ships with no language tag / no HI
+    # disposition.
     if external_subs:
-        internal_sub_count = len(item.get("subtitle_streams", [])) if include_subs else 0
+        internal_sub_count = len(kept_sub_indices) if include_subs else 0
         for i, sub_path in enumerate(external_subs):
             lang = _parse_sub_language(sub_path)
             out_idx = internal_sub_count + i
