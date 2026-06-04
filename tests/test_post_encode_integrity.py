@@ -155,11 +155,17 @@ def test_qualify_nothing_to_do_yields_to_force_reencode():
         f"references in full_gamut.py, found {bypass_count}. "
         f"Without the bypass, qualify silently kills user re-encode requests."
     )
-    # And the DONE-mark inside both bypasses must be inside an else branch
-    # (not unconditional), so it only fires when force_reencode is NOT set.
-    assert src.count("reason=\"already compliant\"") == 2, (
-        "expected exactly 2 'reason=already compliant' DONE marks (one per call site); "
-        "if more, the bypass branch is wrong"
+    # The DONE-mark inside the bypass must be inside an else branch (not
+    # unconditional), so it only fires when force_reencode is NOT set.
+    # 2026-06-05: now exactly 1 — the qualify NOTHING_TO_DO handling lives
+    # solely in prepare_for_encode (which _encode_only calls). The second
+    # copy was in full_gamut()'s old inline STEP 1-5 block, which was dead
+    # by construction (full_gamut returns _encode_only before reaching it)
+    # and has now been removed.
+    assert src.count("reason=\"already compliant\"") == 1, (
+        "expected exactly 1 'reason=already compliant' DONE mark (in "
+        "prepare_for_encode); if 0 the bypass was lost, if >1 the dead "
+        "inline duplicate is back"
     )
 
 
