@@ -857,7 +857,13 @@ def cmd_repair_sidecars(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 TARGET_VIDEO = {"av1"}
-TARGET_AUDIO = {"eac3", "opus"}
+# Must match pipeline/compliance.py:TARGET_AUDIO_CODECS. 2026-06-05 fix:
+# this had {"eac3", "opus"} which was backwards from policy — Opus is NO
+# longer a passthrough target (Sonos Arc can't decode it, so it's
+# transcoded to EAC-3), and TrueHD IS mandatory passthrough (the Atmos
+# carrier). The old set passed Opus as compliant and flagged TrueHD as
+# non-compliant — both wrong.
+TARGET_AUDIO = {"eac3", "truehd"}
 ENG_LANGS = {"en", "eng", "english"}
 UND_LANGS = {"und", "unk", ""}
 

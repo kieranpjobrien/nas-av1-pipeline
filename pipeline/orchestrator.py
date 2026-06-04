@@ -840,8 +840,12 @@ class Orchestrator:
                 # Remove every queue entry with this filepath. Defensive
                 # filter rather than .remove() in case of duplicates.
                 queue[:] = [it for it in queue if it.get("filepath") != filepath]
+                # _dispatched is guarded by _dispatched_lock everywhere else;
+                # discard inside the same critical section (2026-06-05 fix —
+                # it was previously discarded outside the lock, a race with
+                # the GPU pickers that read/mutate _dispatched).
+                self._dispatched.discard(filepath)
             self._set_gpu_wants(None, previous=filepath)
-            self._dispatched.discard(filepath)
             self.state.set_file(
                 filepath,
                 FileStatus.FLAGGED_CORRUPT,
