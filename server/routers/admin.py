@@ -20,7 +20,7 @@ import time
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 
 from server.helpers import (
     CONFIG_OVERRIDES_FILE,
@@ -365,10 +365,24 @@ def set_config(body: dict) -> dict:
 # --- Dismissed items ---
 
 
+def _safe_section(section: str) -> str:
+    """Validate a UI-section name before using it as a filename.
+
+    2026-06-05 security fix: ``section`` was interpolated straight into
+    ``DISMISSED_DIR / f"{section}.json"``. ``Path`` division happily accepts
+    ``../../...`` so a crafted section escaped the dismissed/ dir (the PUT
+    overwrites the target, the GET reads it). Restrict to plain identifiers.
+    """
+    import re
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", section or ""):
+        raise HTTPException(400, "invalid section name")
+    return section
+
+
 @router.get("/api/dismissed/{section}")
 def get_dismissed(section: str) -> dict:
     """Return dismissed items for a UI section."""
-    path = DISMISSED_DIR / f"{section}.json"
+    path = DISMISSED_DIR / f"{_safe_section(section)}.json"
     data = read_json_safe(path)
     return data or {"paths": []}
 
@@ -377,7 +391,7 @@ def get_dismissed(section: str) -> dict:
 def set_dismissed(section: str, body: dict) -> dict:
     """Set dismissed items for a UI section."""
     DISMISSED_DIR.mkdir(parents=True, exist_ok=True)
-    path = DISMISSED_DIR / f"{section}.json"
+    path = DISMISSED_DIR / f"{_safe_section(section)}.json"
     write_json_safe(path, {"paths": body.get("paths", [])})
     return {"ok": True}
 

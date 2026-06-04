@@ -30,10 +30,28 @@ def rename_file(req: dict) -> dict:
 
     Body: {path, new_name}.
     """
+    from paths import NAS_MOVIES, NAS_SERIES
+
     path = req.get("path")
     new_name = req.get("new_name")
     if not path or not new_name:
         raise HTTPException(400, "path and new_name required")
+
+    # NAS-membership guard (2026-06-05 security fix). Mirror delete_file:
+    # refuse to rename anything outside the NAS media dirs, so a stray/
+    # malicious path can't touch arbitrary server files.
+    norm = os.path.normpath(path)
+    nas_movies = os.path.normpath(str(NAS_MOVIES))
+    nas_series = os.path.normpath(str(NAS_SERIES))
+    if not (norm.startswith(nas_movies) or norm.startswith(nas_series)):
+        raise HTTPException(403, "Path is outside NAS media directories")
+
+    # Sanitise new_name — must be a plain filename, no path separators or
+    # traversal. Without this, new_name='../../staging/x' escapes source_dir.
+    if (os.sep in new_name or "/" in new_name or new_name.startswith(".")
+            or new_name in ("", os.curdir, os.pardir)):
+        raise HTTPException(400, "new_name must be a plain filename (no path separators)")
+
     if not os.path.exists(path):
         raise HTTPException(404, f"File not found: {path}")
 
