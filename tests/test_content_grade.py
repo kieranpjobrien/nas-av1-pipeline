@@ -464,3 +464,70 @@ def test_target_cq_respects_absolute_max():
     # max of 45 should clamp it. Use a synthetic high base to test the clamp.
     final, _, _ = target_cq(40, e)
     assert final == 45  # _ABSOLUTE_MAX_CQ
+
+
+# --- _entry_year reads the int year fields the scanner actually stores -------
+# (2026-06-05 regression: media_report stores first_air_year/release_year as
+# INTs; _entry_year only read the first_air_date/release_date STRINGS, present
+# on ~2% of files, so it returned None for ~98% — age offsets + classic_film
+# grade silently never fired. The fixture above uses the string fields, which
+# is why this hid. These tests use the real int-field shape.)
+
+from pipeline.content_grade import _entry_year, GRADE_SITCOM, GRADE_TV_ANIMATION
+
+
+def test_entry_year_reads_first_air_year_int_for_series():
+    e = {"library_type": "series", "tmdb": {"first_air_year": 1989}}
+    assert _entry_year(e) == 1989
+
+
+def test_entry_year_reads_release_year_int_for_movie():
+    e = {"library_type": "movie", "tmdb": {"release_year": 1972}}
+    assert _entry_year(e) == 1972
+
+
+def test_entry_year_reads_year_as_numeric_string():
+    e = {"library_type": "movie", "tmdb": {"release_year": "1999"}}
+    assert _entry_year(e) == 1999
+
+
+def test_entry_year_date_string_still_works():
+    e = {"library_type": "movie", "tmdb": {"release_date": "1958-05-28"}}
+    assert _entry_year(e) == 1958
+
+
+def test_entry_year_none_when_no_year_anywhere():
+    e = {"library_type": "movie", "tmdb": {"genres": []}}
+    assert _entry_year(e) is None
+
+
+def test_entry_year_ignores_garbage():
+    e = {"library_type": "movie", "tmdb": {"release_year": 0}}
+    assert _entry_year(e) is None
+
+
+def test_pre1995_sitcom_gets_age_offset_via_int_year():
+    """The real-world bug: a pre-1995 sitcom with only first_air_year (int)
+    must still get the age offset. Before the fix this returned the base CQ
+    because _entry_year returned None."""
+    e = {
+        "library_type": "series",
+        "tmdb": {"genres": [{"name": "Comedy"}], "first_air_year": 1989,
+                 "episode_run_time": [22]},
+    }
+    assert derive_grade(e) == GRADE_SITCOM
+    final, grade, offset = target_cq(30, e)
+    assert grade == GRADE_SITCOM
+    # sitcom base offset + pre-1995 age bonus must be applied (offset > 0)
+    assert offset > 0, f"pre-1995 sitcom should get an age offset; got {offset}"
+
+
+def test_classic_film_grade_fires_via_int_year():
+    """classic_film needs year < 1980. With only release_year (int), the fix
+    lets the grade fire; before it silently fell to default."""
+    e = {
+        "library_type": "movie",
+        "tmdb": {"genres": [{"name": "Drama"}], "release_year": 1958},
+    }
+    from pipeline.content_grade import GRADE_CLASSIC_FILM
+    assert derive_grade(e) == GRADE_CLASSIC_FILM

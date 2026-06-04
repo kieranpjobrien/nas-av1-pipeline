@@ -682,9 +682,14 @@ class Orchestrator:
                     try:
                         finalize_upload(filepath, self.state, self.config)
                     except Exception as e:
+                        # 2026-06-05 fix: the errors increment + save used to
+                        # sit OUTSIDE this except, at the same indent as the
+                        # try — so every successful inline upload was counted
+                        # as an error (only on the upload_concurrency<=0 path).
+                        # The increment belongs only on a real upload failure.
                         logging.error(f"Upload failed for {os.path.basename(filepath)}: {e}")
-                    self.state.stats["errors"] = self.state.stats.get("errors", 0) + 1
-                    self.state.save()
+                        self.state.stats["errors"] = self.state.stats.get("errors", 0) + 1
+                        self.state.save()
             else:
                 self.state.stats["errors"] = self.state.stats.get("errors", 0) + 1
                 self.state.save()

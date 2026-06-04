@@ -159,16 +159,32 @@ def _entry_year(entry: dict) -> int | None:
     tmdb = entry.get("tmdb") or {}
     library_type = (entry.get("library_type") or "").lower()
     is_series = library_type in ("series", "show", "tv", "anime")
-    candidate = tmdb.get("first_air_date") if is_series else tmdb.get("release_date")
-    if not candidate:
-        # Fall back to the other field if the primary one is empty
-        candidate = tmdb.get("release_date") if is_series else tmdb.get("first_air_date")
-    if not candidate or len(candidate) < 4:
-        return None
-    head = candidate[:4]
-    if not head.isdigit():
-        return None
-    return int(head)
+
+    # Prefer full date strings (first_air_date / release_date) when present,
+    # then fall back to the integer year fields the scanner ACTUALLY stores
+    # (first_air_year / release_year). 2026-06-05 fix: the enriched tmdb
+    # dict in media_report carries first_air_year/release_year (ints) for
+    # ~98% of files; the date strings exist on only ~2%. Reading only the
+    # date strings meant _entry_year returned None for nearly every file,
+    # so age_offset (pre-1995 sitcom +3, pre-2000 animation +2) and the
+    # classic_film grade (year < 1980) silently never fired — the grade
+    # CQ for old content was systematically too low (over-quality).
+    date_fields = (("first_air_date", "release_date") if is_series
+                   else ("release_date", "first_air_date"))
+    for fld in date_fields:
+        candidate = tmdb.get(fld)
+        if candidate and len(str(candidate)) >= 4 and str(candidate)[:4].isdigit():
+            return int(str(candidate)[:4])
+
+    year_fields = (("first_air_year", "release_year") if is_series
+                   else ("release_year", "first_air_year"))
+    for fld in year_fields:
+        y = tmdb.get(fld)
+        if isinstance(y, int) and y > 1800:
+            return y
+        if y and str(y).isdigit() and int(str(y)) > 1800:
+            return int(str(y))
+    return None
 
 
 def _entry_runtime_min(entry: dict) -> int | None:

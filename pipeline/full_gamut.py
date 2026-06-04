@@ -2194,6 +2194,14 @@ def _run_encode(
     # no_hwaccel is checked first because NVDEC-incompatible sources (10-bit H.264,
     # MPEG-4 ASP, some edge cases) fail on decode before the subtitle or audio
     # stages are even reached — retrying those with sw decode resolves them.
+    # ``tried_modes`` lets each fallback fire at most once, in response to the
+    # matching error, on ANY attempt. 2026-06-05 fix: the selectors used to
+    # gate on ``attempt == 0``, so only the FIRST failure could branch — if
+    # attempt 0 → no_hwaccel and the sw-decode retry then failed on a subtitle
+    # error, the no_subs fallback never fired (attempt was 1) and the file was
+    # parked in ERROR with two of four attempts wasted. The range(attempts_total)
+    # bound is the infinite-loop backstop; the tried set prevents re-firing a mode.
+    tried_modes: set[str] = set()
     attempts_total = 4
     duration_secs = item.get("duration_seconds") or 0
 
@@ -2285,16 +2293,18 @@ def _run_encode(
                 "no decoder could be found for codec",
                 "impossible to convert between the formats",
             )
-            if attempt == 0 and any(m in error_tail for m in hwaccel_failure_markers):
+            if "no_hwaccel" not in tried_modes and any(m in error_tail for m in hwaccel_failure_markers):
                 retry_mode = "no_hwaccel"
+                tried_modes.add("no_hwaccel")
                 continue
-            if attempt == 0 and ("subtitle" in stderr_low or "codec none" in stderr_low):
+            if "no_subs" not in tried_modes and ("subtitle" in stderr_low or "codec none" in stderr_low):
                 retry_mode = "no_subs"
+                tried_modes.add("no_subs")
                 continue
-            if "non-monotonic dts" in stderr_low or "non monotonic dts" in stderr_low:
-                if retry_mode != "audio_copy":
-                    retry_mode = "audio_copy"
-                    continue
+            if "audio_copy" not in tried_modes and ("non-monotonic dts" in stderr_low or "non monotonic dts" in stderr_low):
+                retry_mode = "audio_copy"
+                tried_modes.add("audio_copy")
+                continue
 
             logging.error(f"  Encode failed (exit {process.returncode})")
             for line in stderr.strip().split("\n")[-5:]:
