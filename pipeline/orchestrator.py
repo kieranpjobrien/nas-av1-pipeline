@@ -44,11 +44,17 @@ class Orchestrator:
         self.staging_dir = staging_dir
         self.control = control
 
-        # Concurrent NVENC sessions. RTX 40-series has 2 NVENC chips → 2 concurrent encodes
-        # are natively supported by hardware with no perf penalty. Settable via config.
-        # Safety: each encode uses ~600 MB VRAM + 500 MB RAM + ~10% CPU — stays well within
-        # 16 GB VRAM / 96 GB RAM / 24-thread budget on RTX 4080 workstation.
-        self._gpu_concurrency = max(1, int(config.get("gpu_concurrency", 2)))
+        # NVENC concurrency - HARD-CAPPED at 1 (rule 9b). The RTX 4080 has two physical
+        # NVENC chips, but two concurrent encodes BSOD'd the machine in production. We
+        # clamp to 1 regardless of the config value, so a stray/missing setting can never
+        # re-arm that crash.
+        _requested_gpu = int(config.get("gpu_concurrency", 1))
+        if _requested_gpu != 1:
+            logging.warning(
+                f"gpu_concurrency={_requested_gpu} overridden to 1 (rule 9b: dual concurrent "
+                "NVENC caused production BSODs)"
+            )
+        self._gpu_concurrency = 1
 
         self._shutdown = threading.Event()
         # Semaphore replaces the old 1-slot lock so N workers can hold a GPU slot at once.
@@ -616,8 +622,8 @@ class Orchestrator:
     def _gpu_worker(self, queue: list[dict], gap_queue: list[dict], worker_id: int = 0):
         """Full gamut encodes. Holds one GPU semaphore slot per file.
 
-        Multiple workers run in parallel — the semaphore caps concurrency to the configured
-        `gpu_concurrency` (default 2 for RTX 40-series dual NVENC). Pickers use a shared
+        The semaphore caps concurrency to `gpu_concurrency`, which is hard-capped at 1
+        (rule 9b: dual concurrent NVENC caused production BSODs). Pickers use a shared
         `_dispatched` set to avoid two workers grabbing the same file.
         """
         tag_prefix = f"gpu{worker_id}"

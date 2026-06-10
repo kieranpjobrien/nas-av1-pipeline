@@ -24,19 +24,20 @@ DEFAULT_CONFIG = {
     "max_staging_bytes": 2_500_000_000_000,  # 2.5 TB total local staging
     "max_fetch_buffer_bytes": 200_000_000_000,  # 200 GB fetch buffer
     "min_free_space_bytes": 50_000_000_000,  # 50 GB minimum free on staging drive
-    # Concurrent NVENC sessions. RTX 40-series has 2 NVENC chips so 2 is the practical cap
-    # with zero perf penalty. Set to 1 on older Turing/Ampere cards with one chip.
-    # IMPORTANT: keep gpu_concurrency at 1. The RTX 4080 has dual NVENC chips
-    # but running two concurrent NVENC encodes triggered system BSODs in
-    # production. Treat this as the same severity class as rule 9a (no
-    # whisper+NVENC). One encode at a time is the safe operating envelope —
-    # the gain from a second concurrent encode isn't worth the crash risk.
+    # NVENC concurrency. RULE 9b: keep at 1. The RTX 4080 has two physical NVENC
+    # chips, but running two concurrent encodes triggered system BSODs in
+    # production - same severity class as rule 9a (no whisper+NVENC). One encode
+    # at a time is the only safe operating envelope; a second concurrent encode is
+    # not worth the crash risk. The orchestrator hard-caps this to 1 regardless,
+    # but the config stays honest too.
     "gpu_concurrency": 1,
-    # CPU prep workers — run filename clean, language detect (whisper),
-    # qualify gate, external sub scan, and container remux AHEAD of the
-    # GPU. Multiple workers can prep multiple files simultaneously so the
-    # GPU never waits on CPU work. Tuneable; CPU-only so no GPU contention.
-    "prep_concurrency": 2,
+    # CPU prep workers - filename clean, language detect (whisper-on-CPU), qualify
+    # gate, external sub scan, container remux - run AHEAD of the GPU.
+    # Reduced 2 -> 1 on 2026-06-10: two prep workers stacked heavy concurrent CPU
+    # load on top of the encode, and this machine crashes under sustained CPU load
+    # (suspected Raptor Lake instability; BIOS mitigation pending). Bump back to 2
+    # once the CPU is confirmed stable.
+    "prep_concurrency": 1,
     # Cap on prepped-and-waiting-for-GPU files. Prep workers pause when
     # this many files already sit in the "prepped, awaiting encode" state —
     # avoids burning CPU producing more than the single GPU can consume.

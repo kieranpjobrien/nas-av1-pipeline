@@ -257,3 +257,22 @@ def test_circuit_breaker_logs_use_defined_variable():
         "circuit-breaker log references undefined `filename` — NameError in the "
         "error-recovery path; use os.path.basename(filepath)"
     )
+
+
+# --- hardware-stability hardening (2026-06-10): rule 9b NVENC hard cap ------
+
+
+def test_gpu_concurrency_hard_capped_to_one():
+    """Rule 9b: NVENC concurrency must be hard-capped at 1 (dual concurrent NVENC
+    BSOD'd the machine in production). The orchestrator must clamp to 1 regardless
+    of the config value, and the missing-key default must not be 2."""
+    src = _src("pipeline/orchestrator.py")
+    assert 'config.get("gpu_concurrency", 2)' not in src, (
+        "missing-key default for gpu_concurrency must be 1, never 2 (footgun: re-arms dual NVENC)"
+    )
+    assert "self._gpu_concurrency = 1" in src, (
+        "gpu_concurrency must be hard-set to 1, not computed from config"
+    )
+    # Config default is also 1 (kept honest).
+    from pipeline.config import build_config
+    assert build_config({})["gpu_concurrency"] == 1
