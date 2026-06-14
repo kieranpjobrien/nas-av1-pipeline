@@ -121,12 +121,17 @@ class TestResolveEncodeParams:
             assert params["content_type"] == "series", f"{lib_type} should be 'series'"
 
     def test_maxrate_and_bufsize_present(self):
-        """4K HDR movie includes maxrate and bufsize values."""
+        """4K HDR movie includes a maxrate + bufsize, with bufsize == 2x maxrate.
+
+        Post-2026-06-14 the cap is source-relative, not the old flat 40M — see
+        test_source_relative_maxrate for the full matrix; here we assert shape.
+        """
         config = build_config()
         item = {"library_type": "movie", "resolution": "4K", "hdr": True}
         params = resolve_encode_params(config, item)
-        assert params["maxrate"] == "40M"
-        assert params["bufsize"] == "80M"
+        assert params["maxrate"] and params["maxrate"].endswith("M")
+        assert params["bufsize"] and params["bufsize"].endswith("M")
+        assert float(params["bufsize"][:-1]) == 2 * float(params["maxrate"][:-1])
 
     def test_maxrate_none_for_low_res(self):
         """720p movies have no maxrate cap (None)."""

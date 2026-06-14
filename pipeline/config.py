@@ -97,6 +97,39 @@ DEFAULT_CONFIG = {
         "movie": {"4K_HDR": "80M", "4K_SDR": "40M", "1080p": "40M", "720p": None, "480p": None, "SD": None},
         "series": {"4K_HDR": "40M", "4K_SDR": None, "1080p": None, "720p": None, "480p": None, "SD": None},
     },
+    # ── Source-relative output ceiling (the binding cap; supersedes nvenc_maxrate) ──
+    # The old nvenc_maxrate was a flat 40M for every 4K_HDR movie regardless of
+    # how good the source was. CQ 22 then drove straight up to it, so a 10 Mbps
+    # source ballooned to ~34 Mbps AV1 — bytes spent faithfully encoding the
+    # source's noise/grain, zero quality gain (the source never had the detail).
+    # 2026-06-14 diagnosis: 2,745 of 5,686 AV1 files (48%) came out >= their
+    # source bitrate, 4.45 TB of pure bloat.
+    #
+    # Fix (resolve_encode_params): cap = min(value-tier ceiling,
+    # source_bitrate × cap_factor, max_output_gb-over-runtime). The tier ceiling
+    # sets quality for rich sources; the source-relative term stops over-spending
+    # on poor ones (the one-way ratchet — you can't re-encode detail back into a
+    # compressed source).
+    #
+    # target_mbps = NORMAL-band ceiling (Mbps); treasured/casual scale it via
+    # tier_band_multiplier. Only bloat-prone res keys are listed — 720p/480p/SD
+    # fall through to nvenc_maxrate (None = CQ-only, unchanged).
+    "target_mbps": {
+        "movie": {"4K_HDR": 24, "4K_SDR": 18, "1080p": 9},
+        "series": {"4K_HDR": 14, "4K_SDR": 11, "1080p": 7},
+    },
+    # Value band: treasured (vote_average >= 8.0 or rewatchable keeper) gets more
+    # bits, casual fewer. Separate axis from the content grade — grade tunes CQ
+    # for content *type* (compression behaviour); this tunes the ceiling for
+    # content *value* (how much the title warrants).
+    "tier_band_multiplier": {"treasured": 1.25, "normal": 1.0, "casual": 0.85},
+    # Output ceiling as a fraction of source bitrate. 1.0 = never exceed the
+    # source (kills bloat; quality >= source via AV1 efficiency). Drop toward 0.8
+    # for net library shrink once VMAF-validated on dark-gradient content.
+    "source_relative_cap_factor": 1.0,
+    # Hard GB backstop for long treasured films (3h+ at 30 Mbps would pass 45 GB).
+    # Converted to an Mbps ceiling over the title runtime.
+    "max_output_gb": 45,
     "pixel_format_hdr": "p010le",  # 10-bit for HDR (mandatory) — NVENC uses p010le
     "pixel_format_sdr": "p010le",  # 10-bit for SDR too (better banding resistance)
     # Audio: smart mode — bulky→EAC3, efficient lossy→copy
@@ -173,7 +206,6 @@ DEFAULT_CONFIG = {
     # NAS load). User chose local 2026-04-29 after we hit OOM-kill cascades
     # running concurrent SSH+Docker+mkvmerge on the Synology.
     "gap_filler_mux_backend": "local",
-
     # Files at or above this size get staged to local SSD before mkvmerge
     # rather than running with both INPUT and OUTPUT on UNC. The 2026-05-01
     # House of the Dragon S01E06 incident (9.17 GB, 5+h ETA at 520 KB/s)
@@ -191,7 +223,6 @@ DEFAULT_CONFIG = {
     # — they're typically small enough that even a stalled UNC mkvmerge
     # finishes in reasonable time.
     "gap_filler_local_stage_threshold_bytes": 256 * 1024**2,
-
     # Per-mkvmerge progress watchdog: if the .gapfill_tmp.mkv file's size
     # doesn't grow for this many seconds, kill the mkvmerge process. The
     # 2026-05-01 House S01E17 case had mkvmerge writing 140 MB then
@@ -199,7 +230,6 @@ DEFAULT_CONFIG = {
     # Without a watchdog the same case stalls forever and blocks the
     # single-flight gap_filler queue. 90s default.
     "gap_filler_mkvmerge_stall_secs": 90,
-
     # Order in which the full-gamut encode queue is processed.
     #   "largest_first" (default): big files first, ETA shrinks visibly
     #   "smallest_first":          quick wins first, larger files at the tail
@@ -250,6 +280,53 @@ def get_res_key(item: dict) -> str:
     return "SD"
 
 
+# Floor for the source-relative maxrate so a garbage/near-zero source bitrate
+# can't emit an absurd cap. 1 Mbps is below any real video we encode.
+_MIN_MAXRATE_MBPS = 1.0
+
+
+def _value_band(item: dict) -> str:
+    """Value tier for a title: ``treasured`` / ``normal`` / ``casual``.
+
+    Drives the output-ceiling multiplier. A rewatchable ``is_keeper`` wins
+    outright; otherwise TMDb ``vote_average`` is the proxy. This is a separate
+    axis from the content grade, which classifies compression *type* not *value*.
+    """
+    if item.get("is_keeper"):
+        return "treasured"
+    vote = (item.get("tmdb") or {}).get("vote_average") or 0
+    if vote >= 8.0:
+        return "treasured"
+    if vote >= 6.5:
+        return "normal"
+    return "casual"
+
+
+def _resolve_target_maxrate(config: dict, item: dict, content_type: str, res_key: str) -> float | None:
+    """Source-relative output ceiling in Mbps, or ``None`` to defer to the static
+    ``nvenc_maxrate`` table (res keys with no ``target_mbps`` entry).
+
+    ``cap = min(value-tier ceiling, source_bitrate × cap_factor, GB-over-runtime)``
+    floored at :data:`_MIN_MAXRATE_MBPS`. The tier ceiling caps quality on rich
+    sources; the source-relative term stops over-spending on compressed ones
+    (the one-way ratchet). When the source bitrate is unknown the tier ceiling
+    still applies — already better than the old flat cap.
+    """
+    base = config.get("target_mbps", {}).get(content_type, {}).get(res_key)
+    if base is None:
+        return None
+    mult = config.get("tier_band_multiplier", {}).get(_value_band(item), 1.0)
+    candidates = [base * mult]
+    src_kbps = item.get("bitrate_kbps") or 0
+    if src_kbps:
+        candidates.append(src_kbps / 1000 * config.get("source_relative_cap_factor", 1.0))
+    dur = item.get("duration_seconds") or 0
+    gb = config.get("max_output_gb")
+    if gb and dur:
+        candidates.append(gb * 8000 / dur)  # GB → Mbit → Mbps over runtime
+    return max(min(candidates), _MIN_MAXRATE_MBPS)
+
+
 def resolve_encode_params(config: dict, item: dict) -> dict:
     """Resolve NVENC encode parameters based on content type + resolution.
 
@@ -290,8 +367,9 @@ def resolve_encode_params(config: dict, item: dict) -> dict:
     filepath = item.get("filepath")
     if filepath:
         try:
-            from pipeline.cq_override import get_override  # noqa: PLC0415
             from paths import PIPELINE_STATE_DB  # noqa: PLC0415
+            from pipeline.cq_override import get_override  # noqa: PLC0415
+
             override = get_override(PIPELINE_STATE_DB, filepath)
             if override is not None:
                 override_applied = override
@@ -300,17 +378,29 @@ def resolve_encode_params(config: dict, item: dict) -> dict:
             # Override is best-effort; if anything explodes, use the grade target.
             pass
 
+    # Source-relative rate cap (replaces the flat nvenc_maxrate as the binding
+    # ceiling). See the target_mbps / source_relative_cap_factor config block.
+    target_mbps = _resolve_target_maxrate(config, item, content_type, res_key)
+    if target_mbps is not None:
+        maxrate = f"{target_mbps:.1f}M"
+        bufsize = f"{target_mbps * 2:.1f}M"
+    else:
+        # No target for this res key (720p/480p/SD) — keep the static table.
+        maxrate = config["nvenc_maxrate"].get(content_type, {}).get(res_key)
+        bufsize = config["nvenc_bufsize"].get(content_type, {}).get(res_key)
+
     return {
         "cq": final_cq,
         "base_cq": base_cq,
         "cq_offset": applied_offset,
         "cq_override": override_applied,
         "content_grade": content_grade,
+        "value_band": _value_band(item),
         "preset": config["nvenc_preset"].get(content_type, {}).get(res_key, "p4"),
         "multipass": config["nvenc_multipass"].get(content_type, {}).get(res_key, "disabled"),
         "lookahead": config["nvenc_lookahead"].get(content_type, {}).get(res_key, 16),
-        "maxrate": config["nvenc_maxrate"].get(content_type, {}).get(res_key, None),
-        "bufsize": config["nvenc_bufsize"].get(content_type, {}).get(res_key, None),
+        "maxrate": maxrate,
+        "bufsize": bufsize,
         "content_type": content_type,
         "res_key": res_key,
     }
