@@ -4,9 +4,13 @@ import { fmtNum, libraryOf } from "./helpers";
 
 export function Storage({ data }) {
   const [historySummary, setHistorySummary] = useState(null);
+  const [reclaim, setReclaim] = useState(null);
   useEffect(() => {
     api.getHistorySummary().then(setHistorySummary).catch(() => {});
+    api.getReclaim().then(setReclaim).catch(() => {});
   }, []);
+
+  const fmtSize = (gb) => (gb >= 1024 ? `${(gb / 1024).toFixed(2)} TB` : `${Math.round(gb)} GB`);
 
   const summary = data?.summary || {};
   const totalTb = summary.total_size_gb ? (summary.total_size_gb / 1024).toFixed(1) : null;
@@ -83,6 +87,50 @@ export function Storage({ data }) {
           </div>
         </div>
       </div>
+
+      {reclaim && reclaim.reclaimed > 0 && (
+        <div className="card" style={{ marginBottom: 20 }}>
+          <h3>
+            De-bloat reclaim <span className="count">{reclaim.reclaimed} films</span>
+            {reclaim.running && reclaim.in_progress && (
+              <span className="count" style={{ background: "var(--accent)", color: "#06281e" }}>
+                ● encoding {reclaim.in_progress.name.replace(/\.mkv$/i, "")}
+              </span>
+            )}
+          </h3>
+          <div style={{ display: "flex", gap: 32, flexWrap: "wrap", marginBottom: 14 }}>
+            <div>
+              <div className="kpi-label">Banked</div>
+              <div style={{ fontSize: 24, fontWeight: 600, color: "var(--accent)" }}>{fmtSize(reclaim.saved_gb)}</div>
+            </div>
+            <div>
+              <div className="kpi-label">Flagged for retry</div>
+              <div style={{ fontSize: 24, fontWeight: 600 }}>{reclaim.flagged}</div>
+            </div>
+            <div>
+              <div className="kpi-label">Backups purged</div>
+              <div style={{ fontSize: 24, fontWeight: 600, color: "var(--ink-3)" }}>{fmtSize(reclaim.purged_gb)}</div>
+            </div>
+          </div>
+          <div style={{ fontSize: 11, color: "var(--ink-4)", marginBottom: 12, lineHeight: 1.5 }}>
+            In-place AV1→AV1 de-bloat, VMAF-gated ≥95, originals backed up then purged. Runs outside the pipeline —
+            separate from the “Reclaimed” KPI above (that one is HEVC→AV1 encode history).
+          </div>
+          <div>
+            {reclaim.recent.map((r) => (
+              <div key={r.name} className="codec-row">
+                <div style={{ flex: 1, fontSize: 13, fontWeight: 500 }}>{r.name.replace(/\.mkv$/i, "")}</div>
+                <div className="mono" style={{ fontSize: 11, color: "var(--ink-3)", width: 70, textAlign: "right" }}>
+                  {r.new_gb} GB
+                </div>
+                <div className="mono" style={{ fontSize: 11, color: "var(--accent)", width: 92, textAlign: "right" }}>
+                  VMAF {r.vmaf}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       <div className="card" style={{ marginBottom: 20 }}>
         <h3>
