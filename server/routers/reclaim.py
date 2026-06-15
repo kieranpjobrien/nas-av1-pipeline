@@ -10,6 +10,7 @@ Routes:
     GET /api/reclaim -> {reclaimed, saved_gb, flagged, purged_gb, running,
                          in_progress, recent[], flagged_list[]}
 """
+
 import json
 import os
 import re
@@ -18,12 +19,14 @@ import time
 from fastapi import APIRouter
 
 from paths import STAGING_DIR
+from server.helpers import drop_file, remove_file
 
 router = APIRouter()
 
 _LEDGER = os.path.join(str(STAGING_DIR), "reclaim_ledger.json")
 _LOG = os.path.join(str(STAGING_DIR), "reclaim.log")
 _PURGE_LOG = os.path.join(str(STAGING_DIR), "reclaim_purge.log")
+_PAUSE = os.path.join(str(STAGING_DIR), "control", "pause_reclaim.json")
 
 # Phases a film passes through while actively being worked (no terminal status yet).
 _ACTIVE_PHASES = {"risk", "gate", "encoding", "uploading", "moving_original", "renaming"}
@@ -87,7 +90,17 @@ def reclaim_status() -> dict:
         "flagged": len(flagged),
         "purged_gb": round(_sum_from_log(_PURGE_LOG, r"freed ([\d.]+)GB"), 1),
         "running": bool(in_prog) and (_log_fresh() or _work_fresh()),
-        "in_progress": {"name": in_prog.get("name"), "phase": in_prog.get("phase")} if in_prog else None,
+        "paused": os.path.exists(_PAUSE),
+        "in_progress": {
+            "name": in_prog.get("name"),
+            "phase": in_prog.get("phase"),
+            "progress_pct": in_prog.get("progress_pct"),
+            "speed": in_prog.get("speed"),
+            "eta_s": in_prog.get("eta_s"),
+            "cap": in_prog.get("cap"),
+        }
+        if in_prog
+        else None,
         "recent": [
             {"name": v.get("name"), "vmaf": v.get("vmaf"), "new_gb": v.get("new_gb"), "cap": v.get("cap")}
             for v in recent
@@ -97,3 +110,17 @@ def reclaim_status() -> dict:
             for v in flagged[:20]
         ],
     }
+
+
+@router.post("/api/reclaim/pause")
+def reclaim_pause() -> dict:
+    """Pause the de-bloat reclaim between films (never mid-encode). The tool
+    checks this control file at each film boundary."""
+    drop_file("pause_reclaim.json", {"type": "reclaim"})
+    return {"ok": True, "paused": True}
+
+
+@router.post("/api/reclaim/resume")
+def reclaim_resume() -> dict:
+    remove_file("pause_reclaim.json")
+    return {"ok": True, "paused": False}

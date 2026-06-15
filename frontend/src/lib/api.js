@@ -149,6 +149,8 @@ export const api = {
   sonarrUpgrade: (req) => postJSON("/upgrades/sonarr/upgrade", req),
   // Diagnostics — size-vs-duration scatter for spotting corrupt/sample files
   getSizeVsDuration: () => fetchJSON("/diagnostics/size-vs-duration"),
-  // De-bloat reclaim status (standalone reclaim tool ledger)
+  // De-bloat reclaim status + controls (standalone reclaim tool)
   getReclaim: () => fetchJSON("/reclaim"),
+  reclaimPause: () => postJSON("/reclaim/pause", {}),
+  reclaimResume: () => postJSON("/reclaim/resume", {}),
 };

@@ -24,6 +24,13 @@ PROCESS_CONFIGS: dict[str, dict] = {
         "cmd": [sys.executable, "-m", "pipeline", "--gap-filler-only"],
         "cwd": _PROJECT_ROOT,
     },
+    "reclaim": {
+        # In-place VMAF-gated de-bloat (tools/reclaim_debloat.py). No arg -> runs
+        # until candidates are exhausted or the UI stops it. force_kill matches on
+        # module "tools.reclaim_debloat" and reaps its ffmpeg children.
+        "cmd": [sys.executable, "-m", "tools.reclaim_debloat"],
+        "cwd": _PROJECT_ROOT,
+    },
     "strip_tags": {
         "cmd": [sys.executable, "-m", "tools.maintain", "clean-names", "--execute", "--movies"],
         "cwd": _PROJECT_ROOT,

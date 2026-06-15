@@ -20,6 +20,7 @@ Safety invariants:
 
 Usage: python -m tools.reclaim_debloat [max_films]
 """
+
 import json
 import os
 import re
@@ -27,6 +28,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 
 from pipeline.config import DEFAULT_CONFIG, resolve_encode_params
@@ -42,6 +44,8 @@ LEDGER = "F:/AV1_Staging/reclaim_ledger.json"
 LOG = "F:/AV1_Staging/reclaim.log"
 DB = "F:/AV1_Staging/pipeline_state.db"
 REPORT = "F:/AV1_Staging/media_report.json"
+PAUSE_FILE = "F:/AV1_Staging/control/pause_reclaim.json"  # presence = pause between films
+PROGRESS_FILE = "F:/AV1_Staging/reclaim/ffprogress.txt"  # ffmpeg -progress target
 
 
 def log(m: str) -> None:
@@ -53,6 +57,41 @@ def log(m: str) -> None:
 
 def _run(cmd: list, timeout: int = 14400) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+
+
+def _hms(t: str) -> float:
+    try:
+        h, m, s = t.split(":")
+        return int(h) * 3600 + int(m) * 60 + float(s)
+    except Exception:
+        return 0.0
+
+
+def _progress_watcher(dur: float, fp: str, led: dict, stop_evt: threading.Event) -> None:
+    """Tail ffmpeg's -progress file and push pct/speed/eta into the ledger entry,
+    so the dashboard can render a live de-bloat progress bar (same shape the
+    pipeline uses: progress_pct / speed / eta_s)."""
+    while not stop_evt.is_set():
+        try:
+            with open(PROGRESS_FILE, encoding="utf-8") as f:
+                f.seek(0, 2)
+                f.seek(max(0, f.tell() - 2048))
+                tail = f.read()
+            ot = re.findall(r"out_time=(\S+)", tail)
+            sp = re.findall(r"speed=(\S+)", tail)
+            if ot and dur:
+                secs = _hms(ot[-1])
+                speed = sp[-1] if sp else ""
+                sv = float(speed[:-1]) if speed.endswith("x") and speed[:-1].replace(".", "").isdigit() else 0.0
+                eta = int((dur - secs) / sv) if sv > 0 else 0
+                if fp in led:
+                    led[fp].update(
+                        {"progress_pct": round(min(99.0, secs / dur * 100), 1), "speed": speed, "eta_s": max(0, eta)}
+                    )
+                    save_ledger(led)
+        except OSError:
+            pass
+        stop_evt.wait(3)
 
 
 def load_ledger() -> dict:
@@ -70,45 +109,115 @@ def save_ledger(led: dict) -> None:
 
 
 def color_flags(src: str, hdr: bool) -> list:
-    r = _run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
-              "stream=color_primaries,color_transfer,color_space,color_range", "-of", "json", src], timeout=60)
+    r = _run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=color_primaries,color_transfer,color_space,color_range",
+            "-of",
+            "json",
+            src,
+        ],
+        timeout=60,
+    )
     try:
         s = json.loads(r.stdout)["streams"][0]
     except Exception:
         s = {}
     if hdr:
-        prim, trc, spc = s.get("color_primaries") or "bt2020", s.get("color_transfer") or "smpte2084", s.get("color_space") or "bt2020nc"
+        prim, trc, spc = (
+            s.get("color_primaries") or "bt2020",
+            s.get("color_transfer") or "smpte2084",
+            s.get("color_space") or "bt2020nc",
+        )
     else:
-        prim, trc, spc = s.get("color_primaries") or "bt709", s.get("color_transfer") or "bt709", s.get("color_space") or "bt709"
-    return ["-color_primaries", prim, "-color_trc", trc, "-colorspace", spc, "-color_range", s.get("color_range") or "tv"]
+        prim, trc, spc = (
+            s.get("color_primaries") or "bt709",
+            s.get("color_transfer") or "bt709",
+            s.get("color_space") or "bt709",
+        )
+    return [
+        "-color_primaries",
+        prim,
+        "-color_trc",
+        trc,
+        "-colorspace",
+        spc,
+        "-color_range",
+        s.get("color_range") or "tv",
+    ]
 
 
 def probe_counts(path: str) -> tuple:
-    r = _run(["ffprobe", "-v", "error", "-show_entries", "stream=codec_type", "-show_entries", "format=duration",
-              "-of", "json", path], timeout=120)
+    r = _run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "stream=codec_type",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "json",
+            path,
+        ],
+        timeout=120,
+    )
     try:
         d = json.loads(r.stdout)
         types = [s.get("codec_type") for s in d.get("streams", [])]
-        return types.count("video"), types.count("audio"), types.count("subtitle"), float(d.get("format", {}).get("duration") or 0)
+        return (
+            types.count("video"),
+            types.count("audio"),
+            types.count("subtitle"),
+            float(d.get("format", {}).get("duration") or 0),
+        )
     except Exception:
         return 0, 0, 0, 0.0
 
 
 def ffv1_clip(src: str, t: float, secs: int, dest: str) -> bool:
-    e = _run(["ffmpeg", "-y", "-ss", str(int(t)), "-i", src, "-t", str(secs), "-map", "0:v:0", "-an", "-c:v", "ffv1", dest], timeout=900)
+    e = _run(
+        ["ffmpeg", "-y", "-ss", str(int(t)), "-i", src, "-t", str(secs), "-map", "0:v:0", "-an", "-c:v", "ffv1", dest],
+        timeout=900,
+    )
     return e.returncode == 0 and os.path.exists(dest)
 
 
 def vmaf(distorted: str, ref: str) -> float | None:
-    r = _run(["ffmpeg", "-i", distorted, "-i", ref, "-lavfi", "[0:v][1:v]libvmaf=n_threads=16", "-f", "null", "-"], timeout=1800)
+    r = _run(
+        ["ffmpeg", "-i", distorted, "-i", ref, "-lavfi", "[0:v][1:v]libvmaf=n_threads=16", "-f", "null", "-"],
+        timeout=1800,
+    )
     m = re.search(r"VMAF score:\s*([\d.]+)", r.stderr)
     return float(m.group(1)) if m else None
 
 
 def _enc_video_args(p: dict, color: list, pix: str) -> list:
-    return ["-c:v", "av1_nvenc", "-preset", str(p["preset"]), "-cq", str(p["cq"]), "-maxrate", p["maxrate"],
-            "-bufsize", p["bufsize"], "-multipass", str(p["multipass"]), "-rc-lookahead", str(p["lookahead"]),
-            "-pix_fmt", str(pix), *color]
+    return [
+        "-c:v",
+        "av1_nvenc",
+        "-preset",
+        str(p["preset"]),
+        "-cq",
+        str(p["cq"]),
+        "-maxrate",
+        p["maxrate"],
+        "-bufsize",
+        p["bufsize"],
+        "-multipass",
+        str(p["multipass"]),
+        "-rc-lookahead",
+        str(p["lookahead"]),
+        "-pix_fmt",
+        str(pix),
+        *color,
+    ]
 
 
 def gate_score(orig: str, dark_t: float, dur: float, p: dict, color: list, pix: str) -> float | None:
@@ -120,7 +229,9 @@ def gate_score(orig: str, dark_t: float, dur: float, p: dict, color: list, pix: 
     for tag, t in (("dark", dark_t), ("mid", dur * 0.45)):
         ref, ce = os.path.join(WORK, "g_ref.mkv"), os.path.join(WORK, "g_enc.mkv")
         if ffv1_clip(orig, t, 20, ref):
-            e = _run(["ffmpeg", "-y", "-i", ref, "-map", "0:v:0", *_enc_video_args(p, color, pix), "-an", ce], timeout=1200)
+            e = _run(
+                ["ffmpeg", "-y", "-i", ref, "-map", "0:v:0", *_enc_video_args(p, color, pix), "-an", ce], timeout=1200
+            )
             if e.returncode == 0 and os.path.exists(ce):
                 s = vmaf(ce, ref)
                 if s is not None:
@@ -147,10 +258,10 @@ def swap(orig: str, local_out: str, led: dict, key: str) -> str:
         raise RuntimeError("uploaded tmp failed probe")
     led[key]["phase"] = "moving_original"
     save_ledger(led)
-    shutil.move(orig, backup)            # original preserved, never deleted
+    shutil.move(orig, backup)  # original preserved, never deleted
     led[key]["phase"] = "renaming"
     save_ledger(led)
-    os.replace(tmp, orig)                # new file into place
+    os.replace(tmp, orig)  # new file into place
     led[key]["phase"] = "done"
     return backup
 
@@ -190,15 +301,44 @@ def mark_state(fp: str, new_size: int, status: str, reason: str) -> None:
         ex = json.loads(row[0]) if row and row[0] else {}
     except Exception:
         ex = {}
-    ex["reclaimed"] = {"status": status, "new_size_bytes": new_size, "reason": reason, "ts": time.strftime("%Y-%m-%d %H:%M")}
+    ex["reclaimed"] = {
+        "status": status,
+        "new_size_bytes": new_size,
+        "reason": reason,
+        "ts": time.strftime("%Y-%m-%d %H:%M"),
+    }
     con.execute("UPDATE pipeline_files SET extras=? WHERE filepath=?", (json.dumps(ex, separators=(",", ": ")), fp))
     con.commit()
     con.close()
 
 
+def _another_encoder_running() -> bool:
+    """Refuse to start if any ffmpeg encode is already running — two concurrent
+    NVENC encodes (a second reclaim, or the convert pipeline) BSOD this box
+    (rule 9b). This is the cross-process guard the two uncoordinated jobs need:
+    no reclaim-ffmpeg exists yet at startup, so any live ffmpeg is someone else."""
+    try:
+        import psutil
+
+        for p in psutil.process_iter(["name"]):
+            if (p.info.get("name") or "").lower() in ("ffmpeg.exe", "ffmpeg"):
+                return True
+    except Exception:
+        pass
+    return False
+
+
 def main() -> None:
     os.makedirs(WORK, exist_ok=True)
-    max_films = int(sys.argv[1]) if len(sys.argv) > 1 else 20
+    if _another_encoder_running():
+        log(
+            "REFUSING START: an ffmpeg encode is already running (another reclaim or the convert "
+            "pipeline). Two concurrent NVENC = BSOD (rule 9b)."
+        )
+        return
+    # Default high so the managed-process launch (no arg) runs until candidates
+    # are exhausted or the UI stops it; pass a number to cap a manual run.
+    max_films = int(sys.argv[1]) if len(sys.argv) > 1 else 9999
     led = load_ledger()
     cands = candidates()
     log(f"=== RECLAIM START: {len(cands)} normal-tier bloated candidates, max {max_films}, gate VMAF>={GATE} ===")
@@ -211,6 +351,11 @@ def main() -> None:
         if consec_fail >= MAX_CONSEC_FAIL:
             log(f"CIRCUIT BREAKER: {consec_fail} consecutive hard errors; stopping")
             break
+        if os.path.exists(PAUSE_FILE):  # pause between films (never mid-encode)
+            log("paused (pause_reclaim.json present); waiting for resume...")
+            while os.path.exists(PAUSE_FILE):
+                time.sleep(5)
+            log("resumed")
         fp, f, out_b, dur = c["fp"], c["f"], c["out_b"], c["dur"]
         name = os.path.basename(fp)
         st = led.get(fp, {})
@@ -220,8 +365,14 @@ def main() -> None:
             continue
         hdr = (f.get("video") or {}).get("hdr", False)
         cur_mbps = out_b * 8 / dur / 1e6
-        item = {"library_type": f.get("library_type", "movie"), "resolution": (f.get("video") or {}).get("resolution_class", ""),
-                "hdr": hdr, "bitrate_kbps": cur_mbps * 1000, "duration_seconds": dur, "tmdb": f.get("tmdb") or {}}
+        item = {
+            "library_type": f.get("library_type", "movie"),
+            "resolution": (f.get("video") or {}).get("resolution_class", ""),
+            "hdr": hdr,
+            "bitrate_kbps": cur_mbps * 1000,
+            "duration_seconds": dur,
+            "tmdb": f.get("tmdb") or {},
+        }
         p = resolve_encode_params(DEFAULT_CONFIG, item)
         if not p["maxrate"]:
             continue
@@ -261,15 +412,35 @@ def main() -> None:
         n_aud = f.get("audio_stream_count") or 1
         n_sub = f.get("subtitle_count") or 0
         out = os.path.join(WORK, "out.mkv")
-        cmd = ["ffmpeg", "-y", "-hwaccel", "cuda", "-i", fp, "-map", "0:v:0", *_enc_video_args(p, color, pix), "-map", "0:a", "-c:a", "copy"]
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-hwaccel",
+            "cuda",
+            "-i",
+            fp,
+            "-map",
+            "0:v:0",
+            *_enc_video_args(p, color, pix),
+            "-map",
+            "0:a",
+            "-c:a",
+            "copy",
+        ]
         if n_sub > 0:
             cmd += ["-map", "0:s", "-c:s", "copy"]
-        cmd += ["-max_muxing_queue_size", "1024", out]
+        cmd += ["-progress", PROGRESS_FILE, "-max_muxing_queue_size", "1024", out]
         led[fp]["phase"] = "encoding"
         save_ledger(led)
         log(f"  gate PASS {score:.2f}; full encode...")
         t0 = time.time()
+        stop_evt = threading.Event()
+        watcher = threading.Thread(target=_progress_watcher, args=(dur, fp, led, stop_evt), daemon=True)
+        watcher.start()
         e = _run(cmd)
+        stop_evt.set()
+        for k in ("progress_pct", "speed", "eta_s"):
+            led[fp].pop(k, None)  # clear the live bar once the encode finishes
         if e.returncode != 0 or not os.path.exists(out):
             log(f"  ENCODE FAILED: {e.stderr[-300:]}")
             led[fp]["status"] = "skipped_error"
@@ -285,7 +456,7 @@ def main() -> None:
             consec_fail += 1
             continue
         new_b = os.path.getsize(out)
-        log(f"  encoded {out_b/1e9:.1f}->{new_b/1e9:.1f}GB in {time.time()-t0:.0f}s; swapping (backup preserved)")
+        log(f"  encoded {out_b / 1e9:.1f}->{new_b / 1e9:.1f}GB in {time.time() - t0:.0f}s; swapping (backup preserved)")
         try:
             backup = swap(fp, out, led, fp)
         except Exception as ex:
@@ -304,9 +475,13 @@ def main() -> None:
         saved_gb += (out_b - new_b) / 1e9
         done += 1
         consec_fail = 0
-        log(f"  RECLAIMED ({done}) saved {(out_b-new_b)/1e9:.1f}GB | run total {saved_gb:.0f}GB, {flagged} flagged re-source")
+        log(
+            f"  RECLAIMED ({done}) saved {(out_b - new_b) / 1e9:.1f}GB | run total {saved_gb:.0f}GB, {flagged} flagged re-source"
+        )
 
-    log(f"=== RECLAIM END: {done} reclaimed (~{saved_gb:.0f}GB pending-free in backup), {flagged} flagged re-source ===")
+    log(
+        f"=== RECLAIM END: {done} reclaimed (~{saved_gb:.0f}GB pending-free in backup), {flagged} flagged re-source ==="
+    )
 
 
 if __name__ == "__main__":

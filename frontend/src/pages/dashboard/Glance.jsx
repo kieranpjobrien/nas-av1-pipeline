@@ -9,6 +9,7 @@ import {
   prettyTitle,
   resKey,
 } from "./helpers";
+import { DebloatCard } from "./Debloat";
 
 function fmtAge(ms) {
   if (ms == null) return null;
@@ -893,6 +894,8 @@ export function Glance({ data, pipelineData, throughputPerDay, workersActive, wo
           </div>
         </div>
       )}
+
+      <DebloatCard />
 
       <div className="two-col">
         <div className="card">
