@@ -276,8 +276,8 @@ def candidates() -> list:
     out = []
     for r in rows:
         f = info.get(r["filepath"]) or {}
-        if (f.get("library_type") or "").lower() not in ("movie", "film"):
-            continue
+        if (f.get("library_type") or "").lower() not in ("movie", "film", "series", "show", "tv", "anime"):
+            continue  # movies + series
         if ((f.get("tmdb") or {}).get("vote_average") or 0) >= 8.0:
             continue  # treasured -> leave for re-source
         try:
@@ -341,7 +341,7 @@ def main() -> None:
     max_films = int(sys.argv[1]) if len(sys.argv) > 1 else 9999
     led = load_ledger()
     cands = candidates()
-    log(f"=== RECLAIM START: {len(cands)} normal-tier bloated candidates, max {max_films}, gate VMAF>={GATE} ===")
+    log(f"=== RECLAIM START: {len(cands)} bloated candidates (films+series), max {max_films}, gate VMAF>={GATE} ===")
     done = consec_fail = flagged = 0
     saved_gb = 0.0
     for c in cands:

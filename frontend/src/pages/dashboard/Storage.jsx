@@ -18,6 +18,8 @@ export function Storage({ data }) {
   const reclaimedGb = historySummary?.totals?.saved_bytes
     ? historySummary.totals.saved_bytes / 1024 ** 3
     : null;
+  const debloatGb = reclaim?.saved_gb || 0;
+  const totalReclaimedGb = (reclaimedGb || 0) + debloatGb;
   const remainingSizeGb = data?.remainingSizeGb || 0;
   const projectedTb = remainingSizeGb ? (remainingSizeGb * 0.42) / 1024 : null;
 
@@ -64,11 +66,15 @@ export function Storage({ data }) {
         <div className="kpi">
           <div className="kpi-label">Reclaimed</div>
           <div className="kpi-value" style={{ color: "var(--accent)" }}>
-            {reclaimedGb != null ? (reclaimedGb / 1024).toFixed(2) : "—"}
-            {reclaimedGb != null && <span className="unit">TB</span>}
+            {totalReclaimedGb > 0 ? (totalReclaimedGb / 1024).toFixed(2) : "—"}
+            {totalReclaimedGb > 0 && <span className="unit">TB</span>}
           </div>
           <div className="kpi-sub">
-            <span className="mono">{reclaimedGb != null ? "avg 41% per file" : "no encodes yet"}</span>
+            <span className="mono">
+              {totalReclaimedGb > 0
+                ? `${Math.round(reclaimedGb || 0)} GB convert + ${Math.round(debloatGb)} GB de-bloat`
+                : "no encodes yet"}
+            </span>
           </div>
         </div>
         <div className="kpi">
