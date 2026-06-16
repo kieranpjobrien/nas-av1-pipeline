@@ -30,6 +30,24 @@ _PAUSE = os.path.join(str(STAGING_DIR), "control", "pause_reclaim.json")
 
 # Phases a film passes through while actively being worked (no terminal status yet).
 _ACTIVE_PHASES = {"risk", "gate", "encoding", "uploading", "moving_original", "renaming"}
+_TERMINAL = {"reclaimed", "gate_failed", "skipped_highrisk", "skipped_error", "skipped_probefail", "swap_error"}
+
+# The candidate pool (films+series, non-treasured growers) is expensive to build
+# (reads media_report + scans the state DB), so cache it ~60s for the polled endpoint.
+_cand_cache: dict = {"ts": 0.0, "fps": None}
+
+
+def _candidate_fps() -> list:
+    now = time.time()
+    if _cand_cache["fps"] is None or now - _cand_cache["ts"] > 60:
+        try:
+            from tools.reclaim_debloat import candidates
+
+            _cand_cache["fps"] = [c["fp"] for c in candidates()]
+            _cand_cache["ts"] = now
+        except Exception:
+            _cand_cache["fps"] = _cand_cache.get("fps") or []
+    return _cand_cache["fps"] or []
 
 
 def _load_ledger() -> dict:
@@ -81,6 +99,10 @@ def reclaim_status() -> dict:
         None,
     )
     recent = list(reversed(reclaimed))[:12]  # ledger preserves processing order
+    term_fps = {k for k, v in led.items() if v.get("status") in _TERMINAL}
+    cand_fps = _candidate_fps()
+    total = len(cand_fps)
+    remaining = sum(1 for fp in cand_fps if fp not in term_fps)
 
     return {
         # GB banked is summed from the append-only log so it's cumulative across runs
@@ -88,6 +110,8 @@ def reclaim_status() -> dict:
         "saved_gb": round(_sum_from_log(_LOG, r"RECLAIMED \(\d+\) saved ([\d.]+)GB"), 1),
         "reclaimed": len(reclaimed),
         "flagged": len(flagged),
+        "candidates_total": total,
+        "remaining": remaining,
         "purged_gb": round(_sum_from_log(_PURGE_LOG, r"freed ([\d.]+)GB"), 1),
         "running": bool(in_prog) and (_log_fresh() or _work_fresh()),
         "paused": os.path.exists(_PAUSE),

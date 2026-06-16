@@ -135,6 +135,35 @@ export function DebloatCard() {
               : "Idle. Start to keep banking space — can't run alongside the convert pipeline (one NVENC)."}
         </div>
       )}
+
+      {r.candidates_total > 0 && (
+        <div style={{ marginTop: 12 }}>
+          <div
+            style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: "var(--ink-3)", marginBottom: 5 }}
+          >
+            <span>
+              Campaign · {r.reclaimed + r.flagged} / {r.candidates_total} bloated films+series processed (
+              {Math.round(((r.reclaimed + r.flagged) / r.candidates_total) * 100)}%)
+            </span>
+            <span className="mono">{r.remaining} to go</span>
+          </div>
+          <div style={{ height: 8, borderRadius: 4, overflow: "hidden", display: "flex", background: "var(--border)" }}>
+            <div
+              style={{ width: `${(r.reclaimed / r.candidates_total) * 100}%`, background: "var(--accent)" }}
+              title={`${r.reclaimed} reclaimed`}
+            />
+            <div
+              style={{ width: `${(r.flagged / r.candidates_total) * 100}%`, background: "var(--warn)" }}
+              title={`${r.flagged} flagged for re-source`}
+            />
+          </div>
+          <div style={{ display: "flex", gap: 16, fontSize: 10, color: "var(--ink-4)", marginTop: 5 }}>
+            <span><span style={{ color: "var(--accent)" }}>●</span> {r.reclaimed} reclaimed</span>
+            <span><span style={{ color: "var(--warn)" }}>●</span> {r.flagged} → re-source</span>
+            <span>○ {r.remaining} remaining</span>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
