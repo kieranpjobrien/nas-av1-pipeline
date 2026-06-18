@@ -46,6 +46,7 @@ DB = "F:/AV1_Staging/pipeline_state.db"
 REPORT = "F:/AV1_Staging/media_report.json"
 PAUSE_FILE = "F:/AV1_Staging/control/pause_reclaim.json"  # presence = pause between films
 PROGRESS_FILE = "F:/AV1_Staging/reclaim/ffprogress.txt"  # ffmpeg -progress target
+INFLIGHT_FILE = "F:/AV1_Staging/reclaim/inflight.json"  # live progress, kept OUT of the ledger
 
 
 def log(m: str) -> None:
@@ -67,10 +68,25 @@ def _hms(t: str) -> float:
         return 0.0
 
 
-def _progress_watcher(dur: float, fp: str, led: dict, stop_evt: threading.Event) -> None:
-    """Tail ffmpeg's -progress file and push pct/speed/eta into the ledger entry,
-    so the dashboard can render a live de-bloat progress bar (same shape the
-    pipeline uses: progress_pct / speed / eta_s)."""
+def _write_inflight(data: dict) -> None:
+    """Atomic write of the small live-progress file, retrying the Windows rename
+    if the dashboard has it open."""
+    tmp = INFLIGHT_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(data, fh)
+    for _ in range(20):
+        try:
+            os.replace(tmp, INFLIGHT_FILE)
+            return
+        except PermissionError:
+            time.sleep(0.05)
+
+
+def _progress_watcher(dur: float, fp: str, name: str, stop_evt: threading.Event) -> None:
+    """Tail ffmpeg's -progress file and write pct/speed/eta to a SMALL separate
+    file — NOT the ledger. Writing the shared ledger every 3s from this thread
+    raced the main thread AND collided with the dashboard's 3s ledger polling
+    (Windows os.replace 'Access is denied'), which crashed the run on 06-18."""
     while not stop_evt.is_set():
         try:
             with open(PROGRESS_FILE, encoding="utf-8") as f:
@@ -84,11 +100,15 @@ def _progress_watcher(dur: float, fp: str, led: dict, stop_evt: threading.Event)
                 speed = sp[-1] if sp else ""
                 sv = float(speed[:-1]) if speed.endswith("x") and speed[:-1].replace(".", "").isdigit() else 0.0
                 eta = int((dur - secs) / sv) if sv > 0 else 0
-                if fp in led:
-                    led[fp].update(
-                        {"progress_pct": round(min(99.0, secs / dur * 100), 1), "speed": speed, "eta_s": max(0, eta)}
-                    )
-                    save_ledger(led)
+                _write_inflight(
+                    {
+                        "fp": fp,
+                        "name": name,
+                        "progress_pct": round(min(99.0, secs / dur * 100), 1),
+                        "speed": speed,
+                        "eta_s": max(0, eta),
+                    }
+                )
         except OSError:
             pass
         stop_evt.wait(3)
@@ -105,6 +125,15 @@ def save_ledger(led: dict) -> None:
     tmp = LEDGER + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(led, fh, indent=1)
+    # Windows: the dashboard polls this file; os.replace fails with "Access is
+    # denied" if a reader has it open at the rename instant. Retry briefly — the
+    # reader's window is milliseconds. (Unhandled, this crashed the run on 06-18.)
+    for _ in range(40):
+        try:
+            os.replace(tmp, LEDGER)
+            return
+        except PermissionError:
+            time.sleep(0.1)
     os.replace(tmp, LEDGER)
 
 
@@ -435,12 +464,14 @@ def main() -> None:
         log(f"  gate PASS {score:.2f}; full encode...")
         t0 = time.time()
         stop_evt = threading.Event()
-        watcher = threading.Thread(target=_progress_watcher, args=(dur, fp, led, stop_evt), daemon=True)
+        watcher = threading.Thread(target=_progress_watcher, args=(dur, fp, name, stop_evt), daemon=True)
         watcher.start()
         e = _run(cmd)
         stop_evt.set()
-        for k in ("progress_pct", "speed", "eta_s"):
-            led[fp].pop(k, None)  # clear the live bar once the encode finishes
+        try:
+            os.remove(INFLIGHT_FILE)  # clear the live bar once the encode finishes
+        except OSError:
+            pass
         if e.returncode != 0 or not os.path.exists(out):
             log(f"  ENCODE FAILED: {e.stderr[-300:]}")
             led[fp]["status"] = "skipped_error"

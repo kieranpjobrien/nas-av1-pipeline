@@ -27,6 +27,7 @@ _LEDGER = os.path.join(str(STAGING_DIR), "reclaim_ledger.json")
 _LOG = os.path.join(str(STAGING_DIR), "reclaim.log")
 _PURGE_LOG = os.path.join(str(STAGING_DIR), "reclaim_purge.log")
 _PAUSE = os.path.join(str(STAGING_DIR), "control", "pause_reclaim.json")
+_INFLIGHT = os.path.join(str(STAGING_DIR), "reclaim", "inflight.json")
 
 # Phases a film passes through while actively being worked (no terminal status yet).
 _ACTIVE_PHASES = {"risk", "gate", "encoding", "uploading", "moving_original", "renaming"}
@@ -89,15 +90,24 @@ def _work_fresh(within_s: int = 180) -> bool:
         return False
 
 
+def _load_inflight() -> dict:
+    try:
+        with open(_INFLIGHT, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
 @router.get("/api/reclaim")
 def reclaim_status() -> dict:
     led = _load_ledger()
     reclaimed = [v for v in led.values() if v.get("status") == "reclaimed"]
     flagged = [v for v in led.values() if v.get("status") in ("gate_failed", "skipped_highrisk")]
-    in_prog = next(
-        (v for v in led.values() if v.get("status") is None and v.get("phase") in _ACTIVE_PHASES),
+    in_prog_kv = next(
+        ((k, v) for k, v in led.items() if v.get("status") is None and v.get("phase") in _ACTIVE_PHASES),
         None,
     )
+    inflight = _load_inflight()
     recent = list(reversed(reclaimed))[:12]  # ledger preserves processing order
     term_fps = {k for k, v in led.items() if v.get("status") in _TERMINAL}
     cand_fps = _candidate_fps()
@@ -113,18 +123,21 @@ def reclaim_status() -> dict:
         "candidates_total": total,
         "remaining": remaining,
         "purged_gb": round(_sum_from_log(_PURGE_LOG, r"freed ([\d.]+)GB"), 1),
-        "running": bool(in_prog) and (_log_fresh() or _work_fresh()),
+        "running": bool(in_prog_kv) and (_log_fresh() or _work_fresh()),
         "paused": os.path.exists(_PAUSE),
-        "in_progress": {
-            "name": in_prog.get("name"),
-            "phase": in_prog.get("phase"),
-            "progress_pct": in_prog.get("progress_pct"),
-            "speed": in_prog.get("speed"),
-            "eta_s": in_prog.get("eta_s"),
-            "cap": in_prog.get("cap"),
-        }
-        if in_prog
-        else None,
+        "in_progress": (
+            {
+                "name": in_prog_kv[1].get("name"),
+                "phase": in_prog_kv[1].get("phase"),
+                "cap": in_prog_kv[1].get("cap"),
+                # live progress lives in a separate file (not the ledger); match by filepath
+                "progress_pct": inflight.get("progress_pct") if inflight.get("fp") == in_prog_kv[0] else None,
+                "speed": inflight.get("speed") if inflight.get("fp") == in_prog_kv[0] else None,
+                "eta_s": inflight.get("eta_s") if inflight.get("fp") == in_prog_kv[0] else None,
+            }
+            if in_prog_kv
+            else None
+        ),
         "recent": [
             {"name": v.get("name"), "vmaf": v.get("vmaf"), "new_gb": v.get("new_gb"), "cap": v.get("cap")}
             for v in recent
