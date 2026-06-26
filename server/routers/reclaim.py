@@ -98,16 +98,23 @@ def _load_inflight() -> dict:
         return {}
 
 
+def _pick_in_progress(led: dict, inflight: dict):
+    """Ledger entry for the file actually in flight: prefer the one matching the live
+    inflight file, else the most-recently-added active-phase entry. A plain first-match
+    scan surfaces stale orphans left non-terminal by an interrupted run (a kill mid-swap)
+    instead of the real current file."""
+    actives = [(k, v) for k, v in led.items() if v.get("status") is None and v.get("phase") in _ACTIVE_PHASES]
+    cur_fp = (inflight or {}).get("fp")
+    return next((kv for kv in actives if kv[0] == cur_fp), None) or (actives[-1] if actives else None)
+
+
 @router.get("/api/reclaim")
 def reclaim_status() -> dict:
     led = _load_ledger()
     reclaimed = [v for v in led.values() if v.get("status") == "reclaimed"]
     flagged = [v for v in led.values() if v.get("status") in ("gate_failed", "skipped_highrisk")]
-    in_prog_kv = next(
-        ((k, v) for k, v in led.items() if v.get("status") is None and v.get("phase") in _ACTIVE_PHASES),
-        None,
-    )
     inflight = _load_inflight()
+    in_prog_kv = _pick_in_progress(led, inflight)
     recent = list(reversed(reclaimed))[:12]  # ledger preserves processing order
     term_fps = {k for k, v in led.items() if v.get("status") in _TERMINAL}
     cand_fps = _candidate_fps()
