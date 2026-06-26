@@ -39,6 +39,10 @@ GATE = 95.0
 MAX_CONSEC_FAIL = 3
 NAS_MEDIA = r"\\KieranNAS\Media"
 BACKUP_ROOT = r"\\KieranNAS\Media\_reclaim_backup"
+# Originals are moved aside during the (crash-safe) swap. With KEEP_BACKUPS off they're
+# deleted right after the new file is verified in place, so backups never accumulate.
+# Flip to True to retain them (reversible, but piles up ~the reclaimed volume on the NAS).
+KEEP_BACKUPS = False
 WORK = "F:/AV1_Staging/reclaim"
 LEDGER = "F:/AV1_Staging/reclaim_ledger.json"
 LOG = "F:/AV1_Staging/reclaim.log"
@@ -274,6 +278,20 @@ def gate_score(orig: str, dark_t: float, dur: float, p: dict, color: list, pix: 
     return min(scores) if scores else None
 
 
+def retire_backup(backup: str | None) -> bool:
+    """Delete a post-swap backup (the moved-aside original) and tidy its folder. Called
+    only after a verified swap, so the new file is already safely in place. Returns True
+    if a backup was removed."""
+    if not backup or not os.path.exists(backup):
+        return False
+    os.remove(backup)
+    try:
+        os.rmdir(os.path.dirname(backup))  # tidy the now-empty film folder
+    except OSError:
+        pass
+    return True
+
+
 def swap(orig: str, local_out: str, led: dict, key: str) -> str:
     """Backup-preserving atomic swap; records phases for crash recovery."""
     backup = os.path.join(BACKUP_ROOT, os.path.relpath(orig, NAS_MEDIA))
@@ -496,7 +514,13 @@ def main() -> None:
             save_ledger(led)
             consec_fail += 1
             continue
-        mark_state(fp, new_b, "reclaimed", f"in-place de-bloat VMAF {score:.1f}; original at {backup}")
+        # Backup did its job (crash-safe swap done, new file verified in place). With
+        # KEEP_BACKUPS off, retire it now so reclaim backups never accumulate on the NAS.
+        if not KEEP_BACKUPS and retire_backup(backup):
+            reason, backup = f"in-place de-bloat VMAF {score:.1f}; backup auto-purged", None
+        else:
+            reason = f"in-place de-bloat VMAF {score:.1f}; original at {backup}"
+        mark_state(fp, new_b, "reclaimed", reason)
         led[fp].update({"status": "reclaimed", "new_gb": round(new_b / 1e9, 1), "backup": backup})
         save_ledger(led)
         try:
