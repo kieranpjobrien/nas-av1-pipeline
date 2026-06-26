@@ -6,7 +6,7 @@ Routes:
     GET  /api/completion-missing  - files missing a specific completion category
 """
 
-import json
+import re
 import time
 
 from fastapi import APIRouter, HTTPException
@@ -132,9 +132,7 @@ def _compliance_for_entry(entry: dict, keep_langs: set[str] | None = None) -> di
     hi_eng_internal = sum(
         1 for s in sub_streams if _eng(s.get("language") or s.get("detected_language")) and is_hi_internal(s)
     )
-    hi_eng_external = sum(
-        1 for s in ext_subs if _eng(s.get("language")) and is_hi_external(s.get("filename") or "")
-    )
+    hi_eng_external = sum(1 for s in ext_subs if _eng(s.get("language")) and is_hi_external(s.get("filename") or ""))
     hi_eng_count = hi_eng_internal + hi_eng_external
 
     non_keep_internal = sum(1 for s in sub_streams if _stream_lang(s) not in keep_langs)
@@ -185,6 +183,27 @@ def get_media_report() -> dict:
     if data is None:
         raise HTTPException(404, "media_report.json not found")
     return data
+
+
+# A filename scores "clean" for completion if it carries no genuine scene-release tags.
+# We deliberately do NOT use clean_filename() for the metric: it also strips cosmetic
+# " - " separators (Show - SxxExx - Title), flagging well-named files as dirty and even
+# dropping episode titles. SCENE_TAG_RE's lone words (PROPER/MULTi/Atmos) also false-
+# positive on episode titles ("Proper Condom Use"), so we match only an unambiguous set
+# of technical tags: resolution / source / video codec / dot-context streaming / group.
+_SCENE_JUNK_RE = re.compile(
+    r"\b(?:1080p|720p|480p|2160p|UHD|BluRay|BDRip|BRRip|WEB-?DL|WEBRip|HDTV|HDRip|"
+    r"DVDRip|REMUX|x264|x265|h264|h265|HEVC|AVC|XviD|DivX)\b"
+    r"|(?<=[.-])(?:NF|AMZN|DSNP|HULU|MAX|ATVP|PCOK|PMTP|STAN)(?=[.-])"
+    r"|\.[A-Z]{2,4}\d?-[A-Z0-9][A-Za-z0-9]{2,}$",
+    re.IGNORECASE,
+)
+
+
+def _filename_is_clean(filename: str) -> bool:
+    """True if a filename carries no genuine scene-release tags. Cosmetic ' - '
+    separators and episode titles are fine (unlike clean_filename())."""
+    return not _SCENE_JUNK_RE.search(filename or "")
 
 
 @router.get("/api/library-completion")
@@ -269,9 +288,9 @@ def get_library_completion() -> dict:
     # surface zeros so the dashboard renders "Grade-Optimised: 0% — run
     # tools.audit_encode_cq" rather than crashing.
     counts["grade_optimal"] = 0
-    counts["grade_too_low"] = 0     # encoded gentler than rule wants → re-encode
-    counts["grade_too_high"] = 0    # encoded harsher than rule wants → manual review
-    counts["grade_unknown"] = 0     # no stamp + no state row
+    counts["grade_too_low"] = 0  # encoded gentler than rule wants → re-encode
+    counts["grade_too_high"] = 0  # encoded harsher than rule wants → manual review
+    counts["grade_unknown"] = 0  # no stamp + no state row
     counts["grade_audited_at"] = None
     # 2026-05-27: compute bucket counts directly from per-file `audit`
     # blobs at request time instead of reading the top-level
@@ -290,7 +309,7 @@ def get_library_completion() -> dict:
     summary = data.get("audit_summary") or {}
     counts["grade_audited_at"] = summary.get("audited_at")
     for f in files:
-        a = (f.get("audit") or {})
+        a = f.get("audit") or {}
         b = a.get("bucket")
         if b == "optimal":
             counts["grade_optimal"] += 1
@@ -305,12 +324,10 @@ def get_library_completion() -> dict:
         # to grade". Matches the drill predicate in Library.jsx.
 
     grade_total_audited = (
-        counts["grade_optimal"] + counts["grade_too_low"]
-        + counts["grade_too_high"] + counts["grade_unknown"]
+        counts["grade_optimal"] + counts["grade_too_low"] + counts["grade_too_high"] + counts["grade_unknown"]
     )
     counts["pct_grade_optimal"] = (
-        round(100 * counts["grade_optimal"] / grade_total_audited, 1)
-        if grade_total_audited else 0
+        round(100 * counts["grade_optimal"] / grade_total_audited, 1) if grade_total_audited else 0
     )
 
     # Detailed completion stats for hero display
@@ -323,24 +340,11 @@ def get_library_completion() -> dict:
     files_with_und = 0
     und_langs = {"und", "unk", ""}
 
-    try:
-        from pipeline.filename import clean_filename as _cf
-    except ImportError:
-        _cf = None
-    _cf_failed = 0
+    _cf_failed = 0  # retained for filename_check_failed; the regex check never raises
 
     for f in files:
-        if _cf:
-            try:
-                clean = _cf(f.get("filepath", ""), f.get("library_type", ""))
-                if not clean or clean == f.get("filename"):
-                    has_clean_filename += 1
-            except Exception:
-                _cf_failed += 1
-        else:
-            # Filename cleaner unavailable - do NOT silently count as clean.
-            # Leave unchanged so the metric reflects uncertainty.
-            _cf_failed += 1
+        if _filename_is_clean(f.get("filename", "")):
+            has_clean_filename += 1
 
         # English filename check: filename title portion must ascii_key-match
         # its parent folder. Parent folders are canonically English-titled even
@@ -492,12 +496,7 @@ def get_completion_missing(category: str) -> dict:
                     for s in f.get("subtitle_streams", [])
                 )
         elif category == "filename":
-            if _cf:
-                try:
-                    clean = _cf(fp, f.get("library_type", ""))
-                    hit = clean is not None and clean != fn
-                except Exception:
-                    pass
+            hit = not _filename_is_clean(fn)
         if hit:
             entry: dict = {"filepath": fp, "filename": fn, "library_type": f.get("library_type", "")}
             audio_tracks = []
@@ -564,6 +563,7 @@ def get_cq_audit() -> dict:
     (too_low / too_high / unknown / optimal).
     """
     from paths import MEDIA_REPORT
+
     data = read_report_cached(MEDIA_REPORT) or {}
     summary = data.get("audit_summary") or {}
     if not summary:
