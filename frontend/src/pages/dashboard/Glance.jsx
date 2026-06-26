@@ -242,6 +242,7 @@ export function Glance({ data, pipelineData, throughputPerDay, workersActive, wo
   const [historySummary, setHistorySummary] = useState(null);
   const [completion, setCompletion] = useState(null);
   const [healthDeep, setHealthDeep] = useState(null);
+  const [reclaim, setReclaim] = useState(null);
   const [incidentsOpen, setIncidentsOpen] = useState(false);
   // Pause/resume state for the In-flight panel button. Polls /api/control/status
   // alongside the topbar so both stay in sync — no shared store, just two pollers.
@@ -293,6 +294,14 @@ export function Glance({ data, pipelineData, throughputPerDay, workersActive, wo
         if (!cancelled) setHistorySummary(s);
       })
       .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    api.getReclaim().then((r) => !cancelled && setReclaim(r)).catch(() => {});
     return () => {
       cancelled = true;
     };
@@ -359,11 +368,14 @@ export function Glance({ data, pipelineData, throughputPerDay, workersActive, wo
 
   // Prefer the history totals (cumulative across all runs) over pipeline.stats.bytes_saved,
   // which is a short-lived counter that can go negative if the latest runs grew files.
-  const reclaimedGb = (() => {
+  const convertGb = (() => {
     const histBytes = historySummary?.totals?.saved_bytes;
     if (histBytes != null) return histBytes / 1024 ** 3;
     return Math.max(0, (pipelineData?.stats?.bytes_saved || 0) / 1024 ** 3);
   })();
+  // Headline "reclaimed" = HEVC->AV1 conversion savings + in-place de-bloat savings.
+  const debloatGb = reclaim?.saved_gb || 0;
+  const reclaimedGb = convertGb + debloatGb;
   const remainingFiles = Math.max(0, total - av1);
   const remainingSizeGb = data.remainingSizeGb || 0;
 
@@ -684,7 +696,9 @@ export function Glance({ data, pipelineData, throughputPerDay, workersActive, wo
             <span className="unit">{reclaimedGb >= 1024 ? "TB" : "GB"}</span>
           </div>
           <div className="kpi-sub">
-            <span className="mono">avg 41% size↓</span>
+            <span className="mono">
+              {debloatGb > 0 ? `${Math.round(convertGb)} conv + ${Math.round(debloatGb)} de-bloat` : "avg 41% size↓"}
+            </span>
           </div>
         </div>
         <div className="kpi">
@@ -1180,6 +1194,7 @@ export function Glance({ data, pipelineData, throughputPerDay, workersActive, wo
               </div>
               <div className="savings-label">
                 across {fmtNum(av1)} encoded files · avg 41% smaller
+                {debloatGb > 0 && ` · incl. ${Math.round(debloatGb)} GB de-bloat`}
               </div>
             </div>
           </div>
