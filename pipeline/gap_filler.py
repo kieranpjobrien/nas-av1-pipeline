@@ -280,10 +280,7 @@ def gap_fill(
     # with an ERROR just because the analysis was based on outdated metadata.
     existing = state.get_file(filepath)
     if existing and (existing.get("status") or "").lower() == FileStatus.DONE.value:
-        logging.info(
-            f"  Skipping {filename}: already DONE in state "
-            f"(media_report analysis likely stale)."
-        )
+        logging.info(f"  Skipping {filename}: already DONE in state (media_report analysis likely stale).")
         return True
 
     # Verify file still exists (may have been renamed by another worker)
@@ -292,6 +289,20 @@ def gap_fill(
         if gaps.clean_name:
             alt_path = os.path.join(os.path.dirname(filepath), gaps.clean_name)
             if os.path.exists(alt_path):
+                # The file was already renamed to its clean name, so THIS path is
+                # now a stale duplicate. It lingers in media_report (and as a
+                # non-terminal state row) until the next scan reconciles it. Left
+                # un-terminalised, analyse_gaps keeps re-flagging the stale entry
+                # and we redirect here every pass — a no-op strip loop that ran
+                # 553x on Mrs Maisel S05E07 overnight 2026-06-28. Terminalise the
+                # old path so the orchestrator pass + queue builder skip it.
+                if filepath != alt_path:
+                    state.set_file(
+                        filepath,
+                        FileStatus.DONE,
+                        mode="gap_filler",
+                        reason="superseded by clean-named file",
+                    )
                 filepath = alt_path
                 filename = gaps.clean_name
                 gaps.needs_filename_clean = False  # already clean
@@ -523,9 +534,7 @@ def _strip_tracks(
         return _strip_tracks_on_nas(filepath, gaps, machine=machine)
     if backend == "local":
         return _strip_tracks_locally(filepath, gaps)
-    raise RuntimeError(
-        f"unknown gap_filler_mux_backend: {backend!r} (expected 'local' or 'remote')"
-    )
+    raise RuntimeError(f"unknown gap_filler_mux_backend: {backend!r} (expected 'local' or 'remote')")
 
 
 def _post_mux_verify_and_replace(filepath: str, tmp_unc: str, gaps: GapAnalysis, src_size: int, label: str) -> bool:
@@ -568,6 +577,7 @@ def _post_mux_verify_and_replace(filepath: str, tmp_unc: str, gaps: GapAnalysis,
                 os.remove(tmp_unc)
                 return False
             import json as _json
+
             probed = _json.loads(pr.stdout or "{}")
             streams = probed.get("streams", []) or []
             audio_n = sum(1 for s in streams if s.get("codec_type") == "audio")
@@ -659,10 +669,7 @@ def _strip_tracks_locally(filepath: str, gaps: GapAnalysis) -> bool:
     from pipeline import local_mux
 
     if not local_mux.is_available():
-        raise RuntimeError(
-            "local mkvmerge.exe not found — install MKVToolNix or set "
-            "gap_filler_mux_backend=remote"
-        )
+        raise RuntimeError("local mkvmerge.exe not found — install MKVToolNix or set gap_filler_mux_backend=remote")
 
     tmp_unc = filepath + ".gapfill_tmp.mkv"
 
@@ -722,20 +729,15 @@ def _strip_tracks_locally(filepath: str, gaps: GapAnalysis) -> bool:
         try:
             copy_t0 = time.monotonic()
             logging.info(
-                f"  Staging {src_size/1024**3:.1f} GB to local SSD "
-                f"(file > {threshold/1024**3:.1f} GB threshold)"
+                f"  Staging {src_size / 1024**3:.1f} GB to local SSD (file > {threshold / 1024**3:.1f} GB threshold)"
             )
             shutil.copy2(filepath, staged_input)
             elapsed = time.monotonic() - copy_t0
-            logging.info(
-                f"  Staged in {elapsed:.0f}s "
-                f"({src_size / max(elapsed, 0.001) / 1024**2:.0f} MB/s)"
-            )
+            logging.info(f"  Staged in {elapsed:.0f}s ({src_size / max(elapsed, 0.001) / 1024**2:.0f} MB/s)")
             mkv_input = staged_input
         except OSError as e:
             logging.warning(
-                f"  Local staging failed ({e!r}); falling back to UNC-in-place "
-                f"(may be slow under SMB contention)"
+                f"  Local staging failed ({e!r}); falling back to UNC-in-place (may be slow under SMB contention)"
             )
             if staged_input and os.path.exists(staged_input):
                 try:
@@ -781,7 +783,8 @@ def _strip_tracks_locally(filepath: str, gaps: GapAnalysis) -> bool:
 
     if result.returncode >= 2:
         err_lines = [
-            ln for ln in ((result.stderr or "") + "\n" + (result.stdout or "")).splitlines()
+            ln
+            for ln in ((result.stderr or "") + "\n" + (result.stdout or "")).splitlines()
             if ln.strip() and not ln.lstrip().lower().startswith("mkvmerge v")
         ]
         err = "\n".join(err_lines).strip() or "(no diagnostic output)"
@@ -859,9 +862,7 @@ def _strip_tracks_on_nas(filepath: str, gaps: GapAnalysis, machine: dict | None 
     # a plain timeout-only wait.
     shutdown_event = getattr(gaps, "_shutdown_event", None)
     try:
-        with gap_fill_lock(
-            role="gap_filler", timeout=600.0, shutdown=shutdown_event
-        ):
+        with gap_fill_lock(role="gap_filler", timeout=600.0, shutdown=shutdown_event):
             result = remote_strip_and_mux(
                 machine,
                 container_path,
@@ -881,10 +882,9 @@ def _strip_tracks_on_nas(filepath: str, gaps: GapAnalysis, machine: dict | None 
         # mkvmerge's own banner so the real error is visible.
         combined = (result.stderr or "") + "\n" + (result.stdout or "")
         err_lines = [
-            ln for ln in combined.splitlines()
-            if not ln.lstrip().startswith("**")
-            and not ln.lstrip().lower().startswith("mkvmerge v")
-            and ln.strip()
+            ln
+            for ln in combined.splitlines()
+            if not ln.lstrip().startswith("**") and not ln.lstrip().lower().startswith("mkvmerge v") and ln.strip()
         ]
         err = "\n".join(err_lines).strip() or "(no diagnostic output)"
         logging.error(f"  mkvmerge failed ({machine['label']}) rc={result.returncode}: {err[:1000]}")
@@ -923,10 +923,7 @@ def _rename_file(filepath: str, clean_name: str) -> Optional[str]:
     if is_stale_tmp and os.path.exists(new_path):
         try:
             os.remove(filepath)
-            logging.info(
-                f"  Removed stale gapfill tmp (clean name already present): "
-                f"{os.path.basename(filepath)}"
-            )
+            logging.info(f"  Removed stale gapfill tmp (clean name already present): {os.path.basename(filepath)}")
             return new_path  # caller treats this as success — clean file is the real one
         except OSError as e:
             logging.warning(f"  Could not remove stale gapfill tmp: {e}")
