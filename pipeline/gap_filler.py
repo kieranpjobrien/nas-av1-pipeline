@@ -157,6 +157,7 @@ def analyse_gaps(file_entry: dict, config: dict) -> GapAnalysis:
             from pipeline.streams import (
                 parse_audio_stream,
                 select_audio_keep_indices_by_original_language,
+                should_keep_dual_audio,
             )
 
             tmdb = file_entry.get("tmdb") or {}
@@ -166,7 +167,7 @@ def analyse_gaps(file_entry: dict, config: dict) -> GapAnalysis:
                 kept = select_audio_keep_indices_by_original_language(
                     parsed,
                     original_language,
-                    keep_english_too=bool(config.get("audio_keep_english_with_original", False)),
+                    keep_english_too=should_keep_dual_audio(file_entry, config),
                 )
                 if kept is not None:
                     clean_audio_keep = kept

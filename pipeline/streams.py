@@ -418,8 +418,8 @@ _COMMENTARY_TITLE_RE = re.compile(
     r"commentary|"
     r"director's?|"
     r"writer's?|"
-    r"audio[\s-]?descri\w*|"        # "Audio description"
-    r"descript\w*[\s-]?service|"     # "Descriptive Audio Service"
+    r"audio[\s-]?descri\w*|"  # "Audio description"
+    r"descript\w*[\s-]?service|"  # "Descriptive Audio Service"
     r"isolated[\s-]?(score|music|dialog\w*)|"
     r"making[\s-]?of|"
     r"behind[\s-]?the[\s-]?scenes"
@@ -448,6 +448,27 @@ def _is_commentary(stream: AudioStream) -> bool:
     if not title:
         return False
     return bool(_COMMENTARY_TITLE_RE.search(title))
+
+
+def should_keep_dual_audio(file_entry: dict, config: dict) -> bool:
+    """True if this film should keep BOTH its original-language audio AND the
+    English dub, instead of stripping down to the original only.
+
+    Two triggers, either sufficient:
+      1. ``config["audio_keep_english_with_original"]`` - global opt-in.
+      2. The film's ``tmdb.director`` is in ``config["dual_audio_directors"]``
+         (default: the Studio Ghibli roster), so kids can watch the English dub
+         while adults pick the original language + subtitles.
+
+    Consumed by BOTH audio-strip paths (the encoder and the gap-filler) so they
+    keep the same tracks - divergence between the two was the 2026-04-23 audio
+    loss. Keeping more audio is always safe w.r.t. the strip rules.
+    """
+    if config.get("audio_keep_english_with_original", False):
+        return True
+    directors = config.get("dual_audio_directors") or []
+    director = ((file_entry.get("tmdb") or {}).get("director") or "").strip().lower()
+    return bool(director) and director in {str(d).strip().lower() for d in directors}
 
 
 def select_audio_keep_indices_by_original_language(
@@ -533,16 +554,10 @@ def select_audio_keep_indices_by_original_language(
     # Build {(channels, language) → True} for tracks where a lossless
     # version is present. Any lossy track of matching key gets dropped.
     lossless_keys: set[tuple[int, str]] = {
-        (s.channels, s.language)
-        for s in candidates
-        if s.codec in _LOSSLESS_PRIMARY_CODECS
+        (s.channels, s.language) for s in candidates if s.codec in _LOSSLESS_PRIMARY_CODECS
     }
     final = [
-        s for s in candidates
-        if not (
-            s.codec in _LOSSY_DEDUP_CODECS
-            and (s.channels, s.language) in lossless_keys
-        )
+        s for s in candidates if not (s.codec in _LOSSY_DEDUP_CODECS and (s.channels, s.language) in lossless_keys)
     ]
 
     keep_indices = sorted({s.index for s in final})

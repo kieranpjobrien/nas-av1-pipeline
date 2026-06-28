@@ -182,6 +182,20 @@ DEFAULT_CONFIG = {
     # tracks alongside the original language (e.g. for dual-language watching).
     # Default False matches the "strip non-original including English" policy.
     "audio_keep_english_with_original": False,
+    # Films by these directors keep BOTH their original-language audio AND the
+    # English dub (instead of stripping to original only), so younger viewers
+    # can watch the dub while adults pick the original + subtitles. Matched
+    # case-insensitively against tmdb.director. Default: the Studio Ghibli
+    # roster. Set audio_keep_english_with_original=True to apply this globally.
+    "dual_audio_directors": [
+        "Hayao Miyazaki",
+        "Isao Takahata",
+        "Hiromasa Yonebayashi",
+        "Goro Miyazaki",
+        "Yoshifumi Kondo",
+        "Hiroyuki Morita",
+        "Michael Dudok de Wit",
+    ],
     # Behaviour
     "overwrite_existing": False,
     "replace_original": True,  # Replace original on NAS after verify

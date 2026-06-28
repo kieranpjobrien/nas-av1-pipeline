@@ -15,19 +15,20 @@ from pipeline.streams import (
     parse_sub_stream,
 )
 
-
 # Codecs where NVDEC has a reputation for silent degradation rather than a
 # clean failure — speed drops to ~1 fps without an error code, and the
 # reactive retry path (which depends on ffmpeg exiting non-zero) never
 # triggers. We force software decode upfront for these. The 2026-05-03
 # Any Given Sunday VC-1 incident motivated the list; add codecs as we
 # discover more cases.
-_NVDEC_SILENT_DEGRADATION_CODECS = frozenset({
-    "vc1",     # SMPTE 421M — the original case (HD-DVD / older Blu-ray)
-    "wmv3",    # WMV9 ASF, same family as VC-1, similarly flaky
-    "mpeg2",   # interlaced MPEG-2 from old broadcast captures
-    "mpeg2video",
-})
+_NVDEC_SILENT_DEGRADATION_CODECS = frozenset(
+    {
+        "vc1",  # SMPTE 421M — the original case (HD-DVD / older Blu-ray)
+        "wmv3",  # WMV9 ASF, same family as VC-1, similarly flaky
+        "mpeg2",  # interlaced MPEG-2 from old broadcast captures
+        "mpeg2video",
+    }
+)
 
 
 def format_bytes(b: int) -> str:
@@ -69,26 +70,36 @@ def _probe_source_color(input_path: str) -> dict[str, Optional[str]]:
     the source is untagged — matches virtually all SDR content correctly.
     """
     out = subprocess.run(
-        ["ffprobe", "-v", "error", "-select_streams", "v:0",
-         "-show_entries",
-         "stream=color_primaries,color_transfer,color_space,color_range",
-         "-of", "json", input_path],
-        capture_output=True, text=True, timeout=15
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=color_primaries,color_transfer,color_space,color_range",
+            "-of",
+            "json",
+            input_path,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=15,
     )
     if out.returncode != 0:
-        return {"color_primaries": None, "color_transfer": None,
-                "color_space": None, "color_range": None}
+        return {"color_primaries": None, "color_transfer": None, "color_space": None, "color_range": None}
     try:
         info = json.loads(out.stdout)
         s = (info.get("streams") or [{}])[0]
     except (json.JSONDecodeError, IndexError, AttributeError):
-        return {"color_primaries": None, "color_transfer": None,
-                "color_space": None, "color_range": None}
+        return {"color_primaries": None, "color_transfer": None, "color_space": None, "color_range": None}
+
     # ffprobe returns "unknown" / "reserved" for unspecified; normalise.
     def _norm(v: Optional[str]) -> Optional[str]:
         if v in (None, "", "unknown", "reserved"):
             return None
         return v
+
     return {
         "color_primaries": _norm(s.get("color_primaries")),
         "color_transfer": _norm(s.get("color_transfer")),
@@ -173,9 +184,10 @@ def _select_audio_streams(item: dict, config: dict) -> list[int] | None:
         from pipeline.streams import (
             parse_audio_stream,
             select_audio_keep_indices_by_original_language,
+            should_keep_dual_audio,
         )
 
-        tmdb = (item.get("tmdb") or {})
+        tmdb = item.get("tmdb") or {}
         original_language = (tmdb.get("original_language") or "").strip().lower() or None
 
         if original_language:
@@ -183,7 +195,7 @@ def _select_audio_streams(item: dict, config: dict) -> list[int] | None:
             kept = select_audio_keep_indices_by_original_language(
                 parsed,
                 original_language,
-                keep_english_too=bool(config.get("audio_keep_english_with_original", False)),
+                keep_english_too=should_keep_dual_audio(item, config),
             )
             if kept is None:
                 return None
@@ -207,7 +219,8 @@ def _select_audio_streams(item: dict, config: dict) -> list[int] | None:
 
     if not all_languages_known(audio_streams):
         unresolved = sum(
-            1 for a in audio_streams
+            1
+            for a in audio_streams
             if (a.get("language") or "").lower().strip() in {"", "und", "unk"}
             and (a.get("detected_language") or "").lower().strip() in {"", "und", "unk"}
         )
@@ -284,7 +297,8 @@ def _map_subtitle_streams(
     parsed_subs = [parse_sub_stream(raw, index=i) for i, raw in enumerate(raw_subs)]
     if not all_languages_known(parsed_subs):
         unresolved = sum(
-            1 for s in parsed_subs
+            1
+            for s in parsed_subs
             if not (s.language and s.language.lower() not in {"", "und", "unk"})
             and not (s.detected_language and s.detected_language.lower() not in {"", "und", "unk"})
         )
@@ -550,8 +564,7 @@ def build_ffmpeg_cmd(
             src_codec_norm = _normalise_codec(alt)
     if use_hwaccel and src_codec_norm in _NVDEC_SILENT_DEGRADATION_CODECS:
         logging.warning(
-            f"  Forcing software decode for {src_codec_raw or src_codec_norm} source "
-            f"(NVDEC known-flaky on this codec)"
+            f"  Forcing software decode for {src_codec_raw or src_codec_norm} source (NVDEC known-flaky on this codec)"
         )
         use_hwaccel = False
 
@@ -570,25 +583,27 @@ def build_ffmpeg_cmd(
     if use_hwaccel:
         cmd.extend(["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"])
 
-    cmd.extend([
-        # Scope `ignore_err` to VIDEO only. Global `-err_detect ignore_err` was the root
-        # cause of silent audio loss: combined with `-map 0:a?`, a corrupt audio header
-        # caused ffmpeg to skip the audio stream and exit 0 with a zero-audio output.
-        "-err_detect:v",
-        "ignore_err",
-        # Regenerate timestamps from frame order — fixes "Non-monotonic DTS" errors on output
-        # EAC-3 streams when the source is DTS-HD MA (seen on Vinny, Dances With Wolves).
-        "-fflags",
-        "+genpts",
-        "-i",
-        input_path,
-        # Emit machine-readable progress to stdout. Much cleaner than parsing stderr, since
-        # ffmpeg may change its human-facing format at any time but the `-progress` key=value
-        # protocol is stable. -nostats silences the human-facing stderr progress rewrites.
-        "-progress",
-        "pipe:1",
-        "-nostats",
-    ])
+    cmd.extend(
+        [
+            # Scope `ignore_err` to VIDEO only. Global `-err_detect ignore_err` was the root
+            # cause of silent audio loss: combined with `-map 0:a?`, a corrupt audio header
+            # caused ffmpeg to skip the audio stream and exit 0 with a zero-audio output.
+            "-err_detect:v",
+            "ignore_err",
+            # Regenerate timestamps from frame order — fixes "Non-monotonic DTS" errors on output
+            # EAC-3 streams when the source is DTS-HD MA (seen on Vinny, Dances With Wolves).
+            "-fflags",
+            "+genpts",
+            "-i",
+            input_path,
+            # Emit machine-readable progress to stdout. Much cleaner than parsing stderr, since
+            # ffmpeg may change its human-facing format at any time but the `-progress` key=value
+            # protocol is stable. -nostats silences the human-facing stderr progress rewrites.
+            "-progress",
+            "pipe:1",
+            "-nostats",
+        ]
+    )
 
     # Add external subtitle files as additional inputs
     if external_subs:
@@ -611,9 +626,7 @@ def build_ffmpeg_cmd(
 
     mapped_sub_inputs: list[int] | None = None
     if include_subs:
-        mapped_sub_inputs = _map_subtitle_streams(
-            cmd, item, config, external_subs_present=bool(external_subs)
-        )
+        mapped_sub_inputs = _map_subtitle_streams(cmd, item, config, external_subs_present=bool(external_subs))
 
     # Map external subtitle inputs (inputs 1, 2, 3, ...)
     if external_subs:
@@ -755,10 +768,14 @@ def build_ffmpeg_cmd(
         rng = src_color["color_range"] or "tv"
         cmd.extend(
             [
-                "-color_primaries", primaries,
-                "-color_trc", transfer,
-                "-colorspace", matrix,
-                "-color_range", rng,
+                "-color_primaries",
+                primaries,
+                "-color_trc",
+                transfer,
+                "-colorspace",
+                matrix,
+                "-color_range",
+                rng,
             ]
         )
 
@@ -776,9 +793,7 @@ def build_ffmpeg_cmd(
         for out_idx, (_, audio) in enumerate(kept_streams):
             if _should_transcode_audio(audio, config):
                 channels = audio.get("channels", 2)
-                bitrate = (
-                    config["audio_eac3_surround_bitrate"] if channels > 2 else config["audio_eac3_stereo_bitrate"]
-                )
+                bitrate = config["audio_eac3_surround_bitrate"] if channels > 2 else config["audio_eac3_stereo_bitrate"]
                 if loudnorm:
                     cmd.extend([f"-filter:a:{out_idx}", "loudnorm=I=-24:LRA=7:TP=-2"])
                 cmd.extend(
@@ -861,6 +876,7 @@ def build_ffmpeg_cmd(
             # eng → refuse). parse_sub_stream is the source of truth for
             # is_forced (title regex + disposition.forced).
             from pipeline.streams import parse_sub_stream
+
             sub_obj = parse_sub_stream(track, index=in_idx)
             if sub_obj.is_forced:
                 cmd.extend([f"-disposition:s:{out_idx}", "forced"])
@@ -1006,9 +1022,7 @@ def build_audio_remux_cmd(
     # Audio: smart transcode (output indices, not input).
     # audio_streams is guaranteed non-empty (refused at top of function).
     loudnorm = config.get("audio_loudnorm", False)
-    kept_streams = (
-        [(idx, audio_streams[idx]) for idx in audio_keep] if audio_keep else list(enumerate(audio_streams))
-    )
+    kept_streams = [(idx, audio_streams[idx]) for idx in audio_keep] if audio_keep else list(enumerate(audio_streams))
     for out_idx, (_, audio) in enumerate(kept_streams):
         if _should_transcode_audio(audio, config):
             channels = audio.get("channels", 2)
