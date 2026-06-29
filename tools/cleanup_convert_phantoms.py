@@ -52,19 +52,39 @@ _HEARTBEAT_WINDOW_S = 120  # gap filler heartbeats every 62s; >2 min gap = not l
 
 
 def _pipeline_looks_live() -> tuple[bool, str]:
-    """Best-effort liveness check (rule 14). Returns (is_live, reason)."""
-    # (a) Active ffmpeg child = an encode in flight.
+    """Best-effort liveness check (rules 5, 14). Returns (is_live, reason)."""
     try:
         import psutil
+    except Exception:  # noqa: BLE001 — psutil optional
+        psutil = None
 
-        for p in psutil.process_iter(["name"]):
-            name = (p.info.get("name") or "").lower()
-            if name in ("ffmpeg.exe", "ffmpeg"):
-                return True, f"active ffmpeg (pid {p.pid})"
-    except Exception:  # noqa: BLE001 — psutil optional / transient probe failure
+    # (a) Active ffmpeg child = an encode in flight, regardless of registry.
+    if psutil is not None:
+        try:
+            for p in psutil.process_iter(["name"]):
+                if (p.info.get("name") or "").lower() in ("ffmpeg.exe", "ffmpeg"):
+                    return True, f"active ffmpeg (pid {p.pid})"
+        except Exception:  # noqa: BLE001 — transient probe failure
+            pass
+
+    # (b) The process registry is authoritative (rule 5): if a 'pipeline' role
+    # is registered, its PID liveness IS the answer — a dead registered PID
+    # means a clean stop, so don't second-guess it with the log-age proxy.
+    try:
+        reg = os.path.join(_STAGING, "control", "agents.registry.json")
+        with open(reg, encoding="utf-8") as f:
+            pipe = [e for e in json.load(f) if e.get("role") == "pipeline"]
+        if pipe:
+            for e in pipe:
+                pid = int(e.get("pid", 0))
+                alive = psutil.pid_exists(pid) if psutil is not None else True
+                if pid > 0 and alive:
+                    return True, f"registered pipeline supervisor alive (pid {pid})"
+            return False, "registered pipeline supervisor not running (registry stale entry)"
+    except Exception:  # noqa: BLE001 — no/unreadable registry → fall through
         pass
 
-    # (b) Fresh pipeline.log heartbeat.
+    # (c) Fallback when there's no registry signal: fresh pipeline.log heartbeat.
     try:
         age = time.time() - os.path.getmtime(_PIPELINE_LOG)
         if age < _HEARTBEAT_WINDOW_S:
@@ -72,7 +92,7 @@ def _pipeline_looks_live() -> tuple[bool, str]:
     except OSError:
         pass
 
-    return False, "no active ffmpeg and no recent pipeline.log heartbeat"
+    return False, "no ffmpeg, no live registered supervisor, no recent heartbeat"
 
 
 def _load_report_files() -> dict[str, dict]:
