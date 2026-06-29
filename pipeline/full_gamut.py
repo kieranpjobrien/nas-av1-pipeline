@@ -29,7 +29,7 @@ from pipeline.ffmpeg import (
     get_duration,
 )
 from pipeline.language import detect_all_languages
-from pipeline.report import update_entry
+from pipeline.report import remove_entry, update_entry
 from pipeline.state import FileStatus, PipelineState, is_terminal
 from pipeline.streams import is_hi_external
 from pipeline.subs import scan_sidecars
@@ -854,6 +854,52 @@ def _encode_only(
         return False
 
 
+def _purge_stale_source_path(filepath: str, final_path: str, state: PipelineState) -> bool:
+    """Drop the original path's media_report entry + state row after an encode
+    changed the on-disk path.
+
+    When a ``.mp4`` source becomes a ``.mkv`` AV1 output (or a dirty name is
+    cleaned to a different one), ``final_path != filepath`` and the original
+    path no longer exists on disk — the replace step renamed it to
+    ``.original.bak`` and then deleted that. If its media_report entry + state
+    row are left behind, the next queue build re-queues the dead path, fetch
+    hits ``SOURCE_MISSING``, and ``orchestrator._remove_missing_source``
+    mis-flags it ``flagged_corrupt`` — a phantom duplicate on the dashboard
+    (2026-06-29: Sneakers, Thief, Jurassic Park + 6 more). Same class as the
+    gap_filler rename loop fixed in ce9e767, via the convert→replace path.
+
+    Guarded on the original genuinely being gone from disk (rule 8: probe
+    before touching) — if it somehow still exists (e.g. a skipped backup
+    rename left it in place) we leave its records for the scanner to reconcile
+    rather than dropping a live file's entry. Both writes go through
+    single-writer paths (report_lock for media_report, the state DELETE under
+    its own lock) so a concurrent writer is never raced (rules 12/13).
+
+    Returns True if a purge happened, False on any no-op (path unchanged or
+    original still present).
+    """
+    if final_path == filepath:
+        return False
+    if os.path.exists(filepath):
+        return False
+    try:
+        remove_entry(filepath)
+    except Exception as e:  # noqa: BLE001
+        logging.warning(
+            f"  Stale-entry cleanup: media_report remove failed for {os.path.basename(filepath)}: {e}"
+        )
+    try:
+        state.remove_ghosts([filepath])
+    except Exception as e:  # noqa: BLE001
+        logging.warning(
+            f"  Stale-entry cleanup: state row remove failed for {os.path.basename(filepath)}: {e}"
+        )
+    logging.info(
+        f"  Removed stale source-path entry: {os.path.basename(filepath)} → {os.path.basename(final_path)}"
+    )
+    return True
+
+
 def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
     """Upload encoded file to NAS, verify, replace original, tag, report, Plex.
 
@@ -1649,8 +1695,23 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
     # subsequent queue-build passes should fall back to the normal AV1 codec
     # check (and route this file to gap_filler/skip). Leaving the flag set
     # would cause an infinite re-encode loop on every pipeline restart.
+    #
+    # Key the DONE row on final_path, not the original filepath. When the
+    # encode changes the on-disk path — a .mp4 source becomes .mkv AV1, or a
+    # dirty name is cleaned to a different one — final_path != filepath and
+    # the original path no longer exists on disk (the replace step renamed it
+    # to .original.bak and deleted that). Recording DONE under the dead path
+    # AND leaving its media_report entry behind is the stale-entry bug: on the
+    # next restart categorise_entry sees the old path's non-AV1 report entry,
+    # ffprobes the now-missing file, can't confirm AV1, and auto-resets it to
+    # PENDING+force_reencode. fetch_file then hits SOURCE_MISSING and
+    # _remove_missing_source mis-flags it flagged_corrupt — a phantom duplicate
+    # on the dashboard (2026-06-29: Sneakers, Thief, Jurassic Park + 6 more).
+    # Same class as the gap_filler rename loop fixed in ce9e767.
+    renamed = final_path != filepath
+    done_key = final_path if renamed else filepath
     state.set_file(
-        filepath,
+        done_key,
         FileStatus.DONE,
         final_path=final_path,
         output_size_bytes=output_size,
@@ -1664,6 +1725,9 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
         integrity_retry_count=0,
         force_reencode=False,
     )
+
+    # Purge the now-dead original path so it can't be re-queued (see helper).
+    _purge_stale_source_path(filepath, final_path, state)
 
     # Update global stats
     state.stats["completed"] = state.stats.get("completed", 0) + 1
