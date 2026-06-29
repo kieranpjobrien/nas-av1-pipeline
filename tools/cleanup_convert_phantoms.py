@@ -9,9 +9,12 @@ root cause is fixed in ``full_gamut.finalize_upload`` (it now purges the dead
 path on the DONE transition), but the rows created before that fix are still
 sitting in the two stores. This tool removes them.
 
-It ONLY touches rows that unambiguously match the convert-bug signature:
+Candidates are sourced from BOTH the media_report .mp4 entries AND the .mp4
+state rows (any status) — keying off only already-flagged rows misses the
+un-flagged stale report entries a restart would queue and freshly flag. A
+candidate is acted on ONLY when it unambiguously matches the convert-bug
+signature:
 
-  * state row status == ``flagged_corrupt``
   * path ends in ``.mp4``
   * the ``.mp4`` no longer exists on disk          (never drop a live file)
   * a sibling ``.mkv`` DOES exist on disk          (the converted output)
@@ -19,10 +22,12 @@ It ONLY touches rows that unambiguously match the convert-bug signature:
 
 A genuinely-missing file (deleted, or lost in the 2026-06-19 NAS drive-4
 incident) fails the "sibling .mkv present on disk" test and is left alone, as
-are the ``.mkv``-path flagged_corrupt rows (a different case). For each matched
-row it drops the stale media_report entry (single-writer report_lock path,
-rules 12/13) and deletes the state row (scanner deliberately never clears
-flagged_* rows, so this must be done here).
+are the ``.mkv``-path flagged_corrupt rows (a different case). For each match it
+drops the stale media_report entry (single-writer report_lock path, rules
+12/13) and deletes the stale state row (done / flagged_corrupt / pending /
+error — active rows are skipped so a resuming worker is never raced; the
+scanner reconciles done/pending/error but deliberately never clears
+flagged_*).
 
 Dry-run by default — prints the plan and changes nothing. Pass ``--apply`` to
 execute. ``--apply`` REFUSES to run while the pipeline looks live (active
@@ -107,25 +112,37 @@ def _codec(entry: dict | None) -> str | None:
     return ((entry or {}).get("video") or {}).get("codec_raw")
 
 
+_ACTIVE_STATUSES = ("processing", "uploading", "fetching", "qualifying")
+
+
 def _classify() -> tuple[list[dict], dict[str, int]]:
-    """Return (matches, skip_counts). Each match: {mp4, mkv, mp4_in_report}."""
+    """Find stale convert-bug .mp4 artifacts in both stores.
+
+    Candidates are sourced from BOTH the media_report .mp4 entries AND the
+    .mp4 state rows (any status). Keying off only already-flagged rows misses
+    the un-flagged stale report entries that a restart would queue and freshly
+    flag — observed live 2026-06-29 when the pipeline re-flagged Prometheus &
+    others seconds after a restart. Each match dict:
+    ``{mp4, mkv, mp4_in_report, state_status}``.
+    """
     by_path = _load_report_files()
 
     con = sqlite3.connect(f"file:{PIPELINE_STATE_DB}?mode=ro", uri=True)
     con.row_factory = sqlite3.Row
-    rows = con.execute(
-        "SELECT filepath FROM pipeline_files WHERE status = 'flagged_corrupt'"
-    ).fetchall()
+    state_status = {
+        r["filepath"]: r["status"]
+        for r in con.execute("SELECT filepath, status FROM pipeline_files WHERE filepath LIKE '%.mp4'").fetchall()
+    }
     con.close()
 
-    matches: list[dict] = []
-    skips = {"not_mp4": 0, "mp4_still_on_disk": 0, "no_mkv_on_disk": 0, "mkv_not_av1": 0, "disk_error": 0}
+    candidates = {fp for fp in by_path if fp and fp.lower().endswith(".mp4")} | set(state_status)
 
-    for r in rows:
-        fp = r["filepath"]
+    matches: list[dict] = []
+    skips = {"mp4_still_on_disk": 0, "no_mkv_on_disk": 0, "mkv_not_av1": 0, "disk_error": 0}
+
+    for fp in sorted(candidates):
         stem, ext = os.path.splitext(fp)
         if ext.lower() != ".mp4":
-            skips["not_mp4"] += 1
             continue
         mkv = stem + ".mkv"
         try:
@@ -141,7 +158,9 @@ def _classify() -> tuple[list[dict], dict[str, int]]:
         if _codec(by_path.get(mkv)) != "av1":
             skips["mkv_not_av1"] += 1  # sibling isn't our AV1 output — leave it
             continue
-        matches.append({"mp4": fp, "mkv": mkv, "mp4_in_report": fp in by_path})
+        matches.append(
+            {"mp4": fp, "mkv": mkv, "mp4_in_report": fp in by_path, "state_status": state_status.get(fp)}
+        )
 
     return matches, skips
 
@@ -153,15 +172,24 @@ def main() -> int:
 
     matches, skips = _classify()
 
-    print(f"Convert-bug phantom flagged_corrupt rows matched: {len(matches)}")
-    stale_report_entries = [m for m in matches if m["mp4_in_report"]]
-    print(f"  of which still have a stale media_report entry : {len(stale_report_entries)}")
-    print(f"  state-row-only (report already reconciled)     : {len(matches) - len(stale_report_entries)}")
-    print(f"Skipped (not matching the convert-bug signature) : {skips}")
+    in_report = [m for m in matches if m["mp4_in_report"]]
+    deletable = [m for m in matches if m["state_status"] and m["state_status"] not in _ACTIVE_STATUSES]
+    active = [m for m in matches if m["state_status"] in _ACTIVE_STATUSES]
+
+    print(f"Stale convert-bug .mp4 artifacts matched: {len(matches)}")
+    print(f"  stale media_report entries to drop     : {len(in_report)}")
+    print(f"  state rows to delete (non-active)      : {len(deletable)}")
+    if active:
+        print(f"  state rows SKIPPED (active, not raced)  : {len(active)}")
+    print(f"Skipped (not the convert signature)      : {skips}")
     print()
     for m in matches:
-        flag = "report+state" if m["mp4_in_report"] else "state-only "
-        print(f"  [{flag}] {os.path.basename(m['mp4'])}")
+        bits = []
+        if m["mp4_in_report"]:
+            bits.append("report")
+        if m["state_status"]:
+            bits.append(f"state:{m['state_status']}")
+        print(f"  [{'+'.join(bits) or 'none'}] {os.path.basename(m['mp4'])}")
 
     if not matches:
         print("\nNothing to do.")
@@ -174,7 +202,7 @@ def main() -> int:
     live, reason = _pipeline_looks_live()
     if live:
         print(f"\nREFUSING to apply: pipeline looks live ({reason}).")
-        print("Stop/pause the pipeline first — mutating media_report alongside the live")
+        print("Stop/pause the pipeline first -- mutating media_report alongside the live")
         print("encoder is the cascade-of-loss hazard (rule 13).")
         return 2
 
@@ -182,20 +210,23 @@ def main() -> int:
     from pipeline.report import remove_entry
 
     removed_report = 0
-    for m in stale_report_entries:
+    for m in in_report:
         if remove_entry(m["mp4"]):
             removed_report += 1
         else:
             print(f"  WARNING: media_report remove failed for {os.path.basename(m['mp4'])}")
 
-    # 2. Delete the flagged_corrupt state rows (scanner never clears flagged_*).
+    # 2. Delete the stale state rows (done/flagged_corrupt/pending/error). The
+    # scanner reconciles done/pending/error but deliberately never clears
+    # flagged_*; active rows are skipped so a (paused-but-resuming) worker is
+    # never raced.
     con = sqlite3.connect(PIPELINE_STATE_DB)
     try:
         deleted_state = 0
-        for m in matches:
+        for m in deletable:
             cur = con.execute(
-                "DELETE FROM pipeline_files WHERE filepath = ? AND status = 'flagged_corrupt'",
-                (m["mp4"],),
+                "DELETE FROM pipeline_files WHERE filepath = ? AND status = ?",
+                (m["mp4"], m["state_status"]),
             )
             deleted_state += cur.rowcount
         con.commit()
@@ -203,11 +234,11 @@ def main() -> int:
         con.close()
 
     print(f"\nApplied: removed {removed_report} stale media_report entries, "
-          f"deleted {deleted_state} flagged_corrupt state rows.")
+          f"deleted {deleted_state} stale state rows.")
 
     # Re-verify: no convert-bug phantoms should remain.
     remaining, _ = _classify()
-    print(f"Re-check: {len(remaining)} convert-bug phantom rows remain (expected 0).")
+    print(f"Re-check: {len(remaining)} convert-bug phantom artifacts remain (expected 0).")
     return 0 if not remaining else 1
 
 
