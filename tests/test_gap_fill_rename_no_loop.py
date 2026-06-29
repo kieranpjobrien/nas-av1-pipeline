@@ -51,3 +51,32 @@ def test_gap_fill_terminalises_stale_old_path_on_rename(tmp_path, monkeypatch):
     # The stale old path must be terminal so the pass + queue builder skip it.
     assert old_row["status"] == FileStatus.DONE.value
     assert "supersed" in (old_row.get("reason") or "").lower()
+
+
+def test_gap_fill_terminalises_missing_file_with_no_clean_name(tmp_path):
+    """A queued file that is simply gone (renamed/deleted, no clean-name
+    candidate) must be terminalised, not returned un-marked -- the un-marked
+    return looped 2887x on a stale 'My Neighbor Totoro- (1988).mkv' entry whose
+    real file had lost the trailing dash the report still carried (2026-06-30).
+    """
+    missing = tmp_path / "Gone (1999).mkv"  # never created on disk
+    st = PipelineState(str(tmp_path / "state2.db"))
+    st.set_file(str(missing), FileStatus.PROCESSING, mode="gap_filler", stage="gap_fill")
+
+    gaps = GapAnalysis()
+    gaps.needs_track_removal = True  # there is "work", but the file is gone
+    entry = {
+        "filepath": str(missing),
+        "filename": "Gone (1999).mkv",
+        "library_type": "movie",
+        "audio_streams": [],
+        "subtitle_streams": [],
+        "tmdb": {"id": 1},
+    }
+
+    ok = gap_fill(str(missing), entry, gaps, {}, st)
+
+    assert ok is True
+    row = st.get_file(str(missing))
+    assert row is not None
+    assert row["status"] == FileStatus.DONE.value  # terminalised -> won't re-loop

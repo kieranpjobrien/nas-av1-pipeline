@@ -308,10 +308,28 @@ def gap_fill(
                 filename = gaps.clean_name
                 gaps.needs_filename_clean = False  # already clean
             else:
-                logging.warning(f"  File not found (renamed?): {filename}")
-                return True  # not an error, just already handled
+                # Neither the original nor the clean-named sibling exists -- the
+                # file is gone (renamed elsewhere or deleted). Terminalise so the
+                # stale report entry stops being re-picked every pass; an
+                # un-terminalised return here looped 2887x on My Neighbor Totoro
+                # 2026-06-30 (on-disk file had lost a trailing dash the report
+                # still carried). DONE = no work owed, the path has no file.
+                logging.warning(f"  File not found (renamed/removed?): {filename} -- marking done")
+                state.set_file(
+                    filepath,
+                    FileStatus.DONE,
+                    mode="gap_filler",
+                    reason="file not found at path; renamed or removed",
+                )
+                return True
         else:
-            logging.warning(f"  File not found: {filename}")
+            logging.warning(f"  File not found: {filename} -- marking done (nothing to process)")
+            state.set_file(
+                filepath,
+                FileStatus.DONE,
+                mode="gap_filler",
+                reason="file not found at path; renamed or removed",
+            )
             return True
 
     # Deferred external sub check (avoids slow NAS scans during queue building)
