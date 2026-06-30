@@ -459,6 +459,9 @@ export function Glance({ data, pipelineData, throughputPerDay, workersActive, wo
     forecast?.est_days_remaining ??
     (throughput && throughput > 0 ? Math.ceil(remainingFiles / throughput) : null);
   const estCompletion = forecast?.est_completion_date ?? null;
+  const debloatDays = forecast?.debloat_days ?? null;
+  const allDoneDate = forecast?.all_done_date ?? null;
+  const debloatRemaining = forecast?.debloat_remaining ?? null;
 
   const recentEvents = data.recentEvents || [];
 
@@ -488,6 +491,13 @@ export function Glance({ data, pipelineData, throughputPerDay, workersActive, wo
                   <>
                     {" "}
                     · done <span className="mono" style={{ color: "var(--ink-2)" }}>{estCompletion}</span>
+                  </>
+                )}
+                {allDoneDate && debloatDays > 0 && (
+                  <>
+                    {" "}
+                    · then de-bloat{debloatRemaining ? ` (${debloatRemaining})` : ""} → all done{" "}
+                    <span className="mono" style={{ color: "var(--ink-2)" }}>{allDoneDate}</span>
                   </>
                 )}
                 .
@@ -1230,6 +1240,11 @@ export function Glance({ data, pipelineData, throughputPerDay, workersActive, wo
                   ? `~${daysLeft} days · done ${estCompletion || "soon"}`
                   : "no throughput yet"}
               </div>
+              {allDoneDate && debloatDays > 0 && (
+                <div style={{ fontSize: 10, color: "var(--ink-4)" }}>
+                  +{Math.round(debloatDays)}d de-bloat → all done {allDoneDate}
+                </div>
+              )}
             </div>
           </div>
 

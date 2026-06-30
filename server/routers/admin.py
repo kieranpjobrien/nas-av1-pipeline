@@ -14,6 +14,7 @@ Routes:
 """
 
 import json
+import logging
 import subprocess
 import sys
 import time
@@ -212,6 +213,7 @@ def get_health(request: Request) -> dict:
     heavy_worker = {"available": False, "blocked": False, "queued_count": 0, "host": None}
     try:
         import json as _json
+
         from paths import STAGING_DIR as _staging
         state_path = os.path.join(str(_staging), "heavy_worker_state.json")
         if os.path.exists(state_path):
@@ -439,6 +441,26 @@ def _read_history(days: int = 0, limit: int = 0) -> list[dict]:
     return entries
 
 
+def _res_key_from_video(v: dict) -> str:
+    """Tier key from a media_report video block (resolution_class + hdr)."""
+    res = (v or {}).get("resolution_class", "")
+    hdr = (v or {}).get("hdr", False)
+    if res == "4K" and hdr:
+        return "4K_HDR"
+    if res == "4K":
+        return "4K_SDR"
+    if res in ("1080p", "720p", "480p", "SD"):
+        return res
+    return "unknown"
+
+
+def _entry_res_key(e: dict) -> str:
+    """Tier of a history entry. Prefer the top-level res_key, but fall back to
+    source.video -- recent entries stopped writing res_key, which bucketed them
+    as 'unknown' and broke the tier-weighted forecast (2026-06-30)."""
+    return e.get("res_key") or _res_key_from_video((e.get("source") or {}).get("video") or {})
+
+
 @router.get("/api/history")
 def get_history(days: int = 0, limit: int = 500) -> dict:
     """Return encode history entries."""
@@ -470,7 +492,7 @@ def get_history_summary() -> dict:
         d["output_bytes"] += e.get("output_bytes", 0)
         d["encode_time_secs"] += e.get("encode_time_secs", 0)
 
-        tier = e.get("res_key", "unknown")
+        tier = _entry_res_key(e)
         if tier not in by_tier:
             by_tier[tier] = {
                 "count": 0,
@@ -517,12 +539,34 @@ def get_history_summary() -> dict:
         # prediction lookup for each remaining file. Falls back to overall mean
         # when a tier has no history yet (rare — would mean a new resolution
         # class arrived since the last encode).
-        per_tier_avg_secs: dict[str, float] = {}
-        for tier_key, tier in by_tier.items():
-            n = tier["count"]
-            if n > 0:
-                per_tier_avg_secs[tier_key] = tier["encode_time_secs"] / n
-        overall_mean_secs = total_time / sum(t["count"] for t in by_tier.values()) if by_tier else 600.0
+        # Per-tier predicted encode-secs from GENUINE video encodes only. Entries
+        # under GENUINE_ENCODE_FLOOR are audio-remux / cleanup ops (encode_time
+        # ~0) that drag a tier's average down to a fraction of a real film's
+        # time -- the 2026-06-30 "8.5 day" under-forecast came from 4K_SDR
+        # averaging 2.4 min because 435/625 of its history rows were sub-2-min
+        # remux ops. Tier derived with the source.video fallback (recent rows
+        # lost their res_key), so genuine 4K encodes land in the 4K buckets.
+        from statistics import median
+
+        # Per-resolution floor isolates genuine FILM encodes from the long tail
+        # of sub-floor remux/audio ops that share a res_key. 4K needs a high
+        # floor (a real 4K film runs >=~15 min; hundreds of 2-7 min "4K_SDR"
+        # rows are old remux ops that buried the real ~30-min films and made the
+        # median read 6.7 min). 1080p films can legitimately finish in a couple
+        # of minutes, so they keep the low floor.
+        FLOOR_BY_TIER = {"4K_HDR": 900.0, "4K_SDR": 900.0, "4K": 900.0}
+        genuine: dict[str, list] = {}
+        for e in entries:
+            et = e.get("encode_time_secs", 0) or 0
+            rk = _entry_res_key(e)
+            if et >= FLOOR_BY_TIER.get(rk, 120.0):
+                genuine.setdefault(rk, []).append(et)
+        # Median, not mean -- a tier still carries a long tail of short ops that
+        # cleared the floor; the median tracks the typical film encode and
+        # resists that skew.
+        per_tier_avg_secs = {k: median(v) for k, v in genuine.items() if v}
+        _all_genuine = [x for v in genuine.values() for x in v]
+        overall_mean_secs = median(_all_genuine) if _all_genuine else 600.0
 
         state_data = _get_pipeline_state()
         if state_data and "files" in state_data:
@@ -556,8 +600,8 @@ def get_history_summary() -> dict:
             # encode times (~90 min vs ~3 min), so files/day shifted dramatically
             # depending on what was in the recent 7-day window. The new estimate
             # is stable across phase changes (binge week of TV → feature-film week).
-            from server.helpers import read_report_cached
             from paths import MEDIA_REPORT
+            from server.helpers import read_report_cached
             report = read_report_cached(MEDIA_REPORT) or {}
             mr_by_path = {f.get("filepath"): f for f in report.get("files", [])}
 
@@ -585,9 +629,36 @@ def get_history_summary() -> dict:
                 per_res_tally[tier] = per_res_tally.get(tier, 0) + 1
                 predicted_total_secs += per_tier_avg_secs.get(tier, overall_mean_secs)
 
+            # De-bloat phase: the parked VMAF reclaim queue runs AFTER convert
+            # (GPU-exclusive, rule 9b), so its encode time stacks on top of the
+            # convert ETA. Weight its remaining candidates with the same per-tier
+            # averages; ~31% of candidates historically gate-fail (a quick clip
+            # test, no full encode) so discount the total.
+            debloat_secs = 0.0
+            debloat_tally: dict[str, int] = {}
+            try:
+                from paths import STAGING_DIR
+                from server.helpers import read_json_safe
+                from tools.reclaim_debloat import candidates as _dbl_candidates
+
+                _dbl_terminal = {"reclaimed", "gate_failed", "skipped_highrisk",
+                                 "skipped_error", "skipped_probefail", "swap_error"}
+                _led = read_json_safe(STAGING_DIR / "reclaim_ledger.json") or {}
+                for c in _dbl_candidates():
+                    st = _led.get(c.get("fp"), {})
+                    if st.get("status") in _dbl_terminal or st.get("phase") == "done":
+                        continue
+                    rk = _res_key_from_video((c.get("f") or {}).get("video") or {})
+                    debloat_tally[rk] = debloat_tally.get(rk, 0) + 1
+                    debloat_secs += per_tier_avg_secs.get(rk, overall_mean_secs)
+                debloat_secs *= 0.72  # ~31% gate-fail = quick, no full encode
+            except Exception as _dbl_e:  # best-effort; never break the convert forecast
+                logging.debug(f"de-bloat forecast phase skipped: {_dbl_e}")
+
             if avg_encode_secs_per_day > 0 and remaining > 0:
                 days_remaining = predicted_total_secs / avg_encode_secs_per_day
                 est_date = datetime.now() + timedelta(days=days_remaining)
+                all_done_days = (predicted_total_secs + debloat_secs) / avg_encode_secs_per_day
                 forecast = {
                     "remaining_files": remaining,
                     "avg_files_per_day": round(avg_per_day, 1),
@@ -601,6 +672,12 @@ def get_history_summary() -> dict:
                     "gpu_active_hours_per_day": round(avg_encode_secs_per_day / 3600, 1),
                     "remaining_by_tier": per_res_tally,
                     "per_tier_avg_minutes": {k: round(v / 60, 1) for k, v in per_tier_avg_secs.items()},
+                    # De-bloat phase (sequential, stacks on top of convert)
+                    "debloat_remaining": sum(debloat_tally.values()),
+                    "debloat_by_tier": debloat_tally,
+                    "debloat_days": round(debloat_secs / avg_encode_secs_per_day, 1),
+                    "all_done_days": round(all_done_days, 1),
+                    "all_done_date": (datetime.now() + timedelta(days=all_done_days)).strftime("%Y-%m-%d"),
                 }
             elif avg_per_day > 0 and remaining > 0:
                 # Defensive fallback to the old math if for some reason GPU
