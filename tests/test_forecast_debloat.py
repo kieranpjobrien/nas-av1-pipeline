@@ -121,3 +121,56 @@ def test_debloat_failure_does_not_break_convert_forecast(monkeypatch):
     assert fc["est_days_remaining"] > 0
     assert fc["debloat_remaining"] == 0
     assert fc["all_done_date"] == fc["est_completion_date"]
+
+
+def test_prediction_scales_with_runtime_not_flat_median(monkeypatch):
+    # History: 4K_HDR films encode in 60 min for a 120 min runtime -> rate 0.5
+    # encode-seconds per content-second.
+    history = [
+        _entry("2026-05-09T10:00:00+00:00", encode_secs=3600, res_key="4K_HDR"),
+        _entry("2026-05-10T10:00:00+00:00", encode_secs=3600, res_key="4K_HDR"),
+    ]
+    for e in history:
+        e["input_duration_secs"] = 7200
+    monkeypatch.setattr(admin, "_read_history", lambda *a, **k: history)
+    monkeypatch.setattr(
+        admin, "_get_pipeline_state", lambda: {"files": {"short.mkv": {"status": "pending", "filepath": "short.mkv"}}}
+    )
+    # One remaining 4K film with a 60-min runtime -> predicted 0.5 * 3600 = 0.5h,
+    # NOT the flat 60-min (1h) tier median.
+    monkeypatch.setattr(
+        "server.helpers.read_report_cached",
+        lambda _p: {
+            "files": [
+                {"filepath": "short.mkv", "video": {"resolution_class": "4K", "hdr": True}, "duration_seconds": 3600}
+            ]
+        },
+    )
+    monkeypatch.setattr("tools.reclaim_debloat.candidates", lambda: [])
+    monkeypatch.setattr("server.helpers.read_json_safe", lambda _p: {})
+
+    fc = admin.get_history_summary()["forecast"]
+    assert abs(fc["predicted_total_encode_hours"] - 0.5) < 0.05, fc["predicted_total_encode_hours"]
+
+
+def test_scenarios_present_and_ordered_by_gpu_hours(monkeypatch):
+    history = [
+        _entry("2026-05-09T10:00:00+00:00", encode_secs=3600, res_key="4K_HDR"),
+        _entry("2026-05-10T10:00:00+00:00", encode_secs=3600, res_key="4K_HDR"),
+    ]
+    monkeypatch.setattr(admin, "_read_history", lambda *a, **k: history)
+    monkeypatch.setattr(
+        admin, "_get_pipeline_state", lambda: {"files": {"a.mkv": {"status": "pending", "filepath": "a.mkv"}}}
+    )
+    monkeypatch.setattr(
+        "server.helpers.read_report_cached",
+        lambda _p: {"files": [{"filepath": "a.mkv", "video": {"resolution_class": "4K", "hdr": True}}]},
+    )
+    monkeypatch.setattr("tools.reclaim_debloat.candidates", lambda: [])
+    monkeypatch.setattr("server.helpers.read_json_safe", lambda _p: {})
+
+    sc = admin.get_history_summary()["forecast"]["scenarios"]
+    assert set(sc.keys()) == {"8", "16", "24"}
+    assert "convert_date" in sc["8"] and "all_done_date" in sc["8"]
+    # More GPU-hours/day -> earlier (ISO date strings compare lexicographically).
+    assert sc["24"]["all_done_date"] <= sc["16"]["all_done_date"] <= sc["8"]["all_done_date"]

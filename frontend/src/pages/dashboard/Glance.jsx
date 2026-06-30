@@ -462,6 +462,7 @@ export function Glance({ data, pipelineData, throughputPerDay, workersActive, wo
   const debloatDays = forecast?.debloat_days ?? null;
   const allDoneDate = forecast?.all_done_date ?? null;
   const debloatRemaining = forecast?.debloat_remaining ?? null;
+  const scenarios = forecast?.scenarios ?? null;
 
   const recentEvents = data.recentEvents || [];
 
@@ -506,6 +507,16 @@ export function Glance({ data, pipelineData, throughputPerDay, workersActive, wo
               <>. Throughput unknown — run a batch to establish a rate.</>
             )}
           </div>
+          {scenarios && (
+            <div style={{ fontSize: 11, color: "var(--ink-4)", marginTop: 4 }}>
+              all done if run{" "}
+              <span className="mono" style={{ color: "var(--ink-3)" }}>8h/day {scenarios["8"]?.all_done_date}</span>
+              {" · "}
+              <span className="mono" style={{ color: "var(--ink-3)" }}>16h {scenarios["16"]?.all_done_date}</span>
+              {" · "}
+              <span className="mono" style={{ color: "var(--ink-3)" }}>24h {scenarios["24"]?.all_done_date}</span>
+            </div>
+          )}
         </div>
         <div className="stamp">
           <div>

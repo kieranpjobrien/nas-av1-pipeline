@@ -555,16 +555,26 @@ def get_history_summary() -> dict:
         # median read 6.7 min). 1080p films can legitimately finish in a couple
         # of minutes, so they keep the low floor.
         FLOOR_BY_TIER = {"4K_HDR": 900.0, "4K_SDR": 900.0, "4K": 900.0}
-        genuine: dict[str, list] = {}
+        genuine: dict[str, list] = {}        # tier -> [encode_secs]
+        genuine_rate: dict[str, list] = {}   # tier -> [encode_secs per second of content]
         for e in entries:
             et = e.get("encode_time_secs", 0) or 0
             rk = _entry_res_key(e)
             if et >= FLOOR_BY_TIER.get(rk, 120.0):
                 genuine.setdefault(rk, []).append(et)
+                dur = e.get("input_duration_secs") or 0
+                if dur > 0:
+                    genuine_rate.setdefault(rk, []).append(et / dur)
         # Median, not mean -- a tier still carries a long tail of short ops that
         # cleared the floor; the median tracks the typical film encode and
         # resists that skew.
         per_tier_avg_secs = {k: median(v) for k, v in genuine.items() if v}
+        # Encode-seconds per second of content, per tier. Each remaining file is
+        # weighted by its OWN runtime x this rate rather than a flat tier median:
+        # encode time scales with duration, and we process largest-first, so the
+        # leftover films are shorter (remaining 4K median 101 min vs 122 done) and
+        # genuinely cheaper than the big ones already cleared (2026-06-30).
+        per_tier_rate = {k: median(v) for k, v in genuine_rate.items() if v}
         _all_genuine = [x for v in genuine.values() for x in v]
         overall_mean_secs = median(_all_genuine) if _all_genuine else 600.0
 
@@ -617,6 +627,17 @@ def get_history_summary() -> dict:
                     return res
                 return "SD"
 
+            def _predict_secs(tier: str, mr_entry: dict) -> float:
+                """Encode-seconds for one file from its ACTUAL runtime x the tier's
+                per-second rate. Encode time scales with duration, so shorter
+                leftovers (we encode largest-first) cost less than a flat tier
+                median. Falls back to the tier median when runtime/rate is missing."""
+                dur = (mr_entry or {}).get("duration_seconds") or 0
+                rate = per_tier_rate.get(tier)
+                if dur > 0 and rate:
+                    return dur * rate
+                return per_tier_avg_secs.get(tier, overall_mean_secs)
+
             predicted_total_secs = 0.0
             per_res_tally: dict[str, int] = {}
             for fp, _row in remaining_files_list:
@@ -627,7 +648,7 @@ def get_history_summary() -> dict:
                     continue
                 tier = _res_key(mr_e)
                 per_res_tally[tier] = per_res_tally.get(tier, 0) + 1
-                predicted_total_secs += per_tier_avg_secs.get(tier, overall_mean_secs)
+                predicted_total_secs += _predict_secs(tier, mr_e)
 
             # De-bloat phase: the parked VMAF reclaim queue runs AFTER convert
             # (GPU-exclusive, rule 9b), so its encode time stacks on top of the
@@ -650,7 +671,7 @@ def get_history_summary() -> dict:
                         continue
                     rk = _res_key_from_video((c.get("f") or {}).get("video") or {})
                     debloat_tally[rk] = debloat_tally.get(rk, 0) + 1
-                    debloat_secs += per_tier_avg_secs.get(rk, overall_mean_secs)
+                    debloat_secs += _predict_secs(rk, c.get("f") or {})
                 debloat_secs *= 0.72  # ~31% gate-fail = quick, no full encode
             except Exception as _dbl_e:  # best-effort; never break the convert forecast
                 logging.debug(f"de-bloat forecast phase skipped: {_dbl_e}")
@@ -659,6 +680,17 @@ def get_history_summary() -> dict:
                 days_remaining = predicted_total_secs / avg_encode_secs_per_day
                 est_date = datetime.now() + timedelta(days=days_remaining)
                 all_done_days = (predicted_total_secs + debloat_secs) / avg_encode_secs_per_day
+                # What-if range: completion at fixed GPU-hours/day, independent of
+                # the noisy recent-measured pace. Lets the user see "run it 16 h/day
+                # -> done by X". Each scenario gives the convert + all-done dates.
+                _now = datetime.now()
+                scenarios = {}
+                for _h in (8, 16, 24):
+                    _cap = _h * 3600.0
+                    scenarios[str(_h)] = {
+                        "convert_date": (_now + timedelta(days=predicted_total_secs / _cap)).strftime("%Y-%m-%d"),
+                        "all_done_date": (_now + timedelta(days=(predicted_total_secs + debloat_secs) / _cap)).strftime("%Y-%m-%d"),
+                    }
                 forecast = {
                     "remaining_files": remaining,
                     "avg_files_per_day": round(avg_per_day, 1),
@@ -678,6 +710,7 @@ def get_history_summary() -> dict:
                     "debloat_days": round(debloat_secs / avg_encode_secs_per_day, 1),
                     "all_done_days": round(all_done_days, 1),
                     "all_done_date": (datetime.now() + timedelta(days=all_done_days)).strftime("%Y-%m-%d"),
+                    "scenarios": scenarios,
                 }
             elif avg_per_day > 0 and remaining > 0:
                 # Defensive fallback to the old math if for some reason GPU
