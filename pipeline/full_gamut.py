@@ -854,6 +854,44 @@ def _encode_only(
         return False
 
 
+def _prep_miss_flag_status(drop_violations: list) -> FileStatus:
+    """Pick the terminal FLAGGED_* status for a prep-miss circuit-breaker trip.
+
+    A drop violation that survived the pre-encode strip
+    (``foreign_audio`` / ``commentary_audio`` / ``foreign_subs`` /
+    ``extra_eng_subs``) is a COMPLIANCE / POLICY hold, NOT source
+    corruption — the source bytes are intact, prep just couldn't remove
+    a track (commonly because TMDb ``original_language`` was empty at
+    encode time, so ``_select_audio_streams`` kept all audio via the
+    ``<=2``-track legacy guard). Parking it as ``FLAGGED_CORRUPT`` is a
+    lie about the file and hides the Flagged pane's actionable
+    ``encode_anyway`` / ``delete_redownload`` handling behind the
+    "unreadable source" bucket (2026-06-30: *Eternity (2025)* and
+    *Saturday Night (2024)* — both intact HEVC with a French dub —
+    sat as flagged_corrupt purely because of this path).
+
+    ``FLAGGED_CORRUPT`` is reserved for genuinely unreadable / decode-
+    error sources (the ``prep_source_integrity`` path). Route by
+    violation class instead:
+
+      * ``foreign_audio``  → ``FLAGGED_FOREIGN_AUDIO`` — a foreign dub
+        track survived; matches the enum's stated meaning (audio
+        language ≠ ``original_language``) and the pane's re-grab /
+        encode-anyway actions are exactly right.
+      * ``commentary_audio`` / ``foreign_subs`` / ``extra_eng_subs``
+        → ``FLAGGED_MANUAL`` — a stream-layout hold that needs a human
+        eye, not audio-language re-acquisition.
+
+    When both an audio and a sub/commentary violation survive, the
+    foreign-audio class wins — it's the most actionable and carries the
+    heaviest "keep the foreign audio?" decision for the user.
+    """
+    tags = {v.tag for v in drop_violations}
+    if "foreign_audio" in tags:
+        return FileStatus.FLAGGED_FOREIGN_AUDIO
+    return FileStatus.FLAGGED_MANUAL
+
+
 def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
     """Upload encoded file to NAS, verify, replace original, tag, report, Plex.
 
@@ -1283,10 +1321,26 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
                 f"{drop_violations[0].message[:160]}"
             )
             if refuse_count >= COMPLIANCE_REFUSE_BREAKER:
+                # A surviving drop violation is a compliance/policy hold,
+                # NOT source corruption. Route to the right FLAGGED_*
+                # bucket (foreign_audio → FLAGGED_FOREIGN_AUDIO, else
+                # FLAGGED_MANUAL) so the Flagged pane's encode_anyway /
+                # delete_redownload actions apply. FLAGGED_CORRUPT is
+                # reserved for the prep_source_integrity decode-error path.
+                breaker_status = _prep_miss_flag_status(drop_violations)
+                logging.error(
+                    f"  CIRCUIT BREAKER: {os.path.basename(filepath)} — "
+                    f"{refuse_count} prep misses ({drop_violations[0].tag}); "
+                    f"parking as {breaker_status.value} (source intact — "
+                    f"compliance hold, not corruption)."
+                )
                 state.set_file(
                     filepath,
-                    FileStatus.FLAGGED_CORRUPT,
-                    error=f"{refuse_count} prep misses: {drop_violations[0].message}",
+                    breaker_status,
+                    # reason= is what the Flagged pane renders; error=
+                    # carries the machine detail for audit/log greps.
+                    reason=f"{refuse_count} prep misses: {drop_violations[0].message}",
+                    error=f"{refuse_count} prep misses: {drop_violations[0].tag} survived pre-encode strip",
                     stage="verify",
                     compliance_violations=[v.message for v in drop_violations],
                     compliance_refuse_count=refuse_count,
