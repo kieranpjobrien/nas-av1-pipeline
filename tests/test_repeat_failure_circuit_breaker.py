@@ -20,8 +20,6 @@ dashboard which is how Ford v Ferrari kept coming back.
 
 from __future__ import annotations
 
-import re
-
 
 def _src(path: str = "pipeline/full_gamut.py") -> str:
     with open(path, encoding="utf-8") as f:
@@ -80,20 +78,63 @@ def test_compliance_refuse_breaker_constant():
     )
 
 
+def _breaker_setfile_window(src: str, error_needle: str) -> str:
+    """Return the ``state.set_file(...)`` call that a breaker's error-string
+    anchor belongs to, so assertions target one specific breaker site
+    rather than a fixed-width window that can bleed into a neighbour."""
+    anchor = src.find(error_needle)
+    assert anchor != -1, f"breaker anchor moved / not found: {error_needle!r}"
+    call = src.rfind("state.set_file(", 0, anchor)
+    assert call != -1, f"no set_file precedes anchor {error_needle!r}"
+    return src[call : anchor + 300]
+
+
 def test_compliance_breaker_uses_flagged_corrupt():
+    """The two GENUINE-refuse compliance breakers must land in
+    FLAGGED_CORRUPT (terminal) so the queue builder stops re-trying an
+    output that is actually wrong:
+
+      * up-front REFUSE — wrong video/audio codec, zero-audio, probe error.
+      * post-fix RESIDUAL — the tag/TMDb/rename fixers ran and violations
+        still remain.
+
+    NOTE: the THIRD compliance breaker — the drop-violation "prep miss"
+    block — is deliberately NOT covered here. A foreign-audio / sub track
+    that survived the pre-encode strip is a compliance/policy hold on an
+    INTACT source, not corruption, so it routes via _prep_miss_flag_status
+    to FLAGGED_FOREIGN_AUDIO / FLAGGED_MANUAL (2026-06-30 fix). That
+    routing is pinned in tests/test_prep_miss_flag_status.py.
+    """
     src = _src()
-    # Anchor on the compliance refuse block. There are two — confirm BOTH have
-    # the breaker transition.
-    sections = src.split("COMPLIANCE_REFUSE_BREAKER = 3")
-    assert len(sections) >= 3, "expected COMPLIANCE_REFUSE_BREAKER defined 2+ times"
-    for i, section in enumerate(sections[1:], 1):
-        window = section[:1500]
-        assert "FileStatus.FLAGGED_CORRUPT" in window, (
-            f"compliance breaker section #{i} must transition to FLAGGED_CORRUPT"
-        )
-        assert "compliance_refuse_count=refuse_count" in window, (
-            f"compliance breaker section #{i} must persist the counter"
-        )
+
+    # Site 1: up-front REFUSE (grouped REFUSE + UNRECOVERABLE).
+    upfront = _breaker_setfile_window(src, 'f"{refuse_count} consecutive compliance refuses:')
+    assert "FileStatus.FLAGGED_CORRUPT" in upfront, "up-front REFUSE breaker must land in FLAGGED_CORRUPT"
+    assert "compliance_refuse_count=refuse_count" in upfront, "up-front breaker must persist the counter"
+
+    # Site 2: post-fix RESIDUAL (fixers ran, violations remain).
+    residual = _breaker_setfile_window(src, 'f"{refuse_count} unfixed:')
+    assert "FileStatus.FLAGGED_CORRUPT" in residual, "post-fix RESIDUAL breaker must land in FLAGGED_CORRUPT"
+    assert "compliance_refuse_count=refuse_count" in residual, "residual breaker must persist the counter"
+
+
+def test_prep_miss_breaker_does_not_use_flagged_corrupt():
+    """Pin the 2026-06-30 fix from the other side: the drop-violation
+    "prep miss" breaker must NOT hardcode FLAGGED_CORRUPT — that
+    mislabelled intact sources (Eternity / Saturday Night) as corrupt.
+    It routes by violation class via _prep_miss_flag_status instead."""
+    src = _src()
+    start = src.find("if drop_violations:")
+    assert start != -1, "drop_violations breaker block not found"
+    end = src.find("# Run the remaining (non-drop) fixers", start)
+    assert end > start, "end anchor (non-drop fixer loop) not found"
+    block = src[start:end]
+    assert "_prep_miss_flag_status(drop_violations)" in block, (
+        "drop-violation breaker must route via _prep_miss_flag_status"
+    )
+    assert "FileStatus.FLAGGED_CORRUPT" not in block, (
+        "a surviving drop violation is a compliance hold, not corruption"
+    )
 
 
 def test_categorise_entry_skips_flagged_corrupt():
