@@ -46,13 +46,18 @@ import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
+from pipeline.config import GRADE_CQ_TOLERANCE
+
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 
-# CQ tolerance: a difference of 0 is exact match, 1 is rounding, etc.
-# Default 0 means strict — every encode MUST hit the rule exactly. Tunable
-# from the CLI for users who want a wider acceptance band.
-DEFAULT_TOLERANCE = 0
+# CQ tolerance: a stamped CQ within this many steps of target counts as optimal.
+# Sourced from the shared pipeline constant so the audit, the queue router
+# (pipeline.__main__.categorise_entry), and the dashboard metric
+# (server.routers.library) all agree. A 1-step delta is imperceptible; skipping
+# it spares the GPU a pointless re-encode. (Previously 0/strict but never wired
+# into the comparison — dead until 2026-07-10.)
+DEFAULT_TOLERANCE = GRADE_CQ_TOLERANCE
 
 
 def _read_mkv_cq_tag(filepath: str, mkvmerge: str | None = None) -> int | None:
@@ -242,7 +247,7 @@ def _audit_one(entry: dict, state_db: str, base_cq_lookup, bitrate_table: dict |
 
     if current is None:
         bucket = "unknown"
-    elif current == target:
+    elif abs(current - target) <= DEFAULT_TOLERANCE:
         bucket = "optimal"
     elif current < target:
         bucket = "too_low"  # encoded gentler than the rule wants — re-encode candidate

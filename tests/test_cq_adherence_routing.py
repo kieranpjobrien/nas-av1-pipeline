@@ -230,3 +230,35 @@ def test_cq_off_target_av1_stamps_force_reencode(tmp_path):
         "CQ-adherence routing must stamp force_reencode=true; otherwise the "
         "full_gamut AV1 guard silently marks DONE before the encode runs"
     )
+
+
+def test_av1_within_cq_tolerance_skips(tmp_path):
+    """A 1-CQ-step delta (e.g. 37 vs 38) is within GRADE_CQ_TOLERANCE: the file
+    is optimal enough and must NOT re-encode. Re-encoding 696 such files for an
+    imperceptible bump was pure GPU waste — operator call 2026-07-10. Both
+    directions (too_low and too_high) at delta=1 skip."""
+    state = _state(tmp_path)
+    control = _control(tmp_path)
+    fp = r"\\NAS\Series\Sitcom\Sitcom S01E01.mkv"
+
+    for cur, tgt in [(37, 38), (35, 36), (38, 37)]:
+        bucket = "too_low" if cur < tgt else "too_high"
+        entry = _av1_entry(fp, current_cq=cur, target_cq=tgt, bucket=bucket)
+        category, _item = categorise_entry(entry, {}, state, control)
+        assert category == "skip", (
+            f"AV1 with |{cur}-{tgt}|<=1 is within tolerance; must skip, got {category!r}"
+        )
+
+
+def test_av1_beyond_cq_tolerance_routes_to_full_gamut(tmp_path):
+    """A delta of 2+ is a real grade mismatch and must still re-encode — the
+    tolerance only spares the trivial 1-step bumps, not genuine off-target CQ."""
+    state = _state(tmp_path)
+    control = _control(tmp_path)
+    fp = r"\\NAS\Movies\RealMismatch\RealMismatch.mkv"
+
+    entry = _av1_entry(fp, current_cq=30, target_cq=32, bucket="too_low")  # delta=2
+    category, _item = categorise_entry(entry, {}, state, control)
+    assert category == "full_gamut", (
+        f"AV1 with delta=2 exceeds tolerance; must re-encode, got {category!r}"
+    )

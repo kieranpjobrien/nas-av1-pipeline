@@ -17,6 +17,15 @@
 KEEP_LANGS: set[str] = {"eng", "en", "english", "und", "", "zxx"}
 ENG_LANGS: set[str] = {"eng", "en", "english"}
 
+# Grade-CQ tolerance. A stamped CQ within this many steps of the tier target is
+# treated as optimal: not a re-encode candidate and not flagged in the
+# Grade-Optimised metric. A 1-step delta (e.g. 37 vs 38) is visually
+# imperceptible and re-encoding for it is pure GPU cost for no gain (696 such
+# files were skipped on 2026-07-10). Kept in sync across the metric
+# (server/routers/library.py), the queue router (pipeline.__main__.categorise_entry),
+# and the audit tool (tools.audit_encode_cq).
+GRADE_CQ_TOLERANCE = 1
+
 
 # Default configuration — all values can be overridden via CLI args
 DEFAULT_CONFIG = {

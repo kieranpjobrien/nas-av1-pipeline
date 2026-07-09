@@ -54,7 +54,7 @@ except OSError:
     faulthandler.enable(all_threads=True)
 
 from paths import MEDIA_REPORT, STAGING_DIR  # noqa: E402
-from pipeline.config import build_config  # noqa: E402
+from pipeline.config import GRADE_CQ_TOLERANCE, build_config  # noqa: E402
 from pipeline.control import PipelineControl  # noqa: E402
 from pipeline.state import FileStatus, PipelineState, is_terminal  # noqa: E402
 
@@ -401,7 +401,7 @@ def categorise_entry(
         audit = entry.get("audit") or {}
         cur_cq = audit.get("current_cq")
         tgt_cq = audit.get("target_cq")
-        if cur_cq is not None and tgt_cq is not None and cur_cq != tgt_cq:
+        if cur_cq is not None and tgt_cq is not None and abs(cur_cq - tgt_cq) > GRADE_CQ_TOLERANCE:
             # Same AV1-source-guard story as the priority branch above —
             # routing to full_gamut without force_reencode causes the
             # full_gamut.py:689 guard to mark this DONE as "av1 source

@@ -114,3 +114,38 @@ def test_kpi_excludes_inferred_uncertain():
     assert counts["grade_too_low"] == 1
     assert counts["grade_too_high"] == 0
     assert counts["grade_unknown"] == 0
+
+
+def test_kpi_grade_tolerance_counts_1step_delta_as_optimal(monkeypatch):
+    """Real get_library_completion: a 1-CQ-step delta counts optimal (not 'to
+    go') after the 2026-07-10 tolerance change; delta>=2 still counts too_low/
+    too_high. Pins the metric side of the 696-file skip so a re-audit or code
+    change can't silently re-flag them."""
+    from server.routers import library
+
+    def _f(name, bucket, cur, tgt):
+        return {
+            "filepath": f"\\\\NAS\\Movies\\{name}.mkv",
+            "filename": f"{name}.mkv",
+            "library_type": "movie",
+            "video": {"codec_raw": "av1"},
+            "audio_streams": [],
+            "subtitle_streams": [],
+            "audit": {"bucket": bucket, "current_cq": cur, "target_cq": tgt},
+        }
+
+    files = (
+        [_f(f"tol_low_{i}", "too_low", 37, 38) for i in range(5)]  # delta 1 -> optimal
+        + [_f(f"tol_high_{i}", "too_high", 38, 37) for i in range(2)]  # delta 1 -> optimal
+        + [_f(f"real_low_{i}", "too_low", 30, 37) for i in range(3)]  # delta 7 -> stays too_low
+        + [_f(f"opt_{i}", "optimal", 30, 30) for i in range(4)]  # already optimal
+    )
+
+    monkeypatch.setattr(library, "read_report_cached", lambda _p: {"files": files})
+    library._completion_cache = None  # bypass the TTL cache
+
+    result = library.get_library_completion()
+    # 4 optimal + 5 within-tol low + 2 within-tol high = 11 optimal; only the 3 delta-7 remain
+    assert result["grade_optimal"] == 11, result
+    assert result["grade_too_low"] == 3, result
+    assert result["grade_too_high"] == 0, result

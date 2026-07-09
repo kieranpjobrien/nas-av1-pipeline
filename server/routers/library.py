@@ -308,9 +308,19 @@ def get_library_completion() -> dict:
     # bearing for KPI counts.
     summary = data.get("audit_summary") or {}
     counts["grade_audited_at"] = summary.get("audited_at")
+    from pipeline.config import GRADE_CQ_TOLERANCE
+
     for f in files:
         a = f.get("audit") or {}
         b = a.get("bucket")
+        # A stamped CQ within GRADE_CQ_TOLERANCE steps of target counts as
+        # optimal, not a re-encode candidate — keeps the metric in step with
+        # categorise_entry and the audit tool (696 tiny 1-step files skipped
+        # 2026-07-10).
+        if b in ("too_low", "too_high"):
+            c, t = a.get("current_cq"), a.get("target_cq")
+            if c is not None and t is not None and abs(c - t) <= GRADE_CQ_TOLERANCE:
+                b = "optimal"
         if b == "optimal":
             counts["grade_optimal"] += 1
         elif b == "too_low":
