@@ -81,8 +81,13 @@ def _compliance_for_entry(entry: dict, keep_langs: set[str] | None = None) -> di
         audio_lang_ok = False
         violations.append("audio_zero_streams")
     else:
+        # TrueHD is passthrough by policy (rule 9a — the primary Dolby Atmos
+        # carrier, kept bit-exact; the Sonos Arc decodes it natively), so it is
+        # compliant, NOT a transcode target. Crediting it stops ~159 correctly-
+        # TrueHD files being mis-counted as "needs EAC-3" (2026-07-11).
         audio_codec_ok = all(
-            (a.get("codec_raw") or a.get("codec", "")).lower() in ("eac3", "e-ac-3") for a in audio_streams
+            (a.get("codec_raw") or a.get("codec", "")).lower() in ("eac3", "e-ac-3", "truehd")
+            for a in audio_streams
         )
         if not audio_codec_ok:
             violations.append("audio_codec_not_eac3")
@@ -146,7 +151,13 @@ def _compliance_for_entry(entry: dict, keep_langs: set[str] | None = None) -> di
     # subs_optional.json control file. When matched, the no-English check
     # is suppressed; foreign-sub presence is still flagged so legitimate
     # cleanup work isn't hidden.
-    if is_subs_optional(entry.get("filepath", "")):
+    # An English sub is only *needed* when the audio isn't already understandable in
+    # English. If every audio track is English/und/zxx (no foreign dialogue), a
+    # missing English sub is not a gap — this matches the frontend's needs-subs logic
+    # and stops ~75 English-audio films being flagged "missing English subs"
+    # (2026-07-11). Foreign-sub presence is still flagged in both branches.
+    audio_all_english = bool(audio_streams) and all(_stream_lang(a) in keep_langs for a in audio_streams)
+    if is_subs_optional(entry.get("filepath", "")) or audio_all_english:
         subs_ok = no_foreign_subs
     else:
         subs_ok = has_english_sub and no_foreign_subs
