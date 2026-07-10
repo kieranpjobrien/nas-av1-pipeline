@@ -453,7 +453,11 @@ export function Glance({ data, pipelineData, throughputPerDay, workersActive, wo
 
   const forecast = historySummary?.forecast;
   const avgSaved = 0.41;
-  const projectedTbAtCompletion = ((remainingSizeGb * avgSaved) / 1024).toFixed(1);
+  // "At completion" = already-banked reclaim PLUS the projected saving from the
+  // remaining work. It MUST include reclaimedGb — otherwise it's remaining-only and
+  // counter-intuitively falls to ~0 exactly at completion, moving opposite to the
+  // "Storage reclaimed" figure it sits beside (fixed 2026-07-11).
+  const projectedTbAtCompletion = ((reclaimedGb + remainingSizeGb * avgSaved) / 1024).toFixed(1);
   const throughput = forecast?.avg_files_per_day ?? throughputPerDay ?? null;
   const daysLeft =
     forecast?.est_days_remaining ??
@@ -1238,7 +1242,7 @@ export function Glance({ data, pipelineData, throughputPerDay, workersActive, wo
                 ~{projectedTbAtCompletion} TB
               </div>
               <div style={{ fontSize: 10, color: "var(--ink-4)" }}>
-                based on avg ratio · {fmtNum(remainingFiles)} files left
+                banked + est. of {fmtNum(remainingFiles)} files left
               </div>
             </div>
             <div>
