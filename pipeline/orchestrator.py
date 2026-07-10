@@ -35,6 +35,21 @@ _PIPELINE_TMP_SUFFIXES = (
 )
 
 
+def _ghost_candidate_paths(state: PipelineState) -> list[str]:
+    """Terminal-state filepaths whose absence on disk means a deleted/renamed
+    source, so their state row is a ghost to sweep.
+
+    DONE plus the auto-flagged states (corrupt / foreign-audio / undetermined).
+    FLAGGED_MANUAL is excluded on purpose — a user park is not ours to auto-drop
+    just because the file is momentarily unreachable.
+    """
+    paths = list(state.get_files_by_status(FileStatus.DONE))
+    for flag in (FileStatus.FLAGGED_CORRUPT, FileStatus.FLAGGED_FOREIGN_AUDIO,
+                 FileStatus.FLAGGED_UNDETERMINED):
+        paths += list(state.get_files_by_status(flag))
+    return paths
+
+
 class Orchestrator:
     """3-thread pipeline coordinator: GPU encode + network I/O + gap filler."""
 
@@ -304,14 +319,19 @@ class Orchestrator:
         if reset_count:
             logging.info(f"  Reset {reset_count} stale entries from previous run")
 
-        # Remove ghost 'done' entries where the source file no longer exists (renamed/deleted).
+        # Remove ghost entries where the source file no longer exists (renamed/deleted).
+        # Covers DONE *and* the auto-flagged terminal states (corrupt / foreign-audio /
+        # undetermined): a deleted file that was flagged_corrupt used to linger in the
+        # state DB forever and inflate the dashboard's "corrupt" count long after the
+        # scanner had pruned it from media_report (fixed 2026-07-11). flagged_manual is
+        # deliberately excluded — a user park is not ours to auto-drop.
         # Bounded by a 30s wall-clock deadline — on slow/flaky SMB (common when the
-        # NAS is busy) os.path.exists can block per-file for seconds, so 2,700+ paths
-        # would hang the orchestrator startup indefinitely. If we don't finish in 30s,
-        # skip ghost detection this run — stale done entries are harmless (they just
+        # NAS is busy) os.path.exists can block per-file for seconds, so thousands of
+        # paths would hang the orchestrator startup indefinitely. If we don't finish in
+        # 30s, skip ghost detection this run — stale entries are harmless (they just
         # take up space in pipeline_state.db) and the next clean-NAS startup will catch
-        # them. The scanner's hourly pass also prunes ghost entries.
-        done_paths = self.state.get_files_by_status(FileStatus.DONE)
+        # them. The scanner's hourly pass also prunes ghost entries from the report.
+        done_paths = _ghost_candidate_paths(self.state)
         if done_paths:
             import time as _time
             from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -335,7 +355,7 @@ class Orchestrator:
             if checked < len(done_paths):
                 logging.info(
                     f"  Ghost check deadline hit — probed {checked}/{len(done_paths)} "
-                    f"done entries. Continuing (stale entries will be cleaned next run)."
+                    f"terminal entries. Continuing (stale entries will be cleaned next run)."
                 )
             ghosts = [p for p, exists in existence.items() if not exists]
             if ghosts:

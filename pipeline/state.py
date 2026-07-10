@@ -627,7 +627,7 @@ class PipelineState:
             return count
 
     def remove_ghosts(self, filepaths: list[str]) -> int:
-        """Remove 'done' entries where the source file no longer exists.
+        """Remove terminal entries (done / auto-flagged) where the source file no longer exists.
 
         Args:
             filepaths: list of filepaths confirmed to not exist on disk.
