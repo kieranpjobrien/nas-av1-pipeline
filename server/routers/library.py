@@ -40,6 +40,30 @@ def _eng(lang: str | None) -> bool:
     return _norm_lang(lang) in ENG_LANGS
 
 
+def _flagged_corrupt_paths() -> set[str]:
+    """Filepaths currently flagged_corrupt in the pipeline state DB — broken
+    sources awaiting re-acquisition, NOT compliance work. Excluded from the
+    compliance denominator so a batch of NAS-corruption casualties can't drag
+    every metric at once (2026-07-11). They still surface in the Flagged pane.
+    Defensive: any read failure returns an empty set (fall back to counting them
+    rather than crash the dashboard)."""
+    try:
+        import sqlite3
+
+        from paths import PIPELINE_STATE_DB
+
+        con = sqlite3.connect(f"file:{PIPELINE_STATE_DB}?mode=ro", uri=True, timeout=5.0)
+        try:
+            rows = con.execute(
+                "SELECT filepath FROM pipeline_files WHERE status = 'flagged_corrupt'"
+            ).fetchall()
+        finally:
+            con.close()
+        return {r[0] for r in rows}
+    except Exception:
+        return set()
+
+
 def _compliance_for_entry(entry: dict, keep_langs: set[str] | None = None) -> dict:
     """Return per-entry compliance flags for a media_report file entry.
 
@@ -231,6 +255,12 @@ def get_library_completion() -> dict:
         raise HTTPException(404, "media_report.json not found")
 
     files = data.get("files", [])
+    # Corrupt sources (NAS-corruption casualties) aren't compliance work — they're
+    # broken files awaiting re-source (surfaced separately in the Flagged pane).
+    # Drop them from the denominator so they can't drag every metric at once.
+    corrupt = _flagged_corrupt_paths()
+    if corrupt:
+        files = [f for f in files if f.get("filepath") not in corrupt]
     total = len(files)
 
     counts: dict = {

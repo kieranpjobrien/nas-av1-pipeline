@@ -59,3 +59,26 @@ def test_english_audio_with_foreign_sub_still_flagged():
         _entry([{"codec_raw": "eac3", "language": "eng"}], subs=[{"language": "fre", "codec": "subrip"}])
     )
     assert c["subs_ok"] is False, "foreign sub present → still not compliant"
+
+
+def test_flagged_corrupt_excluded_from_completion(monkeypatch):
+    """A broken source (flagged_corrupt) is not compliance work — it's dropped
+    from the completion denominator, not counted as non-compliant across every
+    metric at once (2026-07-11)."""
+    from server.routers import library
+
+    files = [
+        {"filepath": "ok.mkv", "video": {"codec_raw": "av1"},
+         "audio_streams": [{"codec_raw": "eac3", "language": "eng"}],
+         "subtitle_streams": [], "tmdb": {"original_language": "en"}},
+        {"filepath": "broken.mkv", "video": {"codec_raw": "hevc"},
+         "audio_streams": [{"codec_raw": "dts", "language": "eng"}],
+         "subtitle_streams": [], "tmdb": {"original_language": "en"}},
+    ]
+    monkeypatch.setattr(library, "read_report_cached", lambda _p: {"files": files})
+    monkeypatch.setattr(library, "_flagged_corrupt_paths", lambda: {"broken.mkv"})
+    library._completion_cache = None
+
+    r = library.get_library_completion()
+    assert r["total"] == 1, "broken.mkv (flagged_corrupt) must be excluded from the denominator"
+    assert r["needs_video"] == 0, "only ok.mkv (AV1) remains -> no outstanding video work"
