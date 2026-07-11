@@ -376,6 +376,17 @@ def _another_encoder_running() -> bool:
 
 
 def main() -> None:
+    # When launched as a managed subprocess, stdout/stderr is a pipe that Python
+    # encodes with the Windows ANSI codepage (cp1252). A filename with a
+    # non-Latin1 character (e.g. a macron, U+0101 'ā') then crashes the whole
+    # daemon on log()'s print(). Force UTF-8 with replacement so a single odd
+    # filename can never take down the run. 2026-07-11: died exit 1 on exactly
+    # this after 8 clean reclaims.
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
     os.makedirs(WORK, exist_ok=True)
     if _another_encoder_running():
         log(

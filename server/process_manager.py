@@ -152,14 +152,24 @@ class ProcessManager:
             creation_flags = 0
             if sys.platform == "win32":
                 creation_flags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+            # Force UTF-8 stdio on both sides. Without this, a managed child's
+            # stdout defaults to the Windows ANSI codepage (cp1252) and a single
+            # log line containing a non-Latin1 character (e.g. a filename with a
+            # macron 'ā') raises UnicodeEncodeError and kills the whole process
+            # (reclaim died exit 1 this way on 2026-07-11). encoding/errors on the
+            # parent reader side stops a stray byte crashing the reader thread.
+            env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
             proc = subprocess.Popen(
                 cfg["cmd"],
                 cwd=cfg["cwd"],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 bufsize=1,
                 creationflags=creation_flags,
+                env=env,
             )
             self._procs[name] = proc
             self._logs[name] = deque(maxlen=500)
