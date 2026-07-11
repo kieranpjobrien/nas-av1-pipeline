@@ -156,6 +156,18 @@ _ISO1_TO_ISO2: dict[str, str] = {
     "el": "gre",
 }
 
+# Macro-language variants: a TMDb original_language whose audio is routinely
+# tagged with a more specific variant code. Norwegian films are tagged ``nob``
+# (Bokmål) / ``nno`` (Nynorsk) rather than ``no``/``nor``; Chinese as ``cmn`` /
+# ``yue``. Without these the original-language track fails the keeper check even
+# though it IS the original (Sentimental Value [nob] orig=no, 2026-07-11).
+_MACRO_VARIANTS: dict[str, set[str]] = {
+    "no": {"nob", "nno"},
+    "nor": {"nob", "nno"},
+    "zh": {"cmn", "yue"},
+    "chi": {"cmn", "yue"},
+}
+
 
 def tmdb_keeper_langs(tmdb_original_language: str | None) -> set[str] | None:
     """Return the set of language codes acceptable as audio for a given TMDb original_language.
@@ -182,6 +194,9 @@ def tmdb_keeper_langs(tmdb_original_language: str | None) -> set[str] | None:
     iso2 = _ISO1_TO_ISO2.get(orig)
     if iso2:
         keepers.add(iso2)
+    keepers |= _MACRO_VARIANTS.get(orig, set())
+    if iso2:
+        keepers |= _MACRO_VARIANTS.get(iso2, set())
     return keepers
 
 

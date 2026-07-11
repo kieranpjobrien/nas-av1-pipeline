@@ -116,9 +116,19 @@ def _compliance_for_entry(entry: dict, keep_langs: set[str] | None = None) -> di
         if not audio_codec_ok:
             violations.append("audio_codec_not_eac3")
 
-        # Language policy: ORIGINAL LANGUAGE only, not English-only. A Japanese
-        # film keeps Japanese audio, not dubbed English. TMDb's original_language
-        # is the authoritative source; und/unknown is always acceptable.
+        # Language policy (dual-audio aware):
+        #   * A foreign-origin film must KEEP its original language — an
+        #     English-ONLY dub of a foreign film is still "not English-only"
+        #     and stays non-compliant (has_keeper is False for it).
+        #   * English is an acceptable ADDITIONAL track and is never a violation
+        #     on its own. The user watches in English and the dual-audio policy
+        #     deliberately keeps English alongside the original (Ghibli: Japanese
+        #     + English dub for the daughter). The old `all(stream in keepers)`
+        #     rule required EVERY stream to be a keeper, so the English half of
+        #     every dual-audio film failed — Castle in the Sky, Princess
+        #     Mononoke, etc. were mis-counted as "foreign audio" (fixed 2026-07-11).
+        #   * A stream that is neither a keeper nor English is a genuine foreign
+        #     dub to strip/re-source (Pocahontas ger, Only Murders tur, ...).
         tmdb = entry.get("tmdb") or {}
         orig_lang = _norm_lang(tmdb.get("original_language"))
         audio_keepers = tmdb_keeper_langs(orig_lang)
@@ -126,7 +136,10 @@ def _compliance_for_entry(entry: dict, keep_langs: set[str] | None = None) -> di
             # No TMDb original_language -> can't judge; be permissive.
             audio_lang_ok = True
         else:
-            audio_lang_ok = all(_stream_lang(a) in audio_keepers for a in audio_streams)
+            stream_langs = {_stream_lang(a) for a in audio_streams}
+            has_keeper = bool(stream_langs & audio_keepers)  # original / und / zxx present
+            foreign = stream_langs - audio_keepers - ENG_LANGS  # genuine foreign dub track(s)
+            audio_lang_ok = has_keeper and not foreign
             if not audio_lang_ok:
                 violations.append("audio_foreign_language")
 

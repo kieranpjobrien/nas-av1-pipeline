@@ -82,3 +82,57 @@ def test_flagged_corrupt_excluded_from_completion(monkeypatch):
     r = library.get_library_completion()
     assert r["total"] == 1, "broken.mkv (flagged_corrupt) must be excluded from the denominator"
     assert r["needs_video"] == 0, "only ok.mkv (AV1) remains -> no outstanding video work"
+
+
+# --- Audio-language: dual-audio + language-code variants (2026-07-11) ----------
+# The old `all(stream in keepers)` rule flagged the English half of every
+# dual-audio film as "foreign audio", contradicting the Ghibli dual-audio policy.
+# The fix credits English as an ADDITIONAL track without relaxing "not
+# English-only" (a foreign film must still carry its original language).
+
+
+def test_dual_audio_original_plus_english_is_compliant():
+    """Original + English (the dual-audio policy — Ghibli keeps both) is compliant."""
+    c = _compliance_for_entry(
+        _entry([{"codec_raw": "eac3", "language": "jpn"}, {"codec_raw": "eac3", "language": "eng"}], orig_lang="ja")
+    )
+    assert c["audio_ok"] is True, "original (jpn) present + English is the dual-audio target, not a violation"
+    assert "audio_foreign_language" not in c["violations"]
+
+
+def test_original_only_still_compliant():
+    """Regression: original-only (no English) stays compliant."""
+    c = _compliance_for_entry(_entry([{"codec_raw": "eac3", "language": "jpn"}], orig_lang="ja"))
+    assert c["audio_ok"] is True
+
+
+def test_english_only_dub_of_foreign_film_not_compliant():
+    """'not English-only' still holds — an English-only dub of a foreign film is
+    missing its original and must stay non-compliant. The fix must NOT relax this."""
+    c = _compliance_for_entry(_entry([{"codec_raw": "eac3", "language": "eng"}], orig_lang="es"))
+    assert c["audio_ok"] is False, "English-only dub of a Spanish film is missing the original"
+    assert "audio_foreign_language" in c["violations"]
+
+
+def test_foreign_dub_track_on_english_film_not_compliant():
+    """A genuinely-foreign dub (German) on an English-origin film is junk to strip,
+    even though the English track makes it watchable."""
+    c = _compliance_for_entry(
+        _entry([{"codec_raw": "eac3", "language": "ger"}, {"codec_raw": "eac3", "language": "eng"}], orig_lang="en")
+    )
+    assert c["audio_ok"] is False, "German dub track is foreign junk to strip (Pocahontas case)"
+
+
+def test_norwegian_bokmaal_is_the_original():
+    """`nob` (Norwegian Bokmål) IS the original for a Norwegian film (orig=no) —
+    the variant must be credited, not flagged as foreign (Sentimental Value)."""
+    c = _compliance_for_entry(_entry([{"codec_raw": "eac3", "language": "nob"}], orig_lang="no"))
+    assert c["audio_ok"] is True, "nob is Norwegian; orig=no must accept it"
+
+
+def test_keeper_langs_include_norwegian_variants():
+    """tmdb_keeper_langs must expand Norwegian to its Bokmål/Nynorsk variants."""
+    from pipeline.streams import tmdb_keeper_langs
+
+    keepers = tmdb_keeper_langs("no")
+    assert "nob" in keepers and "nno" in keepers
