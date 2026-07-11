@@ -61,7 +61,9 @@ def log(m: str) -> None:
 
 
 def _run(cmd: list, timeout: int = 14400) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    # encoding/errors mandatory — ffmpeg/ffprobe echo the input path; a non-cp1252
+    # filename char otherwise crashes the reader thread on Windows (see grain_risk).
+    return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
 
 
 def _hms(t: str) -> float:

@@ -158,7 +158,10 @@ class ProcessManager:
             # macron 'ā') raises UnicodeEncodeError and kills the whole process
             # (reclaim died exit 1 this way on 2026-07-11). encoding/errors on the
             # parent reader side stops a stray byte crashing the reader thread.
-            env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+            # PYTHONUTF8=1 puts the whole child interpreter in UTF-8 mode (stdio,
+            # open() default, AND subprocess text-mode decode) so no ffmpeg-
+            # capturing tool can be killed by a non-cp1252 filename byte.
+            env = {**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
             proc = subprocess.Popen(
                 cfg["cmd"],
                 cwd=cfg["cwd"],

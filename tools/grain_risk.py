@@ -31,7 +31,11 @@ PROOF_VMAF = {
 
 
 def _run(cmd: list) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, capture_output=True, text=True)
+    # encoding/errors are mandatory: ffmpeg echoes the input path, and a filename
+    # with a non-cp1252 character (e.g. 'Sirāt', ā = UTF-8 0xC4 0x81) otherwise
+    # crashes the subprocess reader thread on the Windows default codepage,
+    # leaving stdout/stderr None (reclaim died on this 2026-07-11).
+    return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
 
 
 def _yavg(path: str, t: float, secs: int = 2) -> float | None:
@@ -39,7 +43,7 @@ def _yavg(path: str, t: float, secs: int = 2) -> float | None:
         "ffmpeg", "-hide_banner", "-nostats", "-ss", str(int(t)), "-i", path, "-t", str(secs),
         "-an", "-vf", "signalstats,metadata=print:file=-", "-f", "null", "-",
     ])
-    vals = [float(m) for m in re.findall(r"signalstats\.YAVG=([\d.]+)", r.stdout + r.stderr)]
+    vals = [float(m) for m in re.findall(r"signalstats\.YAVG=([\d.]+)", (r.stdout or "") + (r.stderr or ""))]
     return sum(vals) / len(vals) if vals else None
 
 
@@ -49,7 +53,7 @@ def _grain(path: str, t: float, secs: int = 2) -> float | None:
         "ffmpeg", "-hide_banner", "-nostats", "-ss", str(int(t)), "-i", path, "-t", str(secs),
         "-an", "-filter_complex", "split[a][b];[b]hqdn3d=4:3:6:4[d];[a][d]ssim", "-f", "null", "-",
     ])
-    m = re.search(r"SSIM.*?All:([\d.]+)", r.stderr)
+    m = re.search(r"SSIM.*?All:([\d.]+)", r.stderr or "")
     return float(m.group(1)) if m else None
 
 
