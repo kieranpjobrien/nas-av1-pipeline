@@ -140,6 +140,18 @@ def _normalise_genres(tmdb: dict | None) -> set[str]:
     return out
 
 
+def is_animated(tmdb: dict | None) -> bool:
+    """True if TMDb classifies this title as Animation.
+
+    Single source of truth for every animation-gated rule: the grade offsets
+    below, the dual-audio keep policy (``should_keep_dual_audio``), and the
+    dashboard compliance check. Animated content keeps BOTH its original-
+    language audio and the English dub — young viewers watch the dub, the
+    original is preserved (generalised from the Studio Ghibli roster
+    2026-07-11)."""
+    return "animation" in _normalise_genres(tmdb)
+
+
 def _normalise_keywords(tmdb: dict | None) -> set[str]:
     """Return TMDb keywords as a lowercased set. TMDb keywords come as a
     list of plain strings via the scanner's enrichment pipeline."""

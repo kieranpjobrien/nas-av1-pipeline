@@ -469,11 +469,14 @@ def should_keep_dual_audio(file_entry: dict, config: dict) -> bool:
     """True if this film should keep BOTH its original-language audio AND the
     English dub, instead of stripping down to the original only.
 
-    Two triggers, either sufficient:
+    Three triggers, any sufficient:
       1. ``config["audio_keep_english_with_original"]`` - global opt-in.
-      2. The film's ``tmdb.director`` is in ``config["dual_audio_directors"]``
-         (default: the Studio Ghibli roster), so kids can watch the English dub
-         while adults pick the original language + subtitles.
+      2. The title is Animation (TMDb genre). Generalised from the Ghibli
+         roster 2026-07-11: ALL animated content keeps both languages, because
+         the young viewer watches the English dub while the original is kept.
+      3. The film's ``tmdb.director`` is in ``config["dual_audio_directors"]``
+         (default: the Studio Ghibli roster) - retained as a fallback for
+         titles whose Animation genre didn't come through TMDb enrichment.
 
     Consumed by BOTH audio-strip paths (the encoder and the gap-filler) so they
     keep the same tracks - divergence between the two was the 2026-04-23 audio
@@ -481,8 +484,14 @@ def should_keep_dual_audio(file_entry: dict, config: dict) -> bool:
     """
     if config.get("audio_keep_english_with_original", False):
         return True
+    tmdb = file_entry.get("tmdb") or {}
+    # Animation genre -> dual-audio (generalised from the Ghibli director roster).
+    from pipeline.content_grade import is_animated
+
+    if is_animated(tmdb):
+        return True
     directors = config.get("dual_audio_directors") or []
-    director = ((file_entry.get("tmdb") or {}).get("director") or "").strip().lower()
+    director = (tmdb.get("director") or "").strip().lower()
     return bool(director) and director in {str(d).strip().lower() for d in directors}
 
 

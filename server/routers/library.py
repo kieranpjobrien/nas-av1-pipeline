@@ -13,6 +13,7 @@ from fastapi import APIRouter, HTTPException
 
 from paths import MEDIA_REPORT
 from pipeline.config import ENG_LANGS, KEEP_LANGS
+from pipeline.content_grade import is_animated
 from pipeline.streams import is_hi_external, is_hi_internal, tmdb_keeper_langs
 from pipeline.subs_exclusion import is_subs_optional
 from server.helpers import read_report_cached
@@ -138,10 +139,19 @@ def _compliance_for_entry(entry: dict, keep_langs: set[str] | None = None) -> di
         else:
             stream_langs = {_stream_lang(a) for a in audio_streams}
             has_keeper = bool(stream_langs & audio_keepers)  # original / und / zxx present
+            has_english = bool(stream_langs & ENG_LANGS)
             foreign = stream_langs - audio_keepers - ENG_LANGS  # genuine foreign dub track(s)
             audio_lang_ok = has_keeper and not foreign
             if not audio_lang_ok:
                 violations.append("audio_foreign_language")
+            # Animated content must carry BOTH the original AND the English dub
+            # (dual-audio): the young viewer watches the dub, the original is
+            # kept. A foreign-origin animated film with its original but NO
+            # English is still incomplete — Totoro without the dub she watches
+            # (2026-07-11, generalised from the Ghibli/Totoro rule).
+            if audio_lang_ok and orig_lang not in ENG_LANGS and not has_english and is_animated(tmdb):
+                audio_lang_ok = False
+                violations.append("audio_animated_missing_english")
 
     audio_ok = audio_codec_ok and audio_lang_ok
 

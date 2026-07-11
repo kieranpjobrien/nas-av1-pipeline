@@ -136,3 +136,43 @@ def test_keeper_langs_include_norwegian_variants():
 
     keepers = tmdb_keeper_langs("no")
     assert "nob" in keepers and "nno" in keepers
+
+
+# --- Animated content requires dual audio (2026-07-11, Totoro rule generalised) -
+# The little one watches the English dub; the original is kept. So a foreign-
+# origin animated film must carry BOTH the original AND English.
+
+
+def _animated(audio, orig_lang="ja"):
+    e = _entry(audio, orig_lang=orig_lang)
+    e["tmdb"]["genres"] = [{"name": "Animation"}]
+    return e
+
+
+def test_animated_foreign_original_only_needs_english_dub():
+    """Totoro with only Japanese (no English dub) is incomplete."""
+    c = _compliance_for_entry(_animated([{"codec_raw": "eac3", "language": "jpn"}]))
+    assert c["audio_ok"] is False
+    assert "audio_animated_missing_english" in c["violations"]
+
+
+def test_animated_foreign_with_dual_audio_is_compliant():
+    c = _compliance_for_entry(
+        _animated([{"codec_raw": "eac3", "language": "jpn"}, {"codec_raw": "eac3", "language": "eng"}])
+    )
+    assert c["audio_ok"] is True
+    assert "audio_animated_missing_english" not in c["violations"]
+
+
+def test_animated_english_origin_compliant_with_english_only():
+    """English-origin animation (Disney) is complete with English — 'both' only
+    bites for foreign-origin animation."""
+    c = _compliance_for_entry(_animated([{"codec_raw": "eac3", "language": "eng"}], orig_lang="en"))
+    assert c["audio_ok"] is True
+
+
+def test_live_action_foreign_original_only_stays_compliant():
+    """The dual-audio requirement is animation-only — a live-action foreign film
+    with just its original language is still compliant (no genres = not animated)."""
+    c = _compliance_for_entry(_entry([{"codec_raw": "eac3", "language": "jpn"}], orig_lang="ja"))
+    assert c["audio_ok"] is True

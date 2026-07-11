@@ -42,3 +42,26 @@ def test_non_ghibli_and_missing_director_do_not_trigger():
 def test_global_flag_forces_dual_audio_for_everything():
     cfg = {"audio_keep_english_with_original": True, "dual_audio_directors": []}
     assert should_keep_dual_audio(_entry("Christopher Nolan"), cfg) is True
+
+
+# --- Generalised 2026-07-11: ANY animated title keeps both languages ----------
+
+
+def _animated(director=None, genres=("Animation",), orig="ja"):
+    return {"tmdb": {"director": director, "original_language": orig,
+                     "genres": [{"name": g} for g in genres]}}
+
+
+def test_animation_genre_triggers_dual_audio_without_ghibli_director():
+    """A non-Ghibli anime keeps both languages purely on the Animation genre."""
+    cfg = build_config({})
+    assert should_keep_dual_audio(_animated(director="Mamoru Hosoda"), cfg) is True
+    assert should_keep_dual_audio(_animated(director=None), cfg) is True
+
+
+def test_live_action_foreign_does_not_trigger_dual_audio():
+    """The generalisation must not sweep in live-action foreign films."""
+    cfg = build_config({})
+    entry = {"tmdb": {"director": "Bong Joon-ho", "original_language": "ko",
+                      "genres": [{"name": "Thriller"}]}}
+    assert should_keep_dual_audio(entry, cfg) is False
