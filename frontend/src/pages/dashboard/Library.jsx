@@ -73,13 +73,17 @@ const isEng = (s) => {
 const drillFailures = {
   // Non-AV1 video
   video: (f) => (f.codec || "").toLowerCase() !== "av1",
-  // Any audio stream not EAC-3 OR foreign-language audio (stricter audio_ok rule)
+  // Non-compliant audio codec. MUST match the backend audio_codec_ok
+  // (_compliance_for_entry): EAC-3 is the target codec and TrueHD is the
+  // mandatory Atmos passthrough (rule 9a) — BOTH are compliant. Omitting
+  // truehd here made the EAC-3 drill flag every TrueHD/Atmos film (e.g. LotR
+  // Return of the King) that the KPI count correctly treats as done — the
+  // drill and the KPI disagreed (fixed 2026-07-13).
   audio: (f) => {
     const audio = f.audio || [];
     if (audio.length === 0) return true; // zero-audio is non-compliant
-    if (audio.some((a) => !["eac3", "e-ac-3"].includes((a.codec_raw || a.codec || "").toLowerCase())))
-      return true;
-    return false;
+    const OK = ["eac3", "e-ac-3", "truehd"];
+    return audio.some((a) => !OK.includes((a.codec_raw || a.codec || "").toLowerCase()));
   },
   // English subs missing
   subs: (f) => {
