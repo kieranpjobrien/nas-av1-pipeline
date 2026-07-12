@@ -14,7 +14,7 @@ from fastapi import APIRouter, HTTPException
 from paths import MEDIA_REPORT
 from pipeline.config import ENG_LANGS, KEEP_LANGS
 from pipeline.content_grade import is_animated
-from pipeline.streams import is_hi_external, is_hi_internal, tmdb_keeper_langs
+from pipeline.streams import is_hi_external, is_hi_internal, parse_sub_stream, tmdb_keeper_langs
 from pipeline.subs_exclusion import is_subs_optional
 from server.helpers import read_report_cached
 
@@ -187,7 +187,16 @@ def _compliance_for_entry(entry: dict, keep_langs: set[str] | None = None) -> di
     hi_eng_external = sum(1 for s in ext_subs if _eng(s.get("language")) and is_hi_external(s.get("filename") or ""))
     hi_eng_count = hi_eng_internal + hi_eng_external
 
-    non_keep_internal = sum(1 for s in sub_streams if _stream_lang(s) not in keep_langs)
+    # Forced subs of ANY language are legitimate "foreign-parts" tracks — they
+    # translate on-screen foreign text / the odd foreign line, and the encoder's
+    # strip policy (select_sub_keep_indices) deliberately KEEPS them. So they
+    # must not count as "foreign subs" here, or the metric can never reach 100%
+    # on films that correctly keep a 'French Forced' track (fixed 2026-07-13;
+    # was flagging 12 forced-only files like The Lovers, Twins, The White Queen).
+    non_keep_internal = sum(
+        1 for i, s in enumerate(sub_streams)
+        if _stream_lang(s) not in keep_langs and not parse_sub_stream(s, index=i).is_forced
+    )
     non_keep_external = sum(1 for s in ext_subs if _norm_lang(s.get("language") or "und") not in keep_langs)
     no_foreign_subs = (non_keep_internal + non_keep_external) == 0
 

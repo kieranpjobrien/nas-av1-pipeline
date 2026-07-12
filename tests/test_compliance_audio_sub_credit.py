@@ -130,6 +130,28 @@ def test_norwegian_bokmaal_is_the_original():
     assert c["audio_ok"] is True, "nob is Norwegian; orig=no must accept it"
 
 
+def test_forced_foreign_sub_not_counted_as_foreign():
+    """Forced foreign-parts subs (any language) are legitimate — the encoder KEEPS
+    them (select_sub_keep_indices) — so they must not fail no_foreign_subs, or the
+    metric can never hit 100% on a film with a 'French Forced' track (2026-07-13)."""
+    c = _compliance_for_entry(_entry(
+        [{"codec_raw": "eac3", "language": "eng"}],
+        subs=[{"language": "fre", "codec": "subrip", "title": "French Forced"},
+              {"language": "eng", "codec": "subrip", "title": ""}],
+    ))
+    assert c["no_foreign_subs"] is True, "a forced foreign-parts sub is not junk"
+
+
+def test_full_foreign_sub_still_counted_as_foreign():
+    """A non-forced full foreign sub IS junk to strip — must still be flagged."""
+    c = _compliance_for_entry(_entry(
+        [{"codec_raw": "eac3", "language": "eng"}],
+        subs=[{"language": "ger", "codec": "subrip", "title": ""},
+              {"language": "eng", "codec": "subrip", "title": ""}],
+    ))
+    assert c["no_foreign_subs"] is False, "a non-forced German sub is foreign junk"
+
+
 def test_keeper_langs_include_norwegian_variants():
     """tmdb_keeper_langs must expand Norwegian to its Bokmål/Nynorsk variants."""
     from pipeline.streams import tmdb_keeper_langs
