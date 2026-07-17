@@ -108,8 +108,18 @@ def test_excluded_title_with_no_subs_passes_compliance(patterns_file):
 
 
 def test_non_excluded_title_with_no_subs_still_flagged(patterns_file):
-    """Plain show with zero subs still fails compliance."""
+    """A non-excluded title that genuinely needs an English sub and has none
+    still fails compliance.
+
+    2026-07-11 policy (audio_all_english): a file whose audio is already English
+    doesn't need an English sub, so the exclusion list can only be exercised with
+    FOREIGN audio — otherwise the audio-is-English exemption, not the exclusion
+    list, is what would make it pass. Foreign (fr) audio here makes the missing
+    English sub a genuine gap that only the exclusion list could waive.
+    """
     entry = _av1_entry(r"\\NAS\Series\The Office\E01.mkv")
+    entry["audio_streams"] = [{"codec_raw": "eac3", "language": "fre"}]
+    entry["tmdb"] = {"original_language": "fr"}
     c = _compliance_for_entry(entry)
     assert c["subs_ok"] is False
     assert "subs_english_missing" in c["violations"]
@@ -157,11 +167,19 @@ def test_hi_only_english_now_counts_as_compliant():
 
 
 def test_no_english_at_all_still_flagged():
-    """File with zero English subs (HI or regular) is still missing."""
+    """File with zero English subs (HI or regular) is still missing — when the
+    audio itself isn't already English.
+
+    2026-07-11 policy (audio_all_english): English-audio files no longer need an
+    English sub, so this uses foreign (fr) audio for the missing-English rule to
+    apply. The lone French sub is both non-English (→ subs_english_missing) and
+    foreign junk (→ subs_foreign_present)."""
     entry = _av1_entry(
         r"\\NAS\Series\Some Show\E01.mkv",
         subtitle_streams=[{"language": "fre", "title": "French"}],
     )
+    entry["audio_streams"] = [{"codec_raw": "eac3", "language": "fre"}]
+    entry["tmdb"] = {"original_language": "fr"}
     c = _compliance_for_entry(entry)
     assert c["subs_ok"] is False
     assert "subs_english_missing" in c["violations"]
