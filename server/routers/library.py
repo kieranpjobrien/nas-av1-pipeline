@@ -12,6 +12,7 @@ import time
 from fastapi import APIRouter, HTTPException
 
 from paths import MEDIA_REPORT
+from pipeline.compliance import video_is_finished
 from pipeline.config import ENG_LANGS, KEEP_LANGS
 from pipeline.content_grade import is_animated
 from pipeline.streams import is_hi_external, is_hi_internal, parse_sub_stream, tmdb_keeper_langs
@@ -93,8 +94,10 @@ def _compliance_for_entry(entry: dict, keep_langs: set[str] | None = None) -> di
 
     violations: list[str] = []
 
-    # Video
-    is_av1 = entry.get("video", {}).get("codec_raw") == "av1"
+    # Video: AV1 or HEVC both count as finished (relaxed 2026-07-18, see
+    # pipeline.compliance.video_is_finished). Var kept as is_av1 for the many
+    # downstream refs — it now means "video codec is a finished target".
+    is_av1 = video_is_finished(entry.get("video", {}).get("codec_raw"))
     if not is_av1:
         violations.append("video_not_av1")
 
@@ -477,7 +480,7 @@ def get_library_completion() -> dict:
         _gap_config = _bc({})
         gap_count = 0
         for f in files:
-            if f.get("video", {}).get("codec_raw") == "av1":
+            if video_is_finished(f.get("video", {}).get("codec_raw")):
                 gaps = analyse_gaps(f, _gap_config)
                 if gaps.needs_anything:
                     gap_count += 1
@@ -491,7 +494,7 @@ def get_library_completion() -> dict:
         codec = f.get("video", {}).get("codec_raw", "?")
         codec_name = f.get("video", {}).get("codec", codec)
         res = f.get("video", {}).get("resolution_class", "?")
-        is_av1 = codec == "av1"
+        is_av1 = video_is_finished(codec)  # AV1 or HEVC = finished video
 
         a_streams = f.get("audio_streams", [])
         # Zero audio = NOT ok (see header comment - 1,787 files got misclassified

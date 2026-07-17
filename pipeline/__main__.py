@@ -54,6 +54,7 @@ except OSError:
     faulthandler.enable(all_threads=True)
 
 from paths import MEDIA_REPORT, STAGING_DIR  # noqa: E402
+from pipeline.compliance import video_is_finished  # noqa: E402
 from pipeline.config import GRADE_CQ_TOLERANCE, build_config  # noqa: E402
 from pipeline.control import PipelineControl  # noqa: E402
 from pipeline.state import FileStatus, PipelineState, is_terminal  # noqa: E402
@@ -308,10 +309,10 @@ def categorise_entry(
             # but ffprobe (truth) said "av1". To prevent this, ffprobe the
             # file before trusting the report. Cheap (~50 ms per row,
             # fires only on DONE-claimed-non-AV1 entries — small set).
-            elif codec_raw and codec_raw != "av1":
+            elif codec_raw and not video_is_finished(codec_raw):
                 # Verify via ffprobe before resetting — report may be stale.
                 live_codec = _ffprobe_video_codec(filepath)
-                if live_codec and "av1" in live_codec:
+                if live_codec and video_is_finished(live_codec):
                     # Report is stale; on-disk file IS AV1. Leave DONE alone.
                     logging.info(
                         f"  Auto-reset skipped: report says codec={codec_raw} "
@@ -330,7 +331,7 @@ def categorise_entry(
                     FileStatus.PENDING,
                     stage=None,
                     error=None,
-                    reason=f"auto-reset from {st} — ffprobe-verified codec is {live_codec or codec_raw}, not AV1",
+                    reason=f"auto-reset from {st} — ffprobe-verified codec is {live_codec or codec_raw}, not a finished (AV1/HEVC) codec",
                     force_reencode=True,
                 )
                 # Fall through to normal categorisation against the fresh entry.

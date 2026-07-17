@@ -81,8 +81,12 @@ def test_done_h264_resets_to_pending(tmp_path):
     )
 
 
-def test_done_hevc_also_resets(tmp_path):
-    """Same class for HEVC sources (Dune, Killers of the Flower Moon, etc.)."""
+def test_done_hevc_now_stays_done(tmp_path):
+    """2026-07-18 policy change: HEVC is now an accepted finished codec (see
+    pipeline.compliance.video_is_finished) — re-encoding it to AV1 for a
+    ~10-20% size gain isn't worth the GPU. A DONE HEVC row must be LEFT
+    ALONE, not auto-reset. (Was test_done_hevc_also_resets, which pinned the
+    old AV1-only policy.)"""
     state = _state(tmp_path)
     control = _control(tmp_path)
     fp = r"\\NAS\Movies\Dune (2021)\Dune (2021).mkv"
@@ -91,7 +95,8 @@ def test_done_hevc_also_resets(tmp_path):
     entry = _entry(fp, codec_raw="hevc")
 
     cat, _ = categorise_entry(entry, {}, state, control)
-    assert cat == "full_gamut"
+    assert cat == "skip", f"HEVC DONE is now accepted, must not reset; got cat={cat!r}"
+    assert state.get_file(fp)["status"] == "done"
 
 
 def test_done_av1_stays_done(tmp_path):
@@ -162,9 +167,11 @@ def test_done_with_stale_report_codec_does_not_reset_when_ffprobe_says_av1(tmp_p
     assert state.get_file(fp)["status"] == "done"
 
 
-def test_done_with_report_codec_hevc_resets_when_ffprobe_confirms_hevc(tmp_path, monkeypatch):
-    """The genuine case: report says hevc AND ffprobe confirms hevc.
-    The reset should still fire — both agree the file needs work."""
+def test_done_hevc_confirmed_stays_done(tmp_path, monkeypatch):
+    """2026-07-18: report says hevc AND ffprobe confirms hevc — HEVC is an
+    accepted finished codec now, so the file is left DONE, not re-encoded.
+    (Was test_done_with_report_codec_hevc_resets_when_ffprobe_confirms_hevc,
+    which pinned the old AV1-only reset.)"""
     state = _state(tmp_path)
     control = _control(tmp_path)
     fp = r"\NAS\Movies\GenuineHevc\GenuineHevc.mkv"
@@ -176,12 +183,10 @@ def test_done_with_report_codec_hevc_resets_when_ffprobe_confirms_hevc(tmp_path,
     monkeypatch.setattr(main_mod, "_ffprobe_video_codec", lambda fp, **kw: "hevc")
 
     cat, _ = categorise_entry(entry, {}, state, control)
-    assert cat == "full_gamut", (
-        f"genuine hevc DONE must reset for re-encode; got cat={cat!r}"
+    assert cat == "skip", (
+        f"confirmed HEVC DONE is now accepted, must not reset; got cat={cat!r}"
     )
-    row = state.get_file(fp)
-    assert row["status"] == "pending"
-    assert row.get("force_reencode") is True
+    assert state.get_file(fp)["status"] == "done"
 
 
 def test_done_ffprobe_failure_falls_back_to_report(tmp_path, monkeypatch):

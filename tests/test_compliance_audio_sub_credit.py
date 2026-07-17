@@ -39,6 +39,35 @@ def test_dts_audio_not_compliant():
     assert c["audio_ok"] is False, "DTS must still transcode to EAC-3"
 
 
+# --- Video codec: AV1 OR HEVC counts as finished (relaxed 2026-07-18) ----------
+# Routed through pipeline.compliance.video_is_finished. HEVC is now preferred at
+# acquisition and re-encoding it to AV1 for a ~10-20% size gain isn't worth the
+# GPU, so a HEVC source is "finished video" — no video_not_av1 violation. H.264
+# and below still need the encode to AV1.
+
+
+def test_hevc_video_is_finished():
+    """HEVC now counts as finished video — no video_not_av1 violation."""
+    c = _compliance_for_entry(_entry([{"codec_raw": "eac3", "language": "eng"}], codec_raw="hevc"))
+    assert c["is_av1"] is True, "HEVC is a finished target as of 2026-07-18"
+    assert "video_not_av1" not in c["violations"]
+
+
+def test_av1_video_is_finished():
+    """AV1 remains finished video (unchanged by the relax)."""
+    c = _compliance_for_entry(_entry([{"codec_raw": "eac3", "language": "eng"}], codec_raw="av1"))
+    assert c["is_av1"] is True
+    assert "video_not_av1" not in c["violations"]
+
+
+def test_h264_video_not_finished():
+    """Negative control: H.264 is NOT finished — video_not_av1 still fires so the
+    file is routed to encode to AV1."""
+    c = _compliance_for_entry(_entry([{"codec_raw": "eac3", "language": "eng"}], codec_raw="h264"))
+    assert c["is_av1"] is False, "H.264 is below HEVC and must still encode"
+    assert "video_not_av1" in c["violations"]
+
+
 def test_english_audio_without_sub_is_compliant():
     """English audio → you can hear it → a missing English sub is not a gap."""
     c = _compliance_for_entry(_entry([{"codec_raw": "eac3", "language": "eng"}], subs=[]))

@@ -633,13 +633,14 @@ def full_gamut(
         # explicitly stamped force_reencode=true via the dashboard or a
         # tool — and that flag is only set on rows where we have reliable
         # CQ data (audit source = tag or state_db, not bitrate_inferred).
+        from pipeline.compliance import video_is_finished
         existing_pre = state.get_file(filepath)
         item_codec = (item.get("video_codec") or "").lower()
-        if "av1" in item_codec:
+        if video_is_finished(item_codec):
             if not (existing_pre and existing_pre.get("force_reencode")):
                 logging.warning(
-                    f"  AV1 source without force_reencode flag: {filename} — "
-                    f"refusing re-encode to avoid wrong-direction balloon. "
+                    f"  AV1/HEVC source without force_reencode flag: {filename} — "
+                    f"refusing re-encode (finished codec; debloat handles oversized). "
                     f"Marking DONE (current state preserved)."
                 )
                 state.set_file(

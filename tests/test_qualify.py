@@ -322,8 +322,11 @@ def test_qualify_keep_lang_eng_passes_even_without_original_match(cfg):
 
 
 # ---------------------------------------------------------------------------
-# Codec-compliance gate (2026-05-22) — qualify must NOT return NOTHING_TO_DO
-# for non-AV1 sources, even if audio/subs are clean.
+# Codec-compliance gate (2026-05-22; relaxed 2026-07-18) — qualify must NOT
+# return NOTHING_TO_DO for a source that still needs encoding. As of
+# 2026-07-18 "finished video" is AV1 OR HEVC (pipeline.compliance.
+# video_is_finished): a clean HEVC source short-circuits to NOTHING_TO_DO,
+# but H.264/VC-1 and below still QUALIFY for re-encode to AV1.
 # ---------------------------------------------------------------------------
 
 
@@ -358,14 +361,33 @@ def test_qualify_vc1_source_clean_audio_must_not_short_circuit(cfg):
     assert "vc1" in result.rationale.lower() or "av1" in result.rationale.lower()
 
 
-def test_qualify_hevc_source_clean_audio_must_not_short_circuit(cfg):
-    """27 of the 29 wrongly-DONE'd files were HEVC with clean EAC-3 audio.
-    Same shape as VC-1 case — codec-compliance gate must catch it."""
+def test_qualify_hevc_source_clean_audio_now_nothing_to_do(cfg):
+    """2026-07-18 policy change: HEVC is now an accepted finished codec
+    (pipeline.compliance.video_is_finished) — re-encoding HEVC→AV1 for a
+    ~10-20% size gain isn't worth the GPU. A HEVC source with clean EAC-3
+    audio, an English sub and no gaps is NOTHING_TO_DO, not re-encoded.
+    (Was test_qualify_hevc_source_clean_audio_must_not_short_circuit, which
+    pinned the old AV1-only gate — the 29-wrongly-DONE'd incident predated
+    this relax and was legitimately caught by the gate at the time.)"""
     entry = _heat_clean_entry()
     entry["video"] = {"codec_raw": "hevc", "codec": "HEVC"}
     result = qualify_file(entry, cfg, use_whisper=False)
+    assert result.outcome == QualifyOutcome.NOTHING_TO_DO, (
+        f"HEVC source with no gaps is now finished; got "
+        f"{result.outcome.value}: {result.rationale}"
+    )
+
+
+def test_qualify_h264_source_clean_audio_must_not_short_circuit(cfg):
+    """Negative control for the 2026-07-18 relax: H.264 is NOT a finished
+    codec (video_is_finished is False for it), so a clean-audio H.264 source
+    must still QUALIFY for re-encode to AV1 — the relax only covers AV1/HEVC,
+    everything below HEVC still encodes."""
+    entry = _heat_clean_entry()
+    entry["video"] = {"codec_raw": "h264", "codec": "H.264"}
+    result = qualify_file(entry, cfg, use_whisper=False)
     assert result.outcome == QualifyOutcome.QUALIFIED, (
-        f"HEVC source must NOT be NOTHING_TO_DO; got "
+        f"H.264 source must still encode to AV1; got "
         f"{result.outcome.value}: {result.rationale}"
     )
 

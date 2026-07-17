@@ -46,6 +46,20 @@ from typing import Any
 # config explicitly lists them in ``lossless_audio_codecs``.
 TARGET_AUDIO_CODECS = frozenset({"eac3", "truehd"})
 
+
+# Video codec policy: which SOURCE codecs count as a finished target and so
+# do NOT need re-encoding. Relaxed 2026-07-18 from AV1-only to also accept
+# HEVC (h265): HEVC is now preferred at acquisition (Radarr/Sonarr custom
+# formats) and re-encoding it to AV1 for a ~10-20% size gain isn't worth the
+# GPU cost. Debloat still shrinks oversized HEVC to AV1 opportunistically.
+# NOTE: this governs SOURCE acceptance / completion stats only. The post-encode
+# OUTPUT check (``check_compliance`` below) stays AV1-only — when the pipeline
+# actually encodes, it still produces AV1.
+def video_is_finished(codec_raw: str | None) -> bool:
+    """True if the on-disk video codec is a finished target (AV1 or HEVC)."""
+    c = (codec_raw or "").lower()
+    return "av1" in c or "hevc" in c
+
 # Subtitle policy: at most 1 regular English sub. Forced-flag subs are a
 # separate slot (foreign-dialogue snippets) and are always kept regardless
 # of the regular-English count.

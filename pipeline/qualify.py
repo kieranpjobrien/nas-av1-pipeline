@@ -44,6 +44,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Optional
 
+from pipeline.compliance import video_is_finished
 from pipeline.gap_filler import analyse_gaps
 from pipeline.language import (
     clear_legacy_heuristic_detections,
@@ -447,7 +448,9 @@ def qualify_file(
     # cleanup", not "compliant".
     video = (enriched.get("video") or {})
     src_codec_raw = (video.get("codec_raw") or "").lower()
-    is_av1_source = "av1" in src_codec_raw
+    # AV1 OR HEVC counts as a finished source (relaxed 2026-07-18) — a HEVC
+    # source with no audio/sub gaps is NOTHING_TO_DO, not re-encoded to AV1.
+    is_av1_source = video_is_finished(src_codec_raw)
 
     if not gaps.needs_anything:
         if not is_av1_source:
