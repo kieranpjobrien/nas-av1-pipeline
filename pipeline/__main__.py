@@ -429,12 +429,59 @@ def categorise_entry(
         # sub because of this. Route audio-transcode files to full_gamut
         # so the encoder actually does the transcode.
         if gaps.needs_audio_transcode:
+            # full_gamut's finished-codec guard (full_gamut.py:645) marks the
+            # file DONE without transcoding unless force_reencode is stamped —
+            # same story as the priority/CQ branches above. Without the stamp
+            # the intended transcode never runs (the LotR-AC-3 / Opus-on-Sonos
+            # class of silent-wrong-audio DONE). Stamp it so the encode runs.
+            if not (existing and existing.get("force_reencode")):
+                _stamp_force_reencode(state, filepath, existing,
+                                      reason="audio needs transcode to eac-3")
             return ("full_gamut", _build_full_gamut_item(entry))
         if gaps.needs_anything:
             return ("gap_filler", entry)
         return ("skip", None)
 
-    # Non-AV1 → full re-encode
+    # ── Finished video that isn't AV1 (HEVC) ──────────────────────────────
+    # compliance.video_is_finished() accepts HEVC as a finished encode target
+    # (2026-07-18), so we don't re-encode the video. But the audio + subtitle
+    # policy still applies. Falling through to the "full re-encode" catch-all
+    # below lands HEVC in full_gamut, whose finished-codec guard (full_gamut.py
+    # :645) marks it DONE WITHOUT transcoding audio / stripping foreign tracks
+    # / muxing subs — silently shipping DTS/AAC/FLAC/Opus HEVC as "done" (the
+    # 2026-04-23 audio-loss class, at HEVC-library scale). Route it like the
+    # AV1 branch. No CQ-adherence check: CQ parity is an AV1-target concept and
+    # HEVC carries no comparable tag, so a spurious CQ mismatch mustn't trigger
+    # a re-encode here.
+    if video_is_finished(codec_raw):
+        if priority_paths and filepath in priority_paths:
+            if not (existing and existing.get("force_reencode")):
+                _stamp_force_reencode(state, filepath, existing,
+                                      reason="priority.json membership")
+            return ("full_gamut", _build_full_gamut_item(entry))
+        if existing and existing.get("force_reencode"):
+            return ("full_gamut", _build_full_gamut_item(entry))
+        gaps = analyse_gaps(entry, config)
+        if gaps.needs_audio_transcode:
+            # Audio isn't EAC-3/TrueHD. Route to full_gamut with the force
+            # stamp so the guard lets the encode run; it produces AV1 + EAC-3
+            # and brings the audio into policy. (A file that needs an audio
+            # transcode was never really "finished".)
+            if not (existing and existing.get("force_reencode")):
+                _stamp_force_reencode(state, filepath, existing,
+                                      reason="finished-video audio needs transcode to eac-3")
+            return ("full_gamut", _build_full_gamut_item(entry))
+        if gaps.needs_anything:
+            # Subtitle / track-strip / metadata only (no audio transcode) —
+            # gap_filler handles it (no GPU, fetch-free for this case).
+            return ("gap_filler", entry)
+        # Finished video, audio + subs already compliant → nothing to do.
+        # Skip (like the compliant-AV1 tail above); the compliance metric
+        # counts it finished via video_is_finished regardless of pipeline
+        # status, so accounting stays correct without a DONE write here.
+        return ("skip", None)
+
+    # Non-finished codec (H.264, VC-1, MPEG-2, VP9, …) → full re-encode to AV1.
     return ("full_gamut", _build_full_gamut_item(entry))
 
 
