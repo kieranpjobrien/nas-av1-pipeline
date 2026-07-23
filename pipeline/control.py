@@ -35,6 +35,12 @@ class PipelineControl:
         "subs_optional.json": {
             "patterns": [],
         },
+        # Titles the user accepts in a non-original-language audio track
+        # (e.g. Leone's English-canonical Dollars westerns). Matching logic
+        # lives in pipeline/audio_exclusion.py.
+        "audio_foreign_ok.json": {
+            "patterns": [],
+        },
     }
 
     def __init__(self, staging_dir: str):

@@ -56,6 +56,23 @@ def title_year(name):
     return title, year
 
 
+def _remove_if_present(fp):
+    """Delete the local file, tolerating the case where Radarr/Sonarr's
+    moviefile/episodefile DELETE already removed it.
+
+    Bug fixed 2026-07-14: ``DELETE /api/v3/moviefile/{id}`` removes the
+    physical file from disk, so the subsequent ``os.remove`` raced and
+    raised ``FileNotFoundError`` (WinError 2) — which aborted resource()
+    BEFORE it triggered the re-grab search or cleared the state row,
+    stranding files as "deleted but never re-sourced". An os.path.exists
+    guard didn't help (SMB attribute cache returns stale True). Swallow
+    the not-found instead."""
+    try:
+        os.remove(fp)
+    except FileNotFoundError:
+        pass  # arr already deleted it — expected, not an error
+
+
 def resource(fp, state, con):
     """Delete + re-grab. Returns a status string. Locate-before-delete guard."""
     posix = fp.replace("\\", "/")
@@ -74,8 +91,7 @@ def resource(fp, state, con):
             return f"SKIP (S{season:02}E{epnum:02} not in Sonarr — not deleted)"
         if ep.get("episodeFileId"):
             sonarr._request("DELETE", f"/api/v3/episodefile/{ep['episodeFileId']}")
-        if os.path.exists(fp):
-            os.remove(fp)
+        _remove_if_present(fp)
         sonarr._request("POST", "/api/v3/command", body={"name": "EpisodeSearch", "episodeIds": [int(ep["id"])]})
         con.execute("DELETE FROM pipeline_files WHERE filepath=?", (fp,))
         con.commit()
@@ -88,8 +104,7 @@ def resource(fp, state, con):
         mfid = (movie.get("movieFile") or {}).get("id")
         if mfid:
             radarr._request("DELETE", f"/api/v3/moviefile/{mfid}")
-        if os.path.exists(fp):
-            os.remove(fp)
+        _remove_if_present(fp)
         radarr.trigger_search(int(movie["id"]))
         con.execute("DELETE FROM pipeline_files WHERE filepath=?", (fp,))
         con.commit()

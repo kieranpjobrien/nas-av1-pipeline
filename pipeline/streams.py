@@ -154,6 +154,7 @@ _ISO1_TO_ISO2: dict[str, str] = {
     "th": "tha",
     "he": "heb",
     "el": "gre",
+    "fa": "per",  # Persian: TMDb `fa` → MKV tag `per`; keeps the original track (2026-07-14)
 }
 
 # Macro-language variants: a TMDb original_language whose audio is routinely

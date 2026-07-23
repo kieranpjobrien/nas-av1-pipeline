@@ -44,6 +44,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Optional
 
+from pipeline.audio_exclusion import is_foreign_audio_ok
 from pipeline.compliance import video_is_finished
 from pipeline.gap_filler import analyse_gaps
 from pipeline.language import (
@@ -165,6 +166,11 @@ _ISO1_EQUIV: dict[str, set[str]] = {
     "cs": {"cs", "ces", "cze", "czech"},
     "tr": {"tr", "tur", "turkish"},
     "he": {"he", "heb", "hebrew"},
+    # Persian/Farsi: TMDb reports `fa`; MKV tags use `per` (ISO 639-2/B) or
+    # `fas` (639-2/T); whisper returns `fa`. Without this bucket, A Separation
+    # (orig=fa, audio tagged `per`) false-flagged as foreign audio and stalled
+    # in flagged_foreign_audio (2026-07-14).
+    "fa": {"fa", "per", "fas", "persian", "farsi"},
     "th": {"th", "tha", "thai"},
     "vi": {"vi", "vie", "vietnamese"},
     "el": {"el", "ell", "gre", "greek"},
@@ -410,6 +416,17 @@ def qualify_file(
                     f"original_language={original_lang}"
                 )
                 return result
+            elif is_foreign_audio_ok(filepath):
+                # User opted this title out of the foreign-audio policy
+                # (English-canonical films: Leone's Dollars trilogy, HK films
+                # watched in the English dub, ...). Accept the audio as-is and
+                # let it fall through to the encode gate rather than flagging.
+                # 2026-07-14.
+                logger.info(
+                    "  %s: foreign audio accepted via audio_foreign_ok override "
+                    "(original_language=%s)", name, original_lang,
+                )
+                # fall through to the codec-compliance gate below
             else:
                 # We have at least one CONFIDENTLY-detected track and none
                 # match the original. That's a real foreign-only file

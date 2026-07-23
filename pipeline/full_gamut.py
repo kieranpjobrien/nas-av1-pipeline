@@ -444,39 +444,45 @@ def _prepare_for_encode_locked(
                 actual_input = remuxed_path
 
         # === STEP 5c0: Source-corruption probe (2026-05-13 phase 3) ===
-        # Catch Ford-v-Ferrari class broken sources BEFORE the GPU
-        # spins up. The post-encode integrity check used to find these
-        # at ~13% into a 90-min encode; cheaper to probe the local
-        # fetched file in ~10-20s and never start the encode.
-        from tools.probe_source_integrity import probe_file as _probe_source
+        # Catch Ford-v-Ferrari class broken sources BEFORE the GPU spins up.
+        # 2026-07-15: HONOUR force_reencode. If the user forced this encode,
+        # the source is fine by their decision — a false-positive probe must
+        # NOT re-flag it corrupt and feed the re-source loop that stranded
+        # ~14 files for weeks. Forced encode == "encode it, don't second-guess".
+        if existing and existing.get("force_reencode"):
+            logging.info(
+                "  prep: force_reencode=true → skipping source-integrity probe (user override)"
+            )
+        else:
+            from tools.probe_source_integrity import probe_file as _probe_source
 
-        probe_result = _probe_source(actual_input)
-        if not probe_result.healthy:
-            broken_summary = (
-                probe_result.fatal
-                or f"decode errors in windows={','.join(probe_result.windows_failed)}"
+            probe_result = _probe_source(actual_input)
+            if not probe_result.healthy:
+                broken_summary = (
+                    probe_result.fatal
+                    or f"decode errors in windows={','.join(probe_result.windows_failed)}"
+                )
+                logging.error(
+                    f"  prep: source-integrity probe FAILED — {broken_summary}. "
+                    f"Sample: {(probe_result.sample_errors[0] if probe_result.sample_errors else '')[:160]}"
+                )
+                state.set_file(
+                    filepath,
+                    FileStatus.FLAGGED_CORRUPT,
+                    error=f"source corruption (prep-time probe): {broken_summary}",
+                    stage="prep_source_integrity",
+                    source_corrupt=True,
+                    source_probe_at=__import__("time").time(),
+                    source_probe_windows=probe_result.windows_failed,
+                    source_probe_errors=probe_result.sample_errors[:3],
+                    force_reencode=False,
+                )
+                _cleanup(local_path, remuxed_path, None)
+                return None
+            logging.info(
+                f"  prep: source-integrity OK (probed {probe_result.duration_seconds:.0f}s "
+                f"in {probe_result.probe_time_secs:.1f}s)"
             )
-            logging.error(
-                f"  prep: source-integrity probe FAILED — {broken_summary}. "
-                f"Sample: {(probe_result.sample_errors[0] if probe_result.sample_errors else '')[:160]}"
-            )
-            state.set_file(
-                filepath,
-                FileStatus.FLAGGED_CORRUPT,
-                error=f"source corruption (prep-time probe): {broken_summary}",
-                stage="prep_source_integrity",
-                source_corrupt=True,
-                source_probe_at=__import__("time").time(),
-                source_probe_windows=probe_result.windows_failed,
-                source_probe_errors=probe_result.sample_errors[:3],
-                force_reencode=False,
-            )
-            _cleanup(local_path, remuxed_path, None)
-            return None
-        logging.info(
-            f"  prep: source-integrity OK (probed {probe_result.duration_seconds:.0f}s "
-            f"in {probe_result.probe_time_secs:.1f}s)"
-        )
 
         # === STEP 5c: Pre-encode stream strip (2026-05-13) ===
         # Run mkvmerge against the LOCAL file to drop foreign audio,

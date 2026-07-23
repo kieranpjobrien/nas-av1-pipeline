@@ -79,6 +79,34 @@ def test_empty_and_none_safe():
     assert equivalence_bucket("  ") == set()
 
 
+def test_persian_fa_per_equivalent():
+    """2026-07-14 regression: A Separation (2011) has TMDb original_language
+    'fa' and a single Persian audio track that ffprobe tags 'per' (ISO
+    639-2/B). Before the fix there was no 'fa' bucket at all, so
+    ``_languages_equivalent('per', 'fa')`` was False and the file stalled
+    in flagged_foreign_audio — the pipeline had a legit original-language
+    track and refused it."""
+    from pipeline.qualify import _languages_equivalent
+
+    assert _languages_equivalent("per", "fa"), (
+        "Persian 'per' audio tag must match TMDb original_language 'fa'"
+    )
+    assert _languages_equivalent("fas", "fa")
+    assert equivalence_bucket("fa") == equivalence_bucket("per")
+
+
+def test_persian_original_track_kept_not_stripped():
+    """The strip side must ALSO recognise 'per' as the Persian original, or
+    the encode would drop the only audio track. tmdb_keeper_langs('fa')
+    must include the 'per' tag."""
+    from pipeline.streams import tmdb_keeper_langs
+
+    keepers = tmdb_keeper_langs("fa")
+    assert keepers is not None and "per" in keepers, (
+        "fa-original files must keep their 'per'-tagged Persian audio"
+    )
+
+
 def test_compliance_uses_reverse_lookup_for_cn():
     """End-to-end: simulate a Chinese-origin film whose TMDb returns 'cn'
     and whose MKV audio is tagged 'chi'. The check_compliance call must
