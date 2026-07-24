@@ -65,7 +65,9 @@ def main() -> int:
     print(f"\n{renamed_count} files renamed on NAS")
 
     # State DB updates
-    con = sqlite3.connect("F:/AV1_Staging/pipeline_state.db")
+    from paths import PIPELINE_STATE_DB  # noqa: PLC0415
+
+    con = sqlite3.connect(str(PIPELINE_STATE_DB))
     cur = con.cursor()
     db_updates = 0
     for src, dst in renames:

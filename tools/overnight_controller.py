@@ -19,7 +19,11 @@ import subprocess
 import sqlite3
 import time
 
-STAGING = "F:/AV1_Staging"
+from paths import STAGING_DIR  # noqa: E402
+
+# Env-backed, never a hardcoded drive — the staging root moved to NVMe
+# 2026-07-25 and a stale literal would point this at the old tree.
+STAGING = str(STAGING_DIR).replace("\\", "/")
 LOG = f"{STAGING}/overnight_controller.log"
 PAUSE = f"{STAGING}/control/pause_reclaim.json"
 STATE_DB = f"{STAGING}/pipeline_state.db"

@@ -22,8 +22,13 @@ sys.path.insert(0, "D:/MediaProject")
 from pipeline.state import FileStatus, PipelineState
 from tools import radarr, sonarr
 
-LOG = "F:/AV1_Staging/corrupt_handler.log"
-STATE_DB = "F:/AV1_Staging/pipeline_state.db"
+# Derive from paths (env-backed), never hardcode the staging drive. A stale
+# literal here would point this tool at an OLD state DB after the staging move,
+# and it DELETES media based on what it reads. (2026-07-25)
+from paths import STAGING_DIR  # noqa: E402
+
+LOG = str(STAGING_DIR / "corrupt_handler.log")
+STATE_DB = str(STAGING_DIR / "pipeline_state.db")
 # A `fatal` result means the probe could not reach a verdict (e.g. the duration
 # probe timed out on a slow SMB read of a 40 GB 4K file) — NOT that the media is
 # bad. Report it distinctly so the caller can leave the file alone; collapsing it
