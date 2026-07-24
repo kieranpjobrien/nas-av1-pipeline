@@ -697,6 +697,47 @@ def full_gamut(
         return False
 
 
+def _with_cq(cmd: list[str], cq: int) -> list[str]:
+    """Return a copy of an ffmpeg command with the ``-cq`` value replaced.
+
+    Used by the bloat-retry loop to re-encode a bloating file at a higher CQ
+    without rebuilding the whole command (which would re-run stream selection).
+    """
+    new = list(cmd)
+    for i, tok in enumerate(new):
+        if tok == "-cq" and i + 1 < len(new):
+            new[i + 1] = str(cq)
+            break
+    return new
+
+
+def _bloat_retry_plan(
+    output_size: int,
+    input_size: int,
+    base_cq: int,
+    attempt: int,
+    *,
+    max_retries: int = 2,
+    cq_bump: int = 6,
+) -> tuple[str, int | None]:
+    """Decide what to do once an encode's output size is known.
+
+    NVENC's ``-cq -rc vbr -b:v 0`` treats ``-maxrate`` as advisory, so grainy /
+    4K-HDR sources can encode LARGER than their source (Ant-Man 10.6->13.8 GB,
+    The Avengers 13.4->16.6 GB both shipped past the AV1-only grow-refuse).
+    Policy (user, 2026-07-24): never ship an output bigger than its source —
+    retry at a higher CQ until it fits, then ship; flag + keep source if even
+    the tightest attempt bloats.
+
+    Returns ``("ship", None)`` | ``("retry", new_cq)`` | ``("flag", None)``.
+    """
+    if output_size <= input_size:
+        return ("ship", None)
+    if attempt >= max_retries:
+        return ("flag", None)
+    return ("retry", int(base_cq) + cq_bump * (attempt + 1))
+
+
 def _encode_only(
     filepath: str,
     item: dict,
@@ -843,6 +884,68 @@ def _encode_only(
             f"{format_bytes(input_size)} -> {format_bytes(output_size)} "
             f"({ratio:.1f}% reduction, {format_bytes(abs(saved))} {'saved' if saved > 0 else 'added'})"
         )
+
+        # === Source-relative bloat guard: retry tighter, then convert ===
+        # If the output came out bigger than the source (NVENC's advisory
+        # -maxrate lets grainy / 4K-HDR content bloat), re-encode at a higher CQ
+        # until it fits under the source. Ship the first attempt that fits; if
+        # even the tightest attempt bloats, keep the source and flag rather than
+        # ship zero-benefit bloat (user policy 2026-07-24, after Ant-Man/Avengers
+        # shipped +30%/+24%). The prior grow-refuse was AV1->AV1 only.
+        _bloat_attempt = 0
+        while True:
+            _action, _retry_cq = _bloat_retry_plan(
+                output_size, input_size, params.get("cq", 30), _bloat_attempt
+            )
+            if _action == "ship":
+                break
+            if _action == "flag":
+                logging.warning(
+                    f"  Bloat persists after {_bloat_attempt} "
+                    f"retr{'y' if _bloat_attempt == 1 else 'ies'}: "
+                    f"{format_bytes(input_size)} -> {format_bytes(output_size)} — "
+                    f"keeping source, flagging for review."
+                )
+                _cleanup(local_path, remuxed_path, output_path)
+                state.set_file(
+                    filepath,
+                    FileStatus.FLAGGED_MANUAL,
+                    stage="bloat",
+                    reason=(
+                        f"AV1 output exceeds source at all CQ "
+                        f"({format_bytes(input_size)} -> {format_bytes(output_size)}); source kept"
+                    ),
+                )
+                return False
+            # _action == "retry"
+            _bloat_attempt += 1
+            logging.warning(
+                f"  Bloat: {format_bytes(output_size)} > source "
+                f"{format_bytes(input_size)} — retry {_bloat_attempt} at CQ {_retry_cq}"
+            )
+            _retry_cmd = _with_cq(cmd, _retry_cq)
+            encode_info = {}
+            if gpu_semaphore is not None:
+                with gpu_semaphore:
+                    success = _run_encode(
+                        _retry_cmd, actual_input, output_path, item, config, state,
+                        filepath, result_out=encode_info,
+                    )
+            else:
+                success = _run_encode(
+                    _retry_cmd, actual_input, output_path, item, config, state,
+                    filepath, result_out=encode_info,
+                )
+            if not success:
+                _cleanup(local_path, remuxed_path, output_path)
+                return False
+            output_size = os.path.getsize(output_path)
+            saved = input_size - output_size
+            ratio = (1 - output_size / input_size) * 100 if input_size > 0 else 0
+            logging.info(
+                f"  Re-encoded at CQ {_retry_cq}: {format_bytes(input_size)} -> "
+                f"{format_bytes(output_size)} ({ratio:.1f}% reduction)"
+            )
 
         _cleanup(local_path, remuxed_path)
 
