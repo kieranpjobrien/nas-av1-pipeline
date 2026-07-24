@@ -967,6 +967,17 @@ def _encode_only(
                 f"  Re-encoded at CQ {_retry_cq}: {format_bytes(input_size)} -> "
                 f"{format_bytes(output_size)} ({ratio:.1f}% reduction)"
             )
+            # Keep the recorded params in step with what actually encoded. The
+            # MKV CQ tag is stamped from encode_params_used, which was written
+            # once BEFORE this loop — so a file retried at CQ 34 shipped tagged
+            # CQ 22. The scanner then derives audit.current_cq from that tag and
+            # categorise_entry's CQ-adherence check reads it as on-target, so the
+            # file is never re-examined and the Grade-Optimised KPI reports a
+            # quality level the file doesn't have (rule 11). (2026-07-25)
+            params["cq"] = _retry_cq
+            state.set_file(
+                filepath, FileStatus.PROCESSING, encode_params_used=dict(params)
+            )
 
         _cleanup(local_path, remuxed_path)
 
