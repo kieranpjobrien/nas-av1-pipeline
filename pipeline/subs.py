@@ -72,10 +72,21 @@ def _parse_language_and_flags(suffix: str) -> tuple[str, list[str]]:
     language = "und"
     flags: list[str] = []
     for part in (p for p in suffix.split(".") if p):
+        low = part.lower()
+        # Flag tokens are NOT languages. _FLAG_TOKENS existed for exactly this
+        # but was never consulted, so "hi" parsed as Hindi, "cc" as Cook Islands
+        # Maori and "sdh" as a language code. A Bazarr-grabbed `Title.hi.srt`
+        # (HI-only English, the common case for older titles) therefore never
+        # matched ENG_LANGS: it was never muxed, and pick_english_sidecars put it
+        # in to_delete, which gap_filler os.remove'd. Bazarr re-grabbed it next
+        # scan and the loop repeated forever. (2026-07-25)
+        if low in _FLAG_TOKENS:
+            flags.append(low)
+            continue
         if len(part) in (2, 3) and part.isalpha() and language == "und":
-            language = part.lower()
+            language = low
         else:
-            flags.append(part.lower())
+            flags.append(low)
     return language, flags
 
 
@@ -158,23 +169,40 @@ def pick_english_sidecars(sidecars: list[SidecarSub]) -> tuple[list[SidecarSub],
     to_mux: list[SidecarSub] = []
     to_delete: list[SidecarSub] = []
 
-    # First pass: take the first regular (non-HI) English sidecar.
+    # First pass: the first FULL (non-HI, non-forced) English sidecar.
+    # is_forced was parsed into the dataclass and then never read, so with both
+    # `Title.en.forced.srt` and `Title.en.srt` present the forced one won on
+    # os.listdir order (alphabetically it precedes) — the full English subtitle
+    # was then permanently deleted and the film shipped with foreign-parts-only
+    # subs that still passed the "exactly 1 English sub" check. (2026-07-25)
     chosen: SidecarSub | None = None
     for sub in sidecars:
-        if sub.language in ENG_LANGS and not sub.is_hi:
+        if sub.language in ENG_LANGS and not sub.is_hi and not sub.is_forced:
             chosen = sub
             break
 
-    # Fallback: no regular English — take the first HI English instead.
+    # Fallback: no full English — take the first HI English instead.
     if chosen is None:
         for sub in sidecars:
-            if sub.language in ENG_LANGS and sub.is_hi:
+            if sub.language in ENG_LANGS and sub.is_hi and not sub.is_forced:
+                chosen = sub
+                break
+
+    # Last resort: a forced English sidecar is better than nothing.
+    if chosen is None:
+        for sub in sidecars:
+            if sub.language in ENG_LANGS:
                 chosen = sub
                 break
 
     for sub in sidecars:
         if sub is chosen:
             to_mux.append(sub)
+        elif sub.language in ENG_LANGS and sub.is_forced:
+            # Never delete a forced English sidecar we didn't mux — it carries
+            # foreign-dialogue translation the full sub may not, and it occupies
+            # a separate compliance slot. Leave it on disk.
+            continue
         else:
             to_delete.append(sub)
     return to_mux, to_delete

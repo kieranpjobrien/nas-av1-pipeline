@@ -665,9 +665,12 @@ def infer_audio_language(file_entry: dict, audio_idx: int) -> tuple[Optional[str
 
     track = streams[audio_idx]
     title = (track.get("title") or "").lower()
+    # Word-start match, same reason as the _TITLE_HINTS loop in
+    # _apply_title_hints: plain substring made "Bengali" read as English.
+    _tokens = re.findall(r"\w+", title)
     for hint, code in _TITLE_HINTS.items():
-        if hint in title:
-            return code, f"track title contains '{hint}'"
+        if any(tok.startswith(hint) for tok in _tokens):
+            return code, f"track title starts with '{hint}'"
 
     if len(streams) == 1:
         sub_langs = {
@@ -1802,9 +1805,17 @@ def detect_all_languages(file_entry: dict, use_whisper: bool = False) -> dict:
         # ("English 5.1", "VFF", "Castellano") and gives a high-signal label
         # when present. False positives here are rare.
         title = (stream.get("title") or "").lower()
+        # Match hints at the START OF A WORD, not anywhere in the string.
+        # `"eng" in "bengali"` is True, so a track titled "Bengali" was labelled
+        # English at 0.9 confidence — and because title hints are treated as
+        # authoritative, whisper was then SKIPPED entirely, so nothing could
+        # correct it. At 0.9 it also clears the --apply gate and gets written
+        # into the MKV, after which the provenance fields are erased. Prefix-on-
+        # token keeps "English 5.1" / "ENGSUB" working. (2026-07-25)
+        _title_tokens = re.findall(r"\w+", title)
         detected_from_title = None
         for hint, code in _TITLE_HINTS.items():
-            if hint in title:
+            if any(tok.startswith(hint) for tok in _title_tokens):
                 detected_from_title = code
                 break
 
