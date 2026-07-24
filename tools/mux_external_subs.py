@@ -44,7 +44,7 @@ except (AttributeError, OSError):
 from paths import MEDIA_REPORT
 from pipeline.circuit_breaker import CircuitBreaker, CircuitBreakerOpen
 from pipeline.gap_fill_lock import GapFillLockTimeout, gap_fill_lock
-from pipeline.nas_worker import NAS, SERVER, remote_identify, remote_strip_and_mux, unc_to_container_path
+from pipeline.nas_worker import NAS, SERVER, remote_strip_and_mux, unc_to_container_path
 from pipeline.streams import is_hi_external, is_hi_internal
 
 ENG_LANGS = {"en", "eng", "english"}
@@ -170,8 +170,10 @@ def mux_one(target: dict, machine: dict, shutdown: threading.Event | None = None
         )
         probed = json.loads(pr.stdout or "{}")
     except Exception as e:
-        try: os.remove(tmp_path)
-        except OSError: pass
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
         return "fail", f"post-mkvmerge ffprobe error: {e}"
 
     streams = probed.get("streams", []) or []
@@ -180,36 +182,46 @@ def mux_one(target: dict, machine: dict, shutdown: threading.Event | None = None
     scount = sum(1 for s in streams if s.get("codec_type") == "subtitle")
 
     if vcount < 1:
-        try: os.remove(tmp_path)
-        except OSError: pass
-        return "fail", f"verify: 0 video streams in output"
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        return "fail", "verify: 0 video streams in output"
     # Absolute floor: zero audio is NEVER a valid mux-sub output. The equality check
     # below against `expected_audio` is tautologically satisfied when the SOURCE
     # was already damaged (expected_audio=0, acount=0) — which would rubber-stamp
     # pre-existing damage as "muxed OK". Enforce a hard floor first.
     if acount < 1:
-        try: os.remove(tmp_path)
-        except OSError: pass
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
         return "fail", (
             f"verify: output has 0 audio streams (source likely already damaged; "
             f"expected_audio from scanner was {expected_audio} — refusing to "
             f"launder a zero-audio file as successful mux)"
         )
     if acount != expected_audio:
-        try: os.remove(tmp_path)
-        except OSError: pass
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
         return "fail", f"verify: audio count {acount} != expected {expected_audio}"
     if scount != expected_subs:
-        try: os.remove(tmp_path)
-        except OSError: pass
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
         return "fail", f"verify: sub count {scount} != expected {expected_subs}"
 
     # Replace source with muxed output
     try:
         os.replace(tmp_path, fp)
     except OSError as e:
-        try: os.remove(tmp_path)
-        except OSError: pass
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
         return "fail", f"replace failed: {e}"
 
     # Delete the now-internal sidecar
