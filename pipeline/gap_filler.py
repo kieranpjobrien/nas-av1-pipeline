@@ -475,7 +475,13 @@ def gap_fill(
         # Filename clean (os.rename on NAS)
         if gaps.needs_filename_clean and gaps.clean_name:
             new_path = _rename_file(filepath, gaps.clean_name)
-            if new_path:
+            if new_path and new_path != filepath:
+                # The file moved to new_path. The old-path state row is now a
+                # phantom: reconcile doesn't reap active-status rows, so it
+                # lingers in 'processing' forever and shows as stale in-flight
+                # (Bob's Burgers S16E03/E14 sat "in flight" 12h+ exactly this
+                # way). Drop it — the new_path row below carries the real work.
+                state.remove_ghosts([filepath])
                 filepath = new_path  # update path for subsequent operations
 
         # TMDb metadata (mkvpropedit on NAS)

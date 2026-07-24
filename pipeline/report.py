@@ -31,6 +31,14 @@ def probe_file(filepath: str) -> Optional[dict]:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
         if result.returncode != 0:
             return None
+        if not result.stdout:
+            # ffprobe reported success but produced no JSON. Seen on files
+            # re-probed immediately after a rename/mux (SMB cache lag) and on a
+            # child that exits 0 with an empty pipe. Treat as a probe miss —
+            # update_entry() handles None by skipping (never writes an empty
+            # entry, rule 12). This is what the bare json.loads(None) TypeError
+            # was crashing on (quick_worker → update_entry → probe_file).
+            return None
         return json.loads(result.stdout)
     except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError):
         return None
