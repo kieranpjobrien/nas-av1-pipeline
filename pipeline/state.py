@@ -362,7 +362,24 @@ class PipelineState:
             if existing_row:
                 old = dict(existing_row)
                 old.pop("filepath", None)
-                old_extras = json.loads(old.pop("extras", "{}") or "{}")
+                # Tolerate a corrupt extras blob, matching _row_to_dict's
+                # hardening. Unguarded, a single poisoned row (the observed
+                # class: '"force_reencode"E-AC-3true' interned-string
+                # corruption, Six Feet Under S03E07, 2026-05-14) made EVERY
+                # set_file for that path raise — including the error handler's
+                # own recovery write — which unwound the GPU worker thread
+                # while the process stayed alive. Encoding silently stopped and
+                # the row counters kept reporting past successes: rule 14's
+                # exact signature. Losing a corrupt blob is strictly better.
+                try:
+                    old_extras = json.loads(old.pop("extras", "{}") or "{}")
+                except (json.JSONDecodeError, TypeError):
+                    logging.warning(
+                        f"state.set_file: corrupt extras JSON for {filepath!r} — "
+                        f"discarding the blob and continuing"
+                    )
+                    old.pop("extras", None)
+                    old_extras = {}
                 # Start with existing direct cols
                 for k in _DIRECT_COLS:
                     if k in old and old[k] is not None:

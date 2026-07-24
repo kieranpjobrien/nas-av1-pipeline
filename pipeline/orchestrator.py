@@ -9,6 +9,7 @@ import logging
 import os
 import signal
 import threading
+import time
 from typing import Optional
 
 from pipeline.circuit_breaker import CircuitBreaker, CircuitBreakerOpen
@@ -649,6 +650,10 @@ class Orchestrator:
         tag_prefix = f"gpu{worker_id}"
         logging.info(f"GPU worker {worker_id} started")
         processed = 0
+        # Drain grace: cover a full queue-refresh cycle before exiting, so a
+        # drop-in that lands just after the queue empties still gets encoded.
+        drain_grace = float(self.config.get("queue_refresh_interval_secs", 1800.0)) + 120.0
+        drained_at: float | None = None
 
         while not self._shutdown.is_set():
             with self._dispatched_lock:
@@ -658,10 +663,27 @@ class Orchestrator:
 
             if item is None:
                 if self._all_done(queue):
-                    break
+                    # Don't exit the instant the queue drains. The refresh
+                    # worker merges new Sonarr/Radarr drops into THIS list on
+                    # its poll interval, and a GPU worker that has returned can
+                    # never pick them up — fetch and prep would keep preparing
+                    # files that nothing encodes, while the process still looked
+                    # healthy (rule 14: alive != working). Idle out a full
+                    # refresh cycle before concluding the backlog is finished.
+                    if drained_at is None:
+                        drained_at = time.monotonic()
+                        logging.info(
+                            f"GPU worker {worker_id}: queue drained — idling "
+                            f"{int(drain_grace)}s in case the refresh worker adds work"
+                        )
+                    elif time.monotonic() - drained_at > drain_grace:
+                        break
+                else:
+                    drained_at = None
                 self._shutdown.wait(timeout=5)
                 continue
 
+            drained_at = None
             filepath = item["filepath"]
             processed += 1
 
@@ -684,14 +706,40 @@ class Orchestrator:
             # idle for ~30-90s per file. With 2 GPU workers the slot freed by
             # one worker's prep can immediately be claimed by the other's
             # encode, keeping the NVENC chips warm.
-            encode_ok = full_gamut(
-                filepath,
-                item,
-                self.config,
-                self.state,
-                self.staging_dir,
-                gpu_semaphore=self._gpu_semaphore,
-            )
+            # Never let one file kill the encoder. This call was bare until
+            # 2026-07-25: any escaping exception (a corrupt extras blob making
+            # every state write raise, a state.save ValueError, an OSError from
+            # a vanished share) unwound the thread. With gpu_concurrency=1 that
+            # is the ONLY encoder — and run() keeps looping while fetch/prep/
+            # gap_filler live, so the process stayed "healthy" with zero
+            # encoding and the counters still reporting past successes. That is
+            # precisely the rule-14 incident shape.
+            try:
+                encode_ok = full_gamut(
+                    filepath,
+                    item,
+                    self.config,
+                    self.state,
+                    self.staging_dir,
+                    gpu_semaphore=self._gpu_semaphore,
+                )
+            except Exception as e:  # noqa: BLE001
+                encode_ok = False
+                logging.exception(
+                    f"GPU worker {worker_id}: unhandled error on "
+                    f"{os.path.basename(filepath)} — flagging and continuing: {e}"
+                )
+                try:
+                    from pipeline.state import FileStatus as _FS  # noqa: PLC0415
+
+                    self.state.set_file(
+                        filepath, _FS.ERROR, error=f"gpu worker: {e}", stage="gpu_worker"
+                    )
+                except Exception:  # noqa: BLE001
+                    logging.error(
+                        "  …and the ERROR write also failed (poisoned row?) — "
+                        "left as-is so the worker survives"
+                    )
 
             if encode_ok:
                 # Upload + verify + replace + tags + Plex scan run on the
@@ -717,8 +765,15 @@ class Orchestrator:
                         self.state.stats["errors"] = self.state.stats.get("errors", 0) + 1
                         self.state.save()
             else:
-                self.state.stats["errors"] = self.state.stats.get("errors", 0) + 1
-                self.state.save()
+                # Guarded: state.stats does an unguarded json.loads of the
+                # pipeline_stats blob and state.save() raises ValueError by
+                # design on a bad shape — neither should be able to kill the
+                # only encoder over a counter.
+                try:
+                    self.state.stats["errors"] = self.state.stats.get("errors", 0) + 1
+                    self.state.save()
+                except Exception:  # noqa: BLE001
+                    logging.exception("GPU worker: error-counter bookkeeping failed — continuing")
 
             # Release the dispatched slot. _dispatched is the "GPU worker is
             # actively processing this file" set — if we don't discard, the
@@ -1353,6 +1408,18 @@ class Orchestrator:
         # _prepping (prep_done=True) and the file becomes pickable here. Lock
         # order is _dispatched_lock (held by caller) -> _prepping_lock, which
         # matches every other site (no path takes them the other way round).
+        # 2026-07-25: prefer a file the prep worker has already FINISHED.
+        # This pass used to return any fetched file regardless of prep state, so
+        # whenever the GPU worker won the race against the single prep worker,
+        # _encode_only found no prep_data and ran prepare_for_encode inline ON
+        # THE GPU THREAD — language detect, qualify, source-integrity probe,
+        # remux and the whole-file strip — with NVENC idle the entire time.
+        # Measured over 2026-07-14..25: 28 such fallbacks cost 3.75 h of GPU
+        # idle (mean 8.0 min, worst 42.8 min), while every other encode-to-encode
+        # handoff in the same window was under 6 seconds.
+        # An unprepped-but-fetched file is still returned when nothing prepped is
+        # waiting, so a stalled prep worker can never starve the encoder.
+        unprepped: dict | None = None
         for item in queue:
             fp = item["filepath"]
             if fp in self._dispatched:
@@ -1365,7 +1432,12 @@ class Orchestrator:
             if status == FileStatus.PROCESSING.value:
                 local = existing.get("local_path")
                 if local and os.path.exists(local):
-                    return item
+                    if existing.get("prep_done"):
+                        return item
+                    if unprepped is None:
+                        unprepped = item
+        if unprepped is not None:
+            return unprepped
 
         # Second pass: pick next pending file (will need fetching).
         # Skip anything ACTIVE (qualifying/fetching/processing/uploading) —

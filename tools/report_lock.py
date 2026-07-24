@@ -65,24 +65,32 @@ def _file_lock(lock_path: Path, timeout: float = 120.0):
             break
         except FileExistsError:
             # (1) PID-alive check — fastest path for crashed owners.
+            owner_alive = False
             try:
                 with open(lock_str, "r") as f:
                     owner_pid = int(f.read().strip() or "0")
-                if not _pid_alive(owner_pid):
+                if owner_pid > 0 and not _pid_alive(owner_pid):
                     os.remove(lock_str)
                     continue
+                owner_alive = owner_pid > 0
             except (OSError, ValueError):
                 pass
 
-            # (2) Age fallback — 60s is long enough for any legitimate write-and-rename
-            # cycle (even a 50 MB JSON) but short enough to self-heal quickly.
-            try:
-                age = time.time() - os.path.getmtime(lock_str)
-                if age > 60:
-                    os.remove(lock_str)
-                    continue
-            except OSError:
-                pass
+            # (2) Age fallback — ONLY when the PID probe was inconclusive
+            # (missing/corrupt pid). Pre-2026-07-25 this ran unconditionally,
+            # so a LIVE owner lost its lock after 60s and two writers then
+            # shared the one fixed .tmp path — writer B truncating A's bytes
+            # mid-write, and A's release deleting B's lock file. A big report
+            # write (~30 MB, two parses, fsync) can legitimately exceed 60s
+            # under encoder + Defender contention.
+            if not owner_alive:
+                try:
+                    age = time.time() - os.path.getmtime(lock_str)
+                    if age > 60:
+                        os.remove(lock_str)
+                        continue
+                except OSError:
+                    pass
 
             if time.monotonic() > deadline:
                 raise TimeoutError(f"Could not acquire lock {lock_str} within {timeout}s")

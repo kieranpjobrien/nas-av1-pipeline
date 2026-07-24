@@ -1969,9 +1969,16 @@ def _incremental_save(our_report: dict, processed_entries: list[dict]) -> None:
 
     try:
         disk_report = read_report()
-    except Exception:
+    except FileNotFoundError:
+        # No report on disk yet — ours is the first. Safe to write.
         write_report(our_report)
         return
+    # Everything else (ReportCorruptError, TimeoutError) MUST propagate.
+    # read_report raises ReportCorruptError precisely so corruption fails loud;
+    # catching it here and writing our in-memory snapshot over the top was the
+    # most direct bypass of the 2026-04-29 remediation in the tree — it discards
+    # every concurrent commit since this process started and re-commits the very
+    # emptiness the guard exists to stop. (2026-07-25)
 
     our_lookup: dict[str, dict] = {}
     for entry in processed_entries:

@@ -24,11 +24,21 @@ from tools import radarr, sonarr
 
 LOG = "F:/AV1_Staging/corrupt_handler.log"
 STATE_DB = "F:/AV1_Staging/pipeline_state.db"
+# A `fatal` result means the probe could not reach a verdict (e.g. the duration
+# probe timed out on a slow SMB read of a 40 GB 4K file) — NOT that the media is
+# bad. Report it distinctly so the caller can leave the file alone; collapsing it
+# into "BAD" is what made a slow read look like corruption and delete the file.
 PROBE_CODE = (
     "import sys; sys.path.insert(0,'D:/MediaProject'); "
     "from tools.probe_source_integrity import probe_file; "
-    "r=probe_file(sys.argv[1]); print('HEALTHY' if r.healthy else 'BAD')"
+    "r=probe_file(sys.argv[1]); "
+    "print('FATAL' if r.fatal else ('HEALTHY' if r.healthy else 'BAD'))"
 )
+
+# Refuse to action more than this many files in one unattended run. A correct
+# run touches a handful; a run that wants to delete dozens is describing an
+# environment fault (unreachable share, bad probe), not dozens of broken files.
+MAX_DESTRUCTIVE_PER_RUN = 10
 
 
 def log(m):
@@ -38,15 +48,35 @@ def log(m):
 
 
 def probe(fp):
+    """Classify a file. MUST fail closed — every verdict except a clean 'BAD'
+    leaves the file alone.
+
+    Pre-2026-07-25 this returned "BAD" for *anything* that wasn't the literal
+    string "HEALTHY": non-zero exit, empty stdout, an ImportError traceback, a
+    stray warning line, ffprobe missing in the child. "BAD" routes into
+    resource() → *arr DELETE + os.remove + state-row delete, so an inconclusive
+    probe deleted healthy media. Given flagged_corrupt is mostly mis-flags, the
+    input set here is exactly the population most likely to be fine.
+    """
     if not os.path.exists(fp):
-        return "GONE"
+        # One unretried stat is not enough to conclude a file is gone — a
+        # transient SMB session drop makes every path vanish at once, and
+        # "GONE" tells the *arr to delete server-side (its own mount is still
+        # live). Re-stat before believing it.
+        time.sleep(2)
+        if not os.path.exists(fp):
+            return "GONE"
     try:
         p = subprocess.run([sys.executable, "-c", PROBE_CODE, fp], timeout=150,
                            capture_output=True, text=True, encoding="utf-8", errors="replace")
-        out = (p.stdout or "").strip().splitlines()
-        return out[0] if out and out[0] in ("HEALTHY", "BAD") else "BAD"
     except subprocess.TimeoutExpired:
         return "HUNG"
+    if p.returncode != 0:
+        return "HUNG"  # child failed — no verdict, leave the file alone
+    out = (p.stdout or "").strip().splitlines()
+    if out and out[0] in ("HEALTHY", "BAD"):
+        return out[0]
+    return "HUNG"  # includes FATAL (probe couldn't decide) and any junk output
 
 
 def title_year(name):
@@ -120,6 +150,18 @@ def main():
         log(f"ABORT — arr unreachable, no deletions: {e}")
         return
 
+    # Library roots must be reachable BEFORE we classify anything. Without this,
+    # an SMB session drop makes every os.path.exists() return False, every file
+    # classifies GONE, and each one tells the *arr to delete server-side (its
+    # mount is still live) — an unbounded mass-deletion primitive gated on one
+    # failed stat.
+    from paths import NAS_MOVIES, NAS_SERIES  # noqa: PLC0415
+
+    for root in (NAS_MOVIES, NAS_SERIES):
+        if not os.path.isdir(root):
+            log(f"ABORT — library root unreachable, no deletions: {root}")
+            return
+
     state = PipelineState(STATE_DB)
     con = sqlite3.connect(STATE_DB)
     con.row_factory = sqlite3.Row
@@ -128,6 +170,7 @@ def main():
     log(f"{len(corrupt)} flagged_corrupt to classify")
 
     tally = {"HEALTHY": 0, "BAD": 0, "GONE": 0, "HUNG": 0}
+    destructive = 0
     for fp in corrupt:
         fn = os.path.basename(fp)[:44]
         v = probe(fp)
@@ -138,6 +181,12 @@ def main():
                                reason="re-probe HEALTHY: false corrupt-flag cleared, re-queued")
                 log(f"HEALTHY  {fn} -> un-flagged, re-queued for convert")
             elif v in ("BAD", "GONE"):
+                if destructive >= MAX_DESTRUCTIVE_PER_RUN:
+                    log(f"ABORT — {MAX_DESTRUCTIVE_PER_RUN} deletions already this run; "
+                        f"refusing more (looks like an environment fault, not {len(corrupt)} "
+                        f"genuinely broken files). Remaining left flagged for review.")
+                    break
+                destructive += 1
                 res = resource(fp, state, con)
                 log(f"{v:7} {fn} -> {res}")
             else:  # HUNG

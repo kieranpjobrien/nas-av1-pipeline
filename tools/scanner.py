@@ -599,6 +599,7 @@ def _scan_body(args) -> None:
     """The actual scanner logic, invoked inside the process registry context."""
     all_files = []
 
+    missing_roots = []
     for path, lib_type in [(args.movies, "movie"), (args.series, "series")]:
         if os.path.exists(path):
             found = scan_directory(path, lib_type)
@@ -606,6 +607,19 @@ def _scan_body(args) -> None:
             print(f"Found {len(found)} video files in {path}")
         else:
             print(f"WARNING: Path not found: {path}")
+            missing_roots.append(path)
+
+    # A partial scan is a data-loss event, not a degraded result: every report
+    # entry we didn't scan gets dropped from media_report.json below, and its
+    # state rows deleted. One unreachable SMB root at the top of an hourly tick
+    # would therefore erase that whole library — the 2026-04-29 cascade through
+    # a different door, with .last_good promoted over the wipe on the next tick.
+    # Refuse to proceed instead. (2026-07-25)
+    if missing_roots:
+        raise RuntimeError(
+            f"ABORT: library root(s) unreachable: {missing_roots}. Refusing to write a "
+            "partial report — a partial scan deletes every unscanned entry."
+        )
 
     if args.limit > 0:
         all_files = all_files[: args.limit]
@@ -868,14 +882,22 @@ def _scan_body(args) -> None:
             _conn = _sqlite3.connect(PIPELINE_STATE_DB)
             _cur = _conn.cursor()
 
-            _cur.execute("SELECT filepath FROM pipeline_files WHERE status IN ('pending', 'error')")
-            stale_pending = [fp for fp, in _cur.fetchall() if fp not in current_paths]
-            for fp in stale_pending:
-                _cur.execute("DELETE FROM pipeline_files WHERE filepath = ?", (fp,))
-
+            # Both reconciles are gated on a healthy scan. Pre-2026-07-25 the
+            # pending/error delete sat OUTSIDE this guard, so a truncated scan
+            # (--limit, or a root that went missing mid-run) deleted those rows
+            # with no floor and no cap at all, while the DONE branch was
+            # protected. Same actor, same blast radius — same gate.
+            stale_pending = []
             stale_done_count = 0
             stale_done_capped = False
-            if len(current_paths) >= _MIN_HEALTHY_SCAN:
+            if args.limit > 0:
+                print("  Reconciliation skipped: --limit produces a deliberately partial scan")
+            elif len(current_paths) >= _MIN_HEALTHY_SCAN:
+                _cur.execute("SELECT filepath FROM pipeline_files WHERE status IN ('pending', 'error')")
+                stale_pending = [fp for fp, in _cur.fetchall() if fp not in current_paths]
+                for fp in stale_pending:
+                    _cur.execute("DELETE FROM pipeline_files WHERE filepath = ?", (fp,))
+
                 _cur.execute("SELECT filepath FROM pipeline_files WHERE status = 'done'")
                 stale_done = [fp for fp, in _cur.fetchall() if fp not in current_paths]
                 if len(stale_done) > _DONE_DROP_CAP:

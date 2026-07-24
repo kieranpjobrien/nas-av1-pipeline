@@ -174,7 +174,18 @@ def _try_break_stale(lock_path: Path) -> bool:
             _LOG.warning("gap_fill_lock: failed to remove stale lock: %s", e)
             return False
 
-    # (2) Age cutoff.
+    # A confirmed-live owner is NEVER stale, regardless of age. Pre-2026-07-25
+    # the age cutoff below ran even when the PID probe said "alive", so a
+    # legitimate long hold (mkvmerge over SMB can run for hours on a big file —
+    # the call's own budget is max(900, MB*3) seconds) had its lock stolen at
+    # 600s. Two mkvmerge then ran against the Synology at once, which is the
+    # rc=137 OOM class this lock exists to prevent. The docstring above already
+    # describes the age check as a fallback for an inconclusive probe; this
+    # makes the code match.
+    if pid > 0:
+        return False
+
+    # (2) Age cutoff — only reachable when the pid is missing/corrupt.
     try:
         age = time.time() - os.path.getmtime(lock_path)
     except OSError:
