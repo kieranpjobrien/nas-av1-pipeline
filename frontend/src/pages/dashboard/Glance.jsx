@@ -393,6 +393,14 @@ export function Glance({ data, pipelineData, throughputPerDay, workersActive, wo
       upload: 15 * 60 * 1000,
       gap_fill: 10 * 60 * 1000,
     };
+    // Anything not named above still has to be able to go stale. The pipeline
+    // writes 21 distinct stage values; only 6 were listed, so `verify` (the
+    // MOST-written stage), `qualify`, `prep*`, `replace`, `track_strip`,
+    // `pending_upload` and rows with a null stage could sit for hours and never
+    // raise the badge — a dead supervisor read as healthy, which is exactly the
+    // 2026-05-19 incident the operator found via a "stale 7h 52m" indicator that
+    // in these stages would never have appeared. 30 min matches rule 14's bite.
+    const DEFAULT_STALE_MS = 30 * 60 * 1000;
     return Object.entries(pipelineFiles)
       .filter(([, info]) =>
         ["encoding", "analyzing", "fetching", "uploading", "processing"].includes(
@@ -403,7 +411,10 @@ export function Glance({ data, pipelineData, throughputPerDay, workersActive, wo
         const lastUpdated = info.last_updated ? Date.parse(info.last_updated) : null;
         const ageMs = lastUpdated ? now - lastUpdated : null;
         const inputBytes = info.input_size_bytes ?? null;
-        const stage = info.stage || info.reason || null;
+        // Do NOT fall back to `reason` — it's free text ("force_reencode set by
+        // categorise_entry: …"), which matches no threshold key and so silently
+        // disabled the stale check for every requeued row.
+        const stage = info.stage || null;
         const status = (info.status || "encoding").toLowerCase();
         let bucket = "queued";
         if (stage === "encoding" || status === "encoding" || status === "analyzing") {
@@ -415,7 +426,7 @@ export function Glance({ data, pipelineData, throughputPerDay, workersActive, wo
         } else if (stage && stage in staleThresholdMs) {
           bucket = "encoding";
         }
-        const threshold = stage ? staleThresholdMs[stage] : null;
+        const threshold = (stage && staleThresholdMs[stage]) ?? DEFAULT_STALE_MS;
         return {
           filename: path.split(/[\\/]/).pop(),
           filepath: path,

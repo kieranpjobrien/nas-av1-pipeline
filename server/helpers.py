@@ -45,12 +45,22 @@ def _get_state_db():
 
 
 def drop_file(name: str, data: dict | None = None) -> Path:
-    """Create a control file, optionally writing JSON data to it."""
+    """Create a control file, optionally writing JSON data to it.
+
+    JSON payloads go through :func:`write_json_safe` (tmp + read-back + atomic
+    replace). The previous in-place ``open(path, "w")`` truncated first and wrote
+    after, so a crash or reload mid-write left a 0-byte or half-written
+    priority.json — which every reader then degraded to "empty" and wrote back,
+    wiping the operator's priority queue. Same cascade shape as 2026-04-29.
+    """
     CONTROL_DIR.mkdir(parents=True, exist_ok=True)
     path = CONTROL_DIR / name
-    with open(path, "w", encoding="utf-8") as f:
-        if data:
-            json.dump(data, f, indent=2)
+    if data:
+        write_json_safe(path, data)
+    else:
+        # Marker file (pause_all.json etc.) — content-free by design.
+        with open(path, "w", encoding="utf-8"):
+            pass
     return path
 
 

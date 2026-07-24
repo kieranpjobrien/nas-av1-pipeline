@@ -313,6 +313,30 @@ def reset_errors() -> dict:
     try:
         conn = _get_state_db()
         now = datetime.now().isoformat()
+
+        # Scrub the prep cache before flipping to pending. state.set_file does
+        # this on ANY transition to PENDING, and the per-file requeue endpoints
+        # in files.py scrub explicitly — but this endpoint writes raw SQL and
+        # never touched extras, so "Retry all" re-armed the 2026-07-24 faults at
+        # batch scale: a stale prep_data pointed ffmpeg at a .stripped.mkv the
+        # restart cleanup had deleted (exit 4294967294), and a stale prep_done
+        # skipped the strip so foreign tracks survived to verify.
+        _stale = ("prep_done", "prep_data", "detected_audio", "detected_subs", "pre_processed")
+        for _fp, _ex in conn.execute(
+            "SELECT filepath, extras FROM pipeline_files WHERE status IN ('error', 'failed')"
+        ).fetchall():
+            try:
+                _e = json.loads(_ex or "{}")
+            except (TypeError, json.JSONDecodeError):
+                continue  # corrupt blob — leave it; set_file tolerates it later
+            if any(k in _e for k in _stale):
+                for k in _stale:
+                    _e.pop(k, None)
+                conn.execute(
+                    "UPDATE pipeline_files SET extras = ? WHERE filepath = ?",
+                    (json.dumps(_e, separators=(",", ": ")), _fp),
+                )
+
         cursor = conn.execute(
             "UPDATE pipeline_files SET status = 'pending', error = NULL, stage = NULL, "
             "last_updated = ? WHERE status IN ('error', 'failed')",

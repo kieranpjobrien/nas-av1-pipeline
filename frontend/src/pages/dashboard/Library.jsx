@@ -962,7 +962,12 @@ export function Library({ data, pipelineData, onFileOpen, drillKey, onClearDrill
                           visibleRows: slice,
                         })
                       }
-                      onClick={() => setSelIdx(absIdx)}
+                      // selIdx indexes `rows` (sort order), but grouping renders
+                      // bucket-by-bucket, so the running counter is a DIFFERENT
+                      // order. Using it here selected a different file than the
+                      // one clicked — and the Inspector's Delete / Queue-re-encode
+                      // act on `sel`. Index into `rows` instead. (2026-07-25)
+                      onClick={() => setSelIdx(rows.indexOf(f))}
                       onDoubleClick={() => onFileOpen?.(f.filepath)}
                       pipelineInfo={pipelineFiles[f.filepath]}
                     />
@@ -1355,8 +1360,12 @@ function FileManagerPanel({ sel, onClose }) {
 // so we read-modify-write rather than nuking the rest of the user's
 // priority cohort. Returns the post-merge count.
 async function bulkAddToPriority(paths) {
-  const current = await api.getPriority().catch(() => ({ paths: [] }));
-  const merged = Array.from(new Set([...(current.paths || []), ...paths]));
+  // No .catch fallback here. Substituting {paths: []} on a failed GET meant the
+  // follow-up PUT — which REPLACES the whole list — committed a fabricated empty
+  // list, wiping the operator's entire priority cohort and reporting success.
+  // Let the failure propagate so the PUT never fires on invented data.
+  const current = await api.getPriority();
+  const merged = Array.from(new Set([...(current?.paths || []), ...paths]));
   const r = await api.setPriority(merged);
   return r?.paths ?? merged.length;
 }

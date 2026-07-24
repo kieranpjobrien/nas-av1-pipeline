@@ -116,6 +116,21 @@ class FlaggedAction(BaseModel):
 def flagged_action(req: FlaggedAction) -> dict[str, Any]:
     """Perform the chosen action on a flagged file."""
     fp = req.filepath
+
+    # Path membership guard. delete_redownload does an os.remove on this value,
+    # and until 2026-07-25 the only validation was min_length=1 — so any path on
+    # the box could be deleted by an unauthenticated LAN request (the dashboard
+    # binds 0.0.0.0 and DASHBOARD_TOKEN is unset by default). Mirrors the guard
+    # every sibling destructive endpoint already has in files.py.
+    from paths import NAS_MOVIES, NAS_SERIES  # noqa: PLC0415
+
+    _norm = os.path.normpath(fp)
+    if not (
+        _norm.startswith(os.path.normpath(str(NAS_MOVIES)))
+        or _norm.startswith(os.path.normpath(str(NAS_SERIES)))
+    ):
+        raise HTTPException(403, detail="Path is outside NAS media directories")
+
     if not os.path.exists(fp):
         # File can be missing for ``delete_redownload`` — Radarr/Sonarr
         # already moved/deleted it, we just need to trigger the search.
@@ -181,6 +196,24 @@ def _action_delete_redownload(filepath: str) -> dict[str, Any]:
     Routing: ``/Series/`` paths -> Sonarr; ``/Movies/`` paths -> Radarr.
     Falls back to title+year match if path-based location lookup fails.
     """
+    # Step 0: refuse to delete when the *arr that would re-grab it isn't even
+    # configured. Pre-2026-07-25 the delete happened FIRST and an unconfigured
+    # (or throwing) *arr just left queued=False — the file was gone from the NAS,
+    # nothing was queued, and the UI still showed a green "applied" toast.
+    is_series = "/Series/" in filepath.replace("\\", "/")
+    if is_series:
+        from tools import sonarr as _arr
+    else:
+        from tools import radarr as _arr
+    if not _arr.is_configured():
+        raise HTTPException(
+            503,
+            detail=(
+                f"{'Sonarr' if is_series else 'Radarr'} is not configured — refusing to "
+                f"delete, because nothing would re-grab this file."
+            ),
+        )
+
     # Step 1: delete the file (best-effort — if missing already, that's fine)
     delete_result = "missing"
     if os.path.exists(filepath):
@@ -191,7 +224,6 @@ def _action_delete_redownload(filepath: str) -> dict[str, Any]:
             raise HTTPException(500, detail=f"delete failed: {exc}")
 
     # Step 2: figure out which Arr to talk to
-    is_series = "/Series/" in filepath.replace("\\", "/")
     title, year = _title_and_year_from_path(filepath)
 
     arr_result: dict[str, Any] = {"queued": False}
@@ -239,8 +271,11 @@ def _action_delete_redownload(filepath: str) -> dict[str, Any]:
     finally:
         conn.close()
 
+    # Report honestly: the file is gone either way, so a failed re-grab is NOT a
+    # success. The UI keys its toast off ok, and used to show green even when
+    # nothing had been queued.
     return {
-        "ok": True,
+        "ok": bool(arr_result.get("queued")),
         "filepath": filepath,
         "delete": delete_result,
         "arr": arr_result,
