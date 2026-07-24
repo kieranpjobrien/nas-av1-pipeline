@@ -394,6 +394,22 @@ class PipelineState:
                 else:
                     extras[k] = v
 
+            # Scrub the stale prep cache on any transition BACK to pending.
+            # A requeue that carries prep_done + prep_data forward makes the
+            # next dispatch skip the strip and hand ffmpeg a .stripped.mkv the
+            # restart's fetch-dir cleanup already deleted (exit 4294967294), or
+            # plan the strip against a prior attempt's title-wiped stream lists
+            # (prep-miss survivors) — both 2026-07-24. reset_non_terminal does
+            # this on restart (see above); doing it on EVERY pending write also
+            # covers the internal requeue feeders (categorise_entry auto-reset,
+            # _stamp_force_reencode, finalize_upload retry) that bypass it. A
+            # caller that explicitly re-supplies a key (kwargs) is not clobbered.
+            if direct.get("status") == FileStatus.PENDING.value:
+                for _k in ("prep_data", "prep_done", "detected_audio",
+                           "detected_subs", "pre_processed"):
+                    if _k not in all_data:
+                        extras.pop(_k, None)
+
             # Single INSERT OR REPLACE — atomic, no race
             cols = ["filepath"] + list(direct.keys()) + ["extras"]
             placeholders = ", ".join(["?"] * len(cols))

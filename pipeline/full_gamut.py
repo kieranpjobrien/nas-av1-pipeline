@@ -259,10 +259,22 @@ def _prepare_for_encode_locked(
     filename = item["filename"]
     library_type = item.get("library_type", "")
 
-    # Idempotence: if prep already ran, return the cached result.
+    # Idempotence: if prep already ran, return the cached result — but only if
+    # the prepared input still exists on disk. A restart's fetch-dir cleanup
+    # deletes the .stripped.mkv while a terminal row keeps prep_data, so a later
+    # requeue would otherwise hand ffmpeg a path that's gone (exit 4294967294).
+    # If it's missing, fall through and re-prep from scratch.
     existing = state.get_file(filepath)
     if existing and existing.get("prep_done") and existing.get("prep_data"):
-        return existing["prep_data"]
+        _cached = existing["prep_data"]
+        _ai = _cached.get("actual_input") if isinstance(_cached, dict) else None
+        if _ai and not os.path.exists(_ai):
+            logging.info(
+                f"  prep: cached input missing on disk ({os.path.basename(str(_ai))}) "
+                f"— re-prepping: {filename}"
+            )
+        else:
+            return _cached
 
     try:
         # === STEP 1: Wait for fetch ===
