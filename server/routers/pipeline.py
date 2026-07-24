@@ -160,10 +160,8 @@ def set_priority(req: PriorityRequest) -> dict:
                 ).fetchone()
                 if row is None:
                     cur.execute(
-                        "INSERT INTO pipeline_files (filepath, status, extras, reason) "
-                        "VALUES (?, 'pending', ?, ?)",
-                        (raw_path, _json.dumps({"force_reencode": True}),
-                         "auto-seeded by priority API"),
+                        "INSERT INTO pipeline_files (filepath, status, extras, reason) VALUES (?, 'pending', ?, ?)",
+                        (raw_path, _json.dumps({"force_reencode": True}), "auto-seeded by priority API"),
                     )
                     seeded += 1
                 else:
@@ -184,11 +182,12 @@ def set_priority(req: PriorityRequest) -> dict:
                         if not ex.get("force_reencode"):
                             ex["force_reencode"] = True
                             cur.execute(
-                                "UPDATE pipeline_files SET extras = ?, "
-                                "reason = ? WHERE filepath = ?",
-                                (_json.dumps(ex),
-                                 "force_reencode stamped by priority API (re-encode request)",
-                                 raw_path),
+                                "UPDATE pipeline_files SET extras = ?, reason = ? WHERE filepath = ?",
+                                (
+                                    _json.dumps(ex),
+                                    "force_reencode stamped by priority API (re-encode request)",
+                                    raw_path,
+                                ),
                             )
                             seeded += 1
             con.commit()
@@ -387,7 +386,13 @@ def quick_wins() -> dict:
     files = data.get("files", [])
     paths = []
     for f in files:
-        if f.get("video", {}).get("codec_raw") != "av1":
+        # Finished video = AV1 OR HEVC. Hardcoding "av1" meant "Quick wins"
+        # never offered an HEVC file needing only an audio remux — which under
+        # the current policy is exactly the cheapest win available, and the
+        # completion bar was already counting it as outstanding. (2026-07-25)
+        from pipeline.compliance import video_is_finished  # noqa: PLC0415
+
+        if not video_is_finished(f.get("video", {}).get("codec_raw")):
             continue
         # Delegate to the shared compliance helper so this endpoint and the
         # completion dashboard can never drift apart (previously diverged on

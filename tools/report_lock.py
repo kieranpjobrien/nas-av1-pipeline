@@ -14,6 +14,7 @@ Usage:
 
 import json
 import os
+import shutil
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -27,6 +28,7 @@ def _pid_alive(pid: int) -> bool:
         return False
     try:
         import psutil
+
         return psutil.pid_exists(pid)
     except ImportError:
         pass
@@ -164,9 +166,9 @@ def _read_or_empty() -> dict:
     fallback = _try_load(backup)
     if fallback is not None:
         import logging
+
         logging.warning(
-            f"media_report.json unreadable; restored from {backup.name} "
-            f"({len(fallback.get('files', []))} files)"
+            f"media_report.json unreadable; restored from {backup.name} ({len(fallback.get('files', []))} files)"
         )
         return fallback
 
@@ -204,8 +206,7 @@ def _atomic_write_with_backup(path: Path, report: dict) -> None:
         )
     if not isinstance(report.get("files"), list):
         raise ValueError(
-            f"refusing to write malformed report (files key is "
-            f"{type(report.get('files')).__name__}, expected list)"
+            f"refusing to write malformed report (files key is {type(report.get('files')).__name__}, expected list)"
         )
 
     tmp = str(path) + ".tmp"
@@ -249,14 +250,22 @@ def _atomic_write_with_backup(path: Path, report: dict) -> None:
     # Promote current → backup BEFORE replacing, only if current is valid.
     # Otherwise we'd just back up the corruption.
     if Path(path).exists():
-        current = _try_load(Path(path))
-        if current is not None:
+        # Parse to VALIDATE (never promote corruption into the only recovery
+        # point) — but copy the bytes rather than re-serialising them.
+        #   * speed: drops a full ~7.5 MB json.dump from every single report
+        #     write, all of it inside the held lock.
+        #   * safety: the old bare json.dump had no explicit separators and no
+        #     read-back guard, unlike the primary write. If the documented
+        #     JSONEncoder.key_separator corruption fired on THAT call, .last_good
+        #     silently became garbage and the swallowing except never noticed —
+        #     leaving no recovery point at all. A byte copy of an already
+        #     validated file cannot mis-serialise. (2026-07-25)
+        if _try_load(Path(path)) is not None:
             try:
                 # Use a temp+rename to keep .last_good's update atomic too
                 backup = _last_good_path()
                 backup_tmp = str(backup) + ".tmp"
-                with open(backup_tmp, "w", encoding="utf-8") as bf:
-                    json.dump(current, bf, indent=2, ensure_ascii=False)
+                shutil.copyfile(str(path), backup_tmp)
                 _replace_with_retry(backup_tmp, str(backup))
             except OSError:
                 # Backup write failure is non-fatal — primary write proceeds
@@ -283,7 +292,7 @@ def _replace_with_retry(src: str, dst: str, attempts: int = 6, base_delay: float
             return
         except PermissionError as e:
             last_err = e
-            time.sleep(base_delay * (2 ** i))
+            time.sleep(base_delay * (2**i))
     if last_err is not None:
         raise last_err
 

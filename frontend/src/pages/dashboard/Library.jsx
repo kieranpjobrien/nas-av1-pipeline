@@ -72,7 +72,13 @@ const isEng = (s) => {
 };
 const drillFailures = {
   // Non-AV1 video
-  video: (f) => (f.codec || "").toLowerCase() !== "av1",
+  // Finished video is AV1 OR HEVC (see pipeline/compliance.video_is_finished,
+  // relaxed 2026-07-18). This drill still flagged every HEVC file as needing
+  // video work, disagreeing with the KPI it sits under. (2026-07-25)
+  video: (f) => {
+    const c = (f.codec || "").toLowerCase();
+    return !(c.includes("av1") || c.includes("hevc") || c.includes("h.265") || c.includes("h265"));
+  },
   // Non-compliant audio codec. MUST match the backend audio_codec_ok
   // (_compliance_for_entry): EAC-3 is the target codec and TrueHD is the
   // mandatory Atmos passthrough (rule 9a) — BOTH are compliant. Omitting

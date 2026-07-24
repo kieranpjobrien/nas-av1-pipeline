@@ -124,7 +124,16 @@ export function ControlPage({ wsControl }) {
       const doneStatuses = ["completed", "replaced", "done", "verified", "skipped"];
       const remaining = paths.filter((p) => {
         const info = pipeline.files[p];
-        return !info || !doneStatuses.includes((info.status || "").toLowerCase());
+        if (!info) return true;
+        // A DONE row carrying force_reencode is an ACTIVE re-encode request,
+        // not finished work. The pipeline's own prune deliberately keeps these
+        // (see _prune_done_from_priority: "the exact bug behind 'the 7 AV1
+        // re-encodes keep vanishing from priority'"), but this auto-clean —
+        // which fires unconditionally on page mount — dropped them. Merely
+        // opening the Controls page silently discarded the operator's own
+        // queued re-encodes. (2026-07-25)
+        if (info.force_reencode) return true;
+        return !doneStatuses.includes((info.status || "").toLowerCase());
       });
       if (remaining.length < paths.length) {
         api.setPriority(remaining).then(() => {

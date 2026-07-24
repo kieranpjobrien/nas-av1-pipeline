@@ -883,10 +883,28 @@ def _encode_only(
         if gpu_semaphore is not None:
             with gpu_semaphore:
                 success = _run_encode(
-                    cmd, actual_input, output_path, item, config, state, filepath, result_out=encode_info
+                    cmd,
+                    actual_input,
+                    output_path,
+                    item,
+                    config,
+                    state,
+                    filepath,
+                    result_out=encode_info,
+                    external_subs=eng_external,
                 )
         else:
-            success = _run_encode(cmd, actual_input, output_path, item, config, state, filepath, result_out=encode_info)
+            success = _run_encode(
+                cmd,
+                actual_input,
+                output_path,
+                item,
+                config,
+                state,
+                filepath,
+                result_out=encode_info,
+                external_subs=eng_external,
+            )
         if not success:
             _cleanup(local_path, remuxed_path, output_path, stripped_leftover)
             return False
@@ -961,6 +979,7 @@ def _encode_only(
                         state,
                         filepath,
                         result_out=encode_info,
+                        external_subs=eng_external,
                     )
             else:
                 success = _run_encode(
@@ -972,6 +991,7 @@ def _encode_only(
                     state,
                     filepath,
                     result_out=encode_info,
+                    external_subs=eng_external,
                 )
             if not success:
                 _cleanup(local_path, remuxed_path, output_path, stripped_leftover)
@@ -1169,12 +1189,16 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
     output_duration = get_duration(dest_path) or 0
     if input_duration > 0:
         diff = abs(input_duration - output_duration)
-        ratio = output_duration / input_duration if input_duration else 1.0
+        # NOT `ratio` — that name already holds the COMPRESSION ratio read from
+        # the state row above, and shadowing it made every DONE row record
+        # compression_ratio ~= 1.0 (the duration ratio) instead of the real
+        # percentage. The dashboard rendered a 12 GB -> 6 GB encode as "1%".
+        dur_ratio = output_duration / input_duration if input_duration else 1.0
         # Dynamic tolerance — scales with content length. A 50-min episode gets ~60s
         # grace; a 3-min short gets 3.6s. Prevents false alarms on long-form content.
         allowed_drift = max(duration_tolerance_fixed, input_duration * duration_tolerance_pct)
         if diff > allowed_drift:
-            if ratio > 1.2 or ratio < 0.8:
+            if dur_ratio > 1.2 or dur_ratio < 0.8:
                 # Clearly broken (>20% off). Clean up the output file before retry/park.
                 try:
                     os.remove(dest_path)
@@ -1186,7 +1210,7 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
                     # First (or first N) time — discard + reset to PENDING so the pipeline
                     # picks it up again. Bump the counter so the second attempt can't loop.
                     logging.error(
-                        f"  Duration mismatch (broken encode, ratio {ratio:.2f}, retry {retry_count + 1}/{MAX_DURATION_RETRIES}): "
+                        f"  Duration mismatch (broken encode, ratio {dur_ratio:.2f}, retry {retry_count + 1}/{MAX_DURATION_RETRIES}): "
                         f"input={input_duration:.0f}s, output={output_duration:.0f}s — resetting to pending."
                     )
                     state.set_file(
@@ -1202,7 +1226,7 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
                     # recorded for audit. User can manually reset from the Errors page if
                     # they want to try again (e.g. after tweaking config).
                     logging.error(
-                        f"  Duration mismatch persists after {retry_count} retries (ratio {ratio:.2f}): "
+                        f"  Duration mismatch persists after {retry_count} retries (ratio {dur_ratio:.2f}): "
                         f"input={input_duration:.0f}s, output={output_duration:.0f}s — parking in ERROR."
                     )
                     state.set_file(
@@ -1212,6 +1236,13 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
                         stage="verify",
                         duration_retry_count=retry_count + 1,
                     )
+                # STOP HERE. dest_path was deleted above, so falling through
+                # ran _probe_full on a file that no longer exists — the probe
+                # errored and overwrote the row we just wrote with
+                # "probe failed on staging output". The documented auto-retry
+                # therefore never happened, and the Errors page showed a probe
+                # failure instead of the real duration mismatch. (2026-07-25)
+                return False
             else:
                 # 2%-20% off — drift is real but not catastrophic. Log a warning so the
                 # user can spot a pattern, but DON'T reject the encode. In practice these
@@ -1219,7 +1250,7 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
                 # branch above handles genuinely broken cases.
                 logging.warning(
                     f"  Duration drift (accepting anyway): input={input_duration:.1f}s, "
-                    f"output={output_duration:.1f}s, {(ratio - 1) * 100:+.1f}%"
+                    f"output={output_duration:.1f}s, {(dur_ratio - 1) * 100:+.1f}%"
                 )
                 # fall through to replace + DONE below
 
@@ -2085,6 +2116,7 @@ def _run_encode(
     state: PipelineState,
     filepath: str,
     result_out: dict | None = None,
+    external_subs: list | None = None,
 ) -> bool:
     """Execute the ffmpeg encode command with up to three attempts.
 
@@ -2122,7 +2154,19 @@ def _run_encode(
         if attempt == 0:
             pass  # original cmd (hwaccel on by default)
         elif retry_mode == "no_hwaccel":
-            cmd = build_ffmpeg_cmd(input_path, output_path, item, config, use_hwaccel=False)
+            # external_subs MUST be carried into the rebuild. Without it the
+            # sw-decode retry silently produced an output with no muxed English
+            # sidecar — and since compliance has no "must have an English sub"
+            # rule, it shipped, after which the sidecar cleanup deleted the .srt
+            # from disk too. Subtitle gone from both places. (2026-07-25)
+            cmd = build_ffmpeg_cmd(
+                input_path,
+                output_path,
+                item,
+                config,
+                use_hwaccel=False,
+                external_subs=external_subs or None,
+            )
             logging.warning("  Retrying with software decode (NVDEC incompatible source)")
         elif retry_mode == "no_subs":
             cmd = build_ffmpeg_cmd(input_path, output_path, item, config, include_subs=False)

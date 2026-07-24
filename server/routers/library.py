@@ -56,9 +56,7 @@ def _flagged_corrupt_paths() -> set[str]:
 
         con = sqlite3.connect(f"file:{PIPELINE_STATE_DB}?mode=ro", uri=True, timeout=5.0)
         try:
-            rows = con.execute(
-                "SELECT filepath FROM pipeline_files WHERE status = 'flagged_corrupt'"
-            ).fetchall()
+            rows = con.execute("SELECT filepath FROM pipeline_files WHERE status = 'flagged_corrupt'").fetchall()
         finally:
             con.close()
         return {r[0] for r in rows}
@@ -114,8 +112,7 @@ def _compliance_for_entry(entry: dict, keep_langs: set[str] | None = None) -> di
         # compliant, NOT a transcode target. Crediting it stops ~159 correctly-
         # TrueHD files being mis-counted as "needs EAC-3" (2026-07-11).
         audio_codec_ok = all(
-            (a.get("codec_raw") or a.get("codec", "")).lower() in ("eac3", "e-ac-3", "truehd")
-            for a in audio_streams
+            (a.get("codec_raw") or a.get("codec", "")).lower() in ("eac3", "e-ac-3", "truehd") for a in audio_streams
         )
         if not audio_codec_ok:
             violations.append("audio_codec_not_eac3")
@@ -197,7 +194,8 @@ def _compliance_for_entry(entry: dict, keep_langs: set[str] | None = None) -> di
     # on films that correctly keep a 'French Forced' track (fixed 2026-07-13;
     # was flagging 12 forced-only files like The Lovers, Twins, The White Queen).
     non_keep_internal = sum(
-        1 for i, s in enumerate(sub_streams)
+        1
+        for i, s in enumerate(sub_streams)
         if _stream_lang(s) not in keep_langs and not parse_sub_stream(s, index=i).is_forced
     )
     non_keep_external = sum(1 for s in ext_subs if _norm_lang(s.get("language") or "und") not in keep_langs)
@@ -559,10 +557,16 @@ def get_completion_missing(category: str) -> dict:
         fn = f.get("filename", "")
         cr = f.get("video", {}).get("codec_raw", "")
         hit = False
+        # Both branches must use the same finished-codec test the KPIs use
+        # (video_is_finished — AV1 OR HEVC). Hardcoding "av1" here left the
+        # drill-downs disagreeing with the numbers above them: the video drill
+        # listed every HEVC file the KPI excluded, and the audio drill silently
+        # OMITTED every HEVC file with non-compliant audio that the KPI counted.
+        # 0562b4b updated the KPIs and never came back for these. (2026-07-25)
         if category == "video":
-            hit = cr != "av1"
+            hit = not video_is_finished(cr)
         elif category == "audio":
-            if cr == "av1":
+            if video_is_finished(cr):
                 # Reuse the canonical compliance helper so drill-down matches the
                 # completion totals exactly (no drift between code paths).
                 c = _compliance_for_entry(f)

@@ -1254,15 +1254,25 @@ class Orchestrator:
                         filename = gaps.clean_name
                         # Patch report with new path/filename
                         try:
-                            from tools.report_lock import read_report, write_report
+                            # patch_report holds ONE lock across read+mutate+write.
+                            # The old read_report()/write_report() pair released
+                            # the lock in between and then wrote the WHOLE report
+                            # back from a stale snapshot, silently reverting any
+                            # commit that landed in the gap — e.g. a finished
+                            # encode's update_entry. categorise_entry would then
+                            # see a non-AV1 codec on a DONE row, auto-reset it,
+                            # and burn GPU hours re-encoding an already-AV1 file.
+                            # (2026-07-25)
+                            from tools.report_lock import patch_report
 
-                            rpt = read_report()
-                            for entry in rpt.get("files", []):
-                                if entry.get("filepath") == old_path:
-                                    entry["filepath"] = new_path
-                                    entry["filename"] = gaps.clean_name
-                                    break
-                            write_report(rpt)
+                            def _patch_path(rep, _old=old_path, _new=new_path, _name=gaps.clean_name):
+                                for entry in rep.get("files", []):
+                                    if entry.get("filepath") == _old:
+                                        entry["filepath"] = _new
+                                        entry["filename"] = _name
+                                        break
+
+                            patch_report(_patch_path)
                         except Exception as e:
                             logging.debug(f"  Report patch failed for {filename}: {e}")
 
@@ -1274,17 +1284,18 @@ class Orchestrator:
                         tmdb_data = enrich_and_tag(filepath, filename, library_type)
                         # Patch TMDb directly into the report (update_entry doesn't read MKV tags)
                         if tmdb_data:
-                            from tools.report_lock import read_report, write_report
+                            # Same single-lock treatment as the rename patch above.
+                            from tools.report_lock import patch_report
 
                             try:
-                                rpt = read_report()
-                                for entry in rpt.get("files", []):
-                                    if entry.get("filepath") == filepath or entry.get("filepath") == item.get(
-                                        "filepath"
-                                    ):
-                                        entry["tmdb"] = tmdb_data
-                                        break
-                                write_report(rpt)
+
+                                def _patch_tmdb(rep, _fp=filepath, _alt=item.get("filepath"), _t=tmdb_data):
+                                    for entry in rep.get("files", []):
+                                        if entry.get("filepath") in (_fp, _alt):
+                                            entry["tmdb"] = _t
+                                            break
+
+                                patch_report(_patch_tmdb)
                             except Exception as e:
                                 logging.debug(f"  TMDb report patch failed for {filename}: {e}")
                     except Exception as e:
