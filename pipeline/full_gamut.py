@@ -461,7 +461,18 @@ def _prepare_for_encode_locked(
         # the source is fine by their decision — a false-positive probe must
         # NOT re-flag it corrupt and feed the re-source loop that stranded
         # ~14 files for weeks. Forced encode == "encode it, don't second-guess".
-        if existing and existing.get("force_reencode"):
+        # Only a USER-initiated force skips the probe. force_reencode is also
+        # stamped automatically by categorise_entry (audio-transcode routing,
+        # DONE codec auto-reset) and by gap_filler's mis-route handler — 679 of
+        # 685 stamps in the live DB on 2026-07-25 were machine-generated, which
+        # had silently disabled the rule-8 probe for essentially the whole
+        # queue. Machine stamps carry force_source="auto"; dashboard requeues
+        # don't, so the user override still works.
+        if (
+            existing
+            and existing.get("force_reencode")
+            and existing.get("force_source") != "auto"
+        ):
             logging.info(
                 "  prep: force_reencode=true → skipping source-integrity probe (user override)"
             )
@@ -539,6 +550,14 @@ def _prepare_for_encode_locked(
                 if not fresh_probe.get("error"):
                     # Build minimal stream dicts matching the shape
                     # ffmpeg.py / compliance.py expect.
+                    # Carry title + disposition through. Blanking them (the
+                    # pre-2026-07-25 behaviour) made every surviving sub look
+                    # like a plain regular English track: is_forced_internal /
+                    # is_hi_internal both went False, the selector kept only
+                    # the first English sub, and a file could ship with ONLY
+                    # its forced foreign-parts track while the real English
+                    # sub was dropped — with the .original.bak already deleted.
+                    # _probe_full supplies both fields for exactly this reason.
                     new_audio = [
                         {
                             "codec": (a.get("codec") or "").upper(),
@@ -547,7 +566,8 @@ def _prepare_for_encode_locked(
                             "channel_layout": a.get("channel_layout"),
                             "bitrate_kbps": a.get("bit_rate_kbps"),
                             "language": a.get("language"),
-                            "title": "",
+                            "title": a.get("title") or "",
+                            "disposition": dict(a.get("disposition") or {}),
                         }
                         for a in (fresh_probe.get("audio") or [])
                     ]
@@ -555,7 +575,8 @@ def _prepare_for_encode_locked(
                         {
                             "codec": s.get("codec"),
                             "language": s.get("language"),
-                            "title": "",
+                            "title": s.get("title") or "",
+                            "disposition": dict(s.get("disposition") or {}),
                         }
                         for s in (fresh_probe.get("subs") or [])
                     ]

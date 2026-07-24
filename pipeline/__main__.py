@@ -173,6 +173,10 @@ def _stamp_force_reencode(
         filepath,
         status_to_use,
         force_reencode=True,
+        # Marks this as a MACHINE stamp so the pre-encode source-integrity
+        # probe still runs (rule 8). A user-initiated force from the dashboard
+        # leaves force_source unset and keeps the probe skip.
+        force_source="auto",
         reason=f"force_reencode set by categorise_entry: {reason}",
     )
 

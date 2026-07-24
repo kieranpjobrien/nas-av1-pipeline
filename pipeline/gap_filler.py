@@ -50,6 +50,14 @@ class GapAnalysis:
     needs_language_detect: bool = False
     needs_sub_mux: bool = False
     needs_foreign_sub_cleanup: bool = False
+    # True when the sub selector DEFERRED (unresolved language, inviolate rule)
+    # rather than planning a keep-set. Without this, an empty sub_keep_indices
+    # from a deferral is indistinguishable from "strip every sub", and an
+    # audio-only strip would drop all subtitles — see _build_keep_ids_from_identify.
+    sub_strip_deferred: bool = False
+    # Subtitle count on the source, so the post-mux verify can prove no
+    # unintended subtitle loss before the atomic replace.
+    source_sub_count: int = 0
     audio_keep_indices: list[int] = field(default_factory=list)
     sub_keep_indices: list[int] = field(default_factory=list)
     audio_transcode_indices: list[int] = field(default_factory=list)
@@ -132,6 +140,7 @@ def analyse_gaps(file_entry: dict, config: dict) -> GapAnalysis:
     gaps._config = config  # type: ignore[attr-defined]
     audio_streams = file_entry.get("audio_streams", [])
     sub_streams = file_entry.get("subtitle_streams", [])
+    gaps.source_sub_count = len(sub_streams)
 
     # Audio codec check
     for i, a in enumerate(audio_streams):
@@ -213,10 +222,13 @@ def analyse_gaps(file_entry: dict, config: dict) -> GapAnalysis:
             gaps.sub_keep_indices = sub_keep
             if len(sub_keep) < len(sub_streams):
                 gaps.needs_track_removal = True
-        # else: sub_keep is None — file has unresolved sub languages. Defer
-        # entirely. needs_track_removal stays False; gaps.sub_keep_indices
-        # stays empty (caller's None-path through _strip_tracks_on_nas treats
-        # empty as "keep all" if needs_track_removal isn't set).
+        else:
+            # sub_keep is None — file has unresolved sub languages. Defer
+            # entirely (inviolate rule). needs_track_removal is NOT set by this
+            # block, but the AUDIO block above may already have set it, and an
+            # empty sub_keep_indices then reads as "strip every sub" downstream.
+            # Flag the deferral explicitly so it can't be confused for that.
+            gaps.sub_strip_deferred = True
 
     # TMDb metadata check
     if not file_entry.get("tmdb"):
@@ -619,6 +631,26 @@ def _post_mux_verify_and_replace(filepath: str, tmp_unc: str, gaps: GapAnalysis,
                 )
                 os.remove(tmp_unc)
                 return False
+            # Subtitle floor. The audio check above has existed since the
+            # 2026-04-22 zero-audio bug; subs had no equivalent, so an
+            # unintended --no-subtitles could reach os.replace unchallenged
+            # and wipe every subtitle track in place (no .bak on this path).
+            #   * deferred strip  -> we promised to keep ALL source subs
+            #   * planned keep-set -> we promised exactly that many
+            sub_n = sum(1 for s in streams if s.get("codec_type") == "subtitle")
+            expected_subs = None
+            if gaps.sub_strip_deferred:
+                expected_subs = gaps.source_sub_count
+            elif gaps.sub_keep_indices:
+                expected_subs = len(gaps.sub_keep_indices)
+            if expected_subs is not None and sub_n < expected_subs:
+                logging.error(
+                    f"  Post-mkvmerge verify: expected {expected_subs} subtitle stream(s), "
+                    f"got {sub_n} — aborting replace (would lose "
+                    f"{expected_subs - sub_n} subtitle track(s))"
+                )
+                os.remove(tmp_unc)
+                return False
         except (subprocess.TimeoutExpired, FileNotFoundError, Exception) as ve:
             logging.error(f"  Post-mkvmerge verify errored: {ve} — aborting replace to be safe")
             try:
@@ -677,7 +709,7 @@ def _build_keep_ids_from_identify(id_data: dict, gaps: GapAnalysis) -> tuple[lis
             no_subs = True
     elif gaps.sub_keep_indices and sub_track_ids:
         sub_keep_ids = [sub_track_ids[i] for i in gaps.sub_keep_indices if i < len(sub_track_ids)]
-    elif not gaps.sub_keep_indices and gaps.needs_track_removal:
+    elif not gaps.sub_keep_indices and gaps.needs_track_removal and not gaps.sub_strip_deferred:
         no_subs = True
 
     return audio_keep_ids, sub_keep_ids, no_subs
