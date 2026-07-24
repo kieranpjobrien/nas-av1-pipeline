@@ -54,10 +54,8 @@ import shutil
 import sqlite3
 import subprocess
 import sys
-import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from pathlib import Path
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
@@ -214,7 +212,7 @@ def _apply_patches(
         for line in (result.stdout or "").splitlines():
             stripped = line.strip()
             if stripped.startswith("Error:"):
-                return False, stripped[len("Error:"):].strip()
+                return False, stripped[len("Error:") :].strip()
         return False, f"rc={result.returncode}"
     return True, f"patched {len(patches)} track(s)"
 
@@ -268,6 +266,7 @@ def main() -> int:
     state_db = args.state_db
     if state_db is None:
         from paths import PIPELINE_STATE_DB
+
         state_db = str(PIPELINE_STATE_DB)
 
     mkvmerge = _find_mkvmerge()

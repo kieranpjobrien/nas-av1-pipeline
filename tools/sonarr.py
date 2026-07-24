@@ -12,6 +12,7 @@ Environment variables (read at call time, not import):
     SONARR_URL        e.g. http://192.168.4.43:27483
     SONARR_API_KEY    from Sonarr → Settings → General → Security → API Key
 """
+
 from __future__ import annotations
 
 import json
@@ -20,7 +21,6 @@ import os
 import urllib.error
 import urllib.parse
 import urllib.request
-from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -41,9 +41,7 @@ def _require_config() -> tuple[str, str]:
     url = (os.environ.get(SONARR_URL_ENV) or "").rstrip("/")
     key = os.environ.get(SONARR_API_KEY_ENV) or ""
     if not url or not key:
-        raise SonarrNotConfigured(
-            "SONARR_URL and/or SONARR_API_KEY not set."
-        )
+        raise SonarrNotConfigured("SONARR_URL and/or SONARR_API_KEY not set.")
     return url, key
 
 
@@ -186,9 +184,7 @@ def upgrade_via_sonarr(
     if not series:
         series = find_series_by_title_year(title, year)
     if not series:
-        raise SonarrError(
-            f"could not locate Sonarr series for '{title}' ({year})."
-        )
+        raise SonarrError(f"could not locate Sonarr series for '{title}' ({year}).")
     series_id = int(series["id"])
     update_series(series_id, quality_profile_id=quality_profile_id)
     cmd = trigger_search(series_id) or {}
@@ -215,6 +211,7 @@ def _normalise_path(p: str) -> str:
 def _norm_title(s: str) -> str:
     """Strip punctuation + lowercase for fuzzy comparison."""
     import re
+
     s = s.lower()
     s = re.sub(r"\b(the|a|an)\b", "", s)
     s = re.sub(r"\(\d{4}\)", "", s)

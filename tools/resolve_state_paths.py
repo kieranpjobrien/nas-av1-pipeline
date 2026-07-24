@@ -29,7 +29,6 @@ directory, to avoid mis-routing on ambiguous matches.
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import re
 import sqlite3
@@ -85,25 +84,23 @@ def _resolve_one(filepath: str) -> str | None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--apply", action="store_true",
-                        help="Actually rewrite state DB rows (default: dry-run)")
-    parser.add_argument("--status", default="error",
-                        help="Status to operate on (default: error)")
-    parser.add_argument("--error-like", default="source file not found",
-                        help="Filter to rows whose error column matches this substring "
-                             "(default: 'source file not found')")
+    parser.add_argument("--apply", action="store_true", help="Actually rewrite state DB rows (default: dry-run)")
+    parser.add_argument("--status", default="error", help="Status to operate on (default: error)")
+    parser.add_argument(
+        "--error-like",
+        default="source file not found",
+        help="Filter to rows whose error column matches this substring (default: 'source file not found')",
+    )
     args = parser.parse_args()
 
     con = sqlite3.connect(str(PIPELINE_STATE_DB))
     con.row_factory = sqlite3.Row
     rows = con.execute(
-        "SELECT filepath, status, error, reason FROM pipeline_files "
-        "WHERE status = ? AND COALESCE(error, '') LIKE ?",
+        "SELECT filepath, status, error, reason FROM pipeline_files WHERE status = ? AND COALESCE(error, '') LIKE ?",
         (args.status, f"%{args.error_like}%"),
     ).fetchall()
 
-    print(f"Inspecting {len(rows)} rows with status={args.status!r} matching "
-          f"error~={args.error_like!r}\n")
+    print(f"Inspecting {len(rows)} rows with status={args.status!r} matching error~={args.error_like!r}\n")
 
     resolved: list[tuple[str, str]] = []
     no_match: list[str] = []
@@ -124,7 +121,7 @@ def main() -> int:
         print(f"    OLD: {os.path.basename(old)}")
         print(f"    NEW: {os.path.basename(new)}")
     if len(resolved) > 10:
-        print(f"    ... ({len(resolved)-10} more)")
+        print(f"    ... ({len(resolved) - 10} more)")
     print(f"  Already on disk at the stored path:  {len(already_ok)}")
     print(f"  No match found (genuinely missing):  {len(no_match)}")
     for fp in no_match[:5]:
@@ -159,8 +156,7 @@ def main() -> int:
             # The new path already has a row (older work for the cleaned
             # name) — drop the stale dashed row to keep state clean.
             con.execute("DELETE FROM pipeline_files WHERE filepath = ?", (old,))
-            print(f"  cleaned-name row already existed, dropped stale dashed row: "
-                  f"{os.path.basename(old)}")
+            print(f"  cleaned-name row already existed, dropped stale dashed row: {os.path.basename(old)}")
 
     con.commit()
     con.close()

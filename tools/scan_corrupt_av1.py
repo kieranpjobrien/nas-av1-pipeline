@@ -46,7 +46,6 @@ import argparse
 import json
 import logging
 import os
-import re
 import subprocess
 import sys
 import time
@@ -95,26 +94,41 @@ def scan_one(filepath: str, sample_secs: int = 10, timeout: int = 60) -> dict:
         return {"filepath": filepath, "ok": False, "missing": True, "hits": [], "elapsed_ms": 0}
 
     cmd = [
-        "ffmpeg", "-v", "error", "-hide_banner",
-        "-i", filepath,
-        "-t", str(sample_secs),
-        "-f", "null", "-",
+        "ffmpeg",
+        "-v",
+        "error",
+        "-hide_banner",
+        "-i",
+        filepath,
+        "-t",
+        str(sample_secs),
+        "-f",
+        "null",
+        "-",
     ]
     t0 = time.monotonic()
     try:
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout,
-            encoding="utf-8", errors="replace",
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            encoding="utf-8",
+            errors="replace",
         )
         stderr = result.stderr or ""
     except subprocess.TimeoutExpired:
         return {
-            "filepath": filepath, "ok": False, "hits": ["scan_timeout"],
+            "filepath": filepath,
+            "ok": False,
+            "hits": ["scan_timeout"],
             "elapsed_ms": int((time.monotonic() - t0) * 1000),
         }
     except Exception as e:
         return {
-            "filepath": filepath, "ok": False, "hits": [f"scan_failed: {type(e).__name__}"],
+            "filepath": filepath,
+            "ok": False,
+            "hits": [f"scan_failed: {type(e).__name__}"],
             "elapsed_ms": int((time.monotonic() - t0) * 1000),
         }
 
@@ -141,6 +155,7 @@ def main() -> int:
 
     if args.report is None:
         from paths import MEDIA_REPORT
+
         report_path = str(MEDIA_REPORT)
     else:
         report_path = args.report
@@ -149,10 +164,7 @@ def main() -> int:
         report = json.load(f)
 
     files = report.get("files", [])
-    av1_files = [
-        f["filepath"] for f in files
-        if (f.get("video") or {}).get("codec_raw") == "av1"
-    ]
+    av1_files = [f["filepath"] for f in files if (f.get("video") or {}).get("codec_raw") == "av1"]
     if args.limit:
         av1_files = av1_files[: args.limit]
 
@@ -167,10 +179,7 @@ def main() -> int:
     missing: list[str] = []
 
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
-        futures = {
-            pool.submit(scan_one, fp, args.sample_secs, args.timeout): fp
-            for fp in av1_files
-        }
+        futures = {pool.submit(scan_one, fp, args.sample_secs, args.timeout): fp for fp in av1_files}
         for i, fut in enumerate(as_completed(futures), 1):
             r = fut.result()
             results.append(r)
@@ -182,10 +191,7 @@ def main() -> int:
             if i % 50 == 0 or i == len(av1_files):
                 elapsed = time.monotonic() - t_start
                 rate = i / max(elapsed, 0.001) * 60
-                logging.info(
-                    f"  Progress: {i}/{len(av1_files)}  ({rate:.0f} files/min, "
-                    f"{len(corrupt)} corrupt so far)"
-                )
+                logging.info(f"  Progress: {i}/{len(av1_files)}  ({rate:.0f} files/min, {len(corrupt)} corrupt so far)")
 
     elapsed = time.monotonic() - t_start
     logging.info("")

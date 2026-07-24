@@ -119,9 +119,7 @@ def check_no_audioless_av1(report: Optional[dict] = None) -> InvariantResult:
             offenders.append(entry.get("filepath") or entry.get("filename") or "<unknown>")
     passed = not offenders
     message = (
-        f"{len(offenders)} AV1 file(s) with zero audio streams"
-        if offenders
-        else "no AV1 files have zero audio streams"
+        f"{len(offenders)} AV1 file(s) with zero audio streams" if offenders else "no AV1 files have zero audio streams"
     )
     return InvariantResult(
         name,
@@ -246,7 +244,9 @@ def check_no_elevated_breaker_counters(db_path: Optional[Path] = None) -> Invari
         ).fetchall()
     except sqlite3.Error as e:
         return InvariantResult(
-            name, severity, False,
+            name,
+            severity,
+            False,
             f"DB query failed: {e}",
         )
     finally:
@@ -267,8 +267,7 @@ def check_no_elevated_breaker_counters(db_path: Optional[Path] = None) -> Invari
     offenders = [fp for fp, _, _, _ in elevated]
     passed = not offenders
     message = (
-        f"{len(offenders)} non-terminal row(s) at breaker counter >= 2 "
-        f"(one cycle from terminal)"
+        f"{len(offenders)} non-terminal row(s) at breaker counter >= 2 (one cycle from terminal)"
         if offenders
         else "no non-terminal rows near the breaker threshold"
     )
@@ -280,8 +279,7 @@ def check_no_elevated_breaker_counters(db_path: Optional[Path] = None) -> Invari
         violations=offenders,
         details={
             "rows": [
-                {"filepath": fp, "status": st, "integrity_failure_count": i,
-                 "compliance_refuse_count": c}
+                {"filepath": fp, "status": st, "integrity_failure_count": i, "compliance_refuse_count": c}
                 for fp, st, i, c in elevated[:20]
             ],
         },
@@ -307,10 +305,14 @@ def _ssh_run(host: str, remote_cmd: str, timeout: int = 30) -> subprocess.Comple
     """Run a single shell command on the NAS via SSH with BatchMode (no prompts)."""
     ssh_cmd = [
         "ssh",
-        "-o", "ConnectTimeout=10",
-        "-o", "BatchMode=yes",
-        "-o", "ServerAliveInterval=30",
-        "-o", "ServerAliveCountMax=3",
+        "-o",
+        "ConnectTimeout=10",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ServerAliveInterval=30",
+        "-o",
+        "ServerAliveCountMax=3",
         host,
         remote_cmd,
     ]
@@ -333,20 +335,13 @@ def check_no_stale_tmp_on_nas(skip_ssh: bool = False) -> InvariantResult:
     host = _ssh_nas_host()
     if not host:
         return InvariantResult(name, severity, True, "NAS SSH host not configured - skipped")
-    cmd = (
-        "find /volume1/Media \\( -name '*.tmp.mkv' -o -name '*.partial' \\) "
-        "-type f -mmin +60 2>/dev/null"
-    )
+    cmd = "find /volume1/Media \\( -name '*.tmp.mkv' -o -name '*.partial' \\) -type f -mmin +60 2>/dev/null"
     try:
         result = _ssh_run(host, cmd, timeout=45)
     except subprocess.TimeoutExpired:
-        return InvariantResult(
-            name, severity, False, "ssh find timed out", details={"error": "timeout"}
-        )
+        return InvariantResult(name, severity, False, "ssh find timed out", details={"error": "timeout"})
     except (FileNotFoundError, OSError) as e:
-        return InvariantResult(
-            name, severity, True, f"ssh unreachable ({type(e).__name__}) - skipped"
-        )
+        return InvariantResult(name, severity, True, f"ssh unreachable ({type(e).__name__}) - skipped")
     if result.returncode != 0:
         return InvariantResult(
             name,
@@ -358,9 +353,7 @@ def check_no_stale_tmp_on_nas(skip_ssh: bool = False) -> InvariantResult:
     lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
     passed = not lines
     message = (
-        f"{len(lines)} stale tmp file(s) on NAS"
-        if lines
-        else "no stale *.tmp.mkv / *.partial files older than 60 min"
+        f"{len(lines)} stale tmp file(s) on NAS" if lines else "no stale *.tmp.mkv / *.partial files older than 60 min"
     )
     return InvariantResult(
         name,
@@ -389,20 +382,13 @@ def check_no_zombie_mkvmerge(skip_ssh: bool = False) -> InvariantResult:
     # etime reads as [[DD-]HH:]MM:SS. Runtimes >= 1 hour have at least two
     # colons (H:MM:SS or DD-HH:MM:SS) or contain a dash. Shorter runtimes show
     # as MM:SS (one colon) and must be filtered out.
-    cmd = (
-        "ps -eo pid,etime,comm | awk '"
-        "NR>1 && ($3 ~ /mkvmerge|ffmpeg/) && ($2 ~ /:/) {print $1, $2, $3}'"
-    )
+    cmd = "ps -eo pid,etime,comm | awk 'NR>1 && ($3 ~ /mkvmerge|ffmpeg/) && ($2 ~ /:/) {print $1, $2, $3}'"
     try:
         result = _ssh_run(host, cmd, timeout=30)
     except subprocess.TimeoutExpired:
-        return InvariantResult(
-            name, severity, False, "ssh ps timed out", details={"error": "timeout"}
-        )
+        return InvariantResult(name, severity, False, "ssh ps timed out", details={"error": "timeout"})
     except (FileNotFoundError, OSError) as e:
-        return InvariantResult(
-            name, severity, True, f"ssh unreachable ({type(e).__name__}) - skipped"
-        )
+        return InvariantResult(name, severity, True, f"ssh unreachable ({type(e).__name__}) - skipped")
     if result.returncode != 0:
         return InvariantResult(
             name,
@@ -516,11 +502,7 @@ def check_no_ghost_python_processes() -> InvariantResult:
             continue
 
     passed = not ghosts
-    message = (
-        f"{len(ghosts)} ghost pipeline python process(es)"
-        if ghosts
-        else "no ghost pipeline python processes"
-    )
+    message = f"{len(ghosts)} ghost pipeline python process(es)" if ghosts else "no ghost pipeline python processes"
     return InvariantResult(
         name,
         severity,
@@ -555,9 +537,7 @@ def check_report_db_consistency(
         report_paths = {str(e.get("filepath", "")) for e in (report.get("files") or [])}
         report_paths.discard("")
         try:
-            done_rows = conn.execute(
-                "SELECT filepath FROM pipeline_files WHERE LOWER(status)='done'"
-            ).fetchall()
+            done_rows = conn.execute("SELECT filepath FROM pipeline_files WHERE LOWER(status)='done'").fetchall()
             all_rows = conn.execute("SELECT filepath FROM pipeline_files").fetchall()
         except sqlite3.Error:
             return InvariantResult(name, severity, True, "state DB schema missing - skipped")
@@ -581,10 +561,7 @@ def check_report_db_consistency(
                 f"report-missing-from-db={len(report_missing_from_db)})"
             )
         else:
-            message = (
-                f"{len(done_missing_from_report)} DONE files missing from media_report "
-                f"(tolerance {tolerance})"
-            )
+            message = f"{len(done_missing_from_report)} DONE files missing from media_report (tolerance {tolerance})"
         return InvariantResult(name, severity, passed, message, violations=violations, details=details)
     finally:
         conn.close()
@@ -633,7 +610,10 @@ def check_priority_paths_resolvable(
             prio = json.load(f)
     except (OSError, json.JSONDecodeError) as e:
         return InvariantResult(
-            name, severity, False, f"priority.json unreadable: {e}",
+            name,
+            severity,
+            False,
+            f"priority.json unreadable: {e}",
         )
 
     paths_list = (prio.get("paths") or []) + (prio.get("force") or [])
@@ -644,21 +624,21 @@ def check_priority_paths_resolvable(
         report = _load_media_report()
     if report is None:
         return InvariantResult(
-            name, severity, True, "media_report.json not present - skipped",
+            name,
+            severity,
+            True,
+            "media_report.json not present - skipped",
         )
 
     report_paths = {e.get("filepath") for e in (report.get("files") or [])}
-    unresolved = [
-        p for p in paths_list
-        if p not in report_paths or not os.path.exists(p)
-    ]
+    unresolved = [p for p in paths_list if p not in report_paths or not os.path.exists(p)]
     passed = not unresolved
     msg = (
         f"all {len(paths_list)} priority paths resolve in media_report + disk"
         if passed
         else f"{len(unresolved)}/{len(paths_list)} priority paths unresolvable "
-             f"(rename / ext-swap / removed). Run "
-             f"`python -m tools.resolve_priority_paths --apply` to repair."
+        f"(rename / ext-swap / removed). Run "
+        f"`python -m tools.resolve_priority_paths --apply` to repair."
     )
     return InvariantResult(
         name,
@@ -670,9 +650,7 @@ def check_priority_paths_resolvable(
     )
 
 
-def check_report_file_exists_on_disk(
-    report: Optional[dict] = None, sample_size: int = 100
-) -> InvariantResult:
+def check_report_file_exists_on_disk(report: Optional[dict] = None, sample_size: int = 100) -> InvariantResult:
     """Random sample of media_report entries - verify each file still exists."""
     name = "report_file_exists_on_disk"
     severity: Severity = "MEDIUM"
@@ -719,9 +697,7 @@ def _log_paths() -> list[Path]:
     return paths
 
 
-def _scan_log_for_banned_flags(
-    path: Path, tail_bytes: int = 2_000_000
-) -> tuple[int, int, list[str]]:
+def _scan_log_for_banned_flags(path: Path, tail_bytes: int = 2_000_000) -> tuple[int, int, list[str]]:
     """Return (bare_err_detect_hits, optional_audio_hits, sample_lines)."""
     try:
         size = path.stat().st_size
@@ -737,9 +713,12 @@ def _scan_log_for_banned_flags(
     samples: list[str] = []
     for m in bad_err_detect.finditer(tail):
         start = m.start()
-        window = tail[max(0, start - 20) : start]
-        if ":v" in window:
-            continue
+        # NO ":v" window exclusion. The regex requires whitespace after
+        # -err_detect, so it can never match the SAFE `-err_detect:v ignore_err`
+        # form in the first place — which made that check purely a source of
+        # false negatives: a real violation like
+        # `-map 0:v:0 -map 0:a -err_detect ignore_err` puts ":v" inside the
+        # preceding 20 characters and was silently skipped. (2026-07-25)
         bare_err_hits += 1
         line_start = tail.rfind("\n", 0, start) + 1
         line_end = tail.find("\n", m.end())
@@ -765,7 +744,11 @@ def _scan_log_for_banned_flags(
 def check_no_banned_ffmpeg_flags_in_log(tail_bytes: int = 2_000_000) -> InvariantResult:
     """Grep pipeline.log and logs/*.log for banned ffmpeg flags."""
     name = "no_banned_ffmpeg_flags_in_log"
-    severity: Severity = "LOW"
+    # HIGH, not LOW: _exit_code only returns non-zero for CRITICAL/HIGH, so at
+    # LOW a detected rule-9 (bare -err_detect) or rule-10 (-map 0:a?) violation
+    # could not fail the pre-flight gate that CLAUDE.md requires it to guard.
+    # Both are audio-loss classes. (2026-07-25)
+    severity: Severity = "HIGH"
     paths = _log_paths()
     if not paths:
         return InvariantResult(name, severity, True, "no pipeline logs present - skipped")
@@ -779,19 +762,20 @@ def check_no_banned_ffmpeg_flags_in_log(tail_bytes: int = 2_000_000) -> Invarian
             continue
         total_bare_err += bare
         total_opt_audio += opt
-        per_file.append({
-            "path": str(log_path),
-            "err_detect_ignore_err": bare,
-            "map_optional_audio": opt,
-            "samples": samples[:5],
-        })
+        per_file.append(
+            {
+                "path": str(log_path),
+                "err_detect_ignore_err": bare,
+                "map_optional_audio": opt,
+                "samples": samples[:5],
+            }
+        )
         for s in samples[:3]:
             violations.append(f"{log_path.name}: {s}")
     total = total_bare_err + total_opt_audio
     passed = total == 0
     message = (
-        f"forbidden flags in logs: {total_bare_err}x bare -err_detect ignore_err, "
-        f"{total_opt_audio}x -map 0:a?"
+        f"forbidden flags in logs: {total_bare_err}x bare -err_detect ignore_err, {total_opt_audio}x -map 0:a?"
         if total
         else "no forbidden ffmpeg flags in recent log tail"
     )
@@ -844,9 +828,7 @@ def check_no_done_with_foreign_audio(report: Optional[dict] = None) -> Invariant
     if conn is None:
         return InvariantResult(name, severity, True, "state DB unavailable — skipped")
     try:
-        rows = conn.execute(
-            "SELECT filepath FROM pipeline_files WHERE LOWER(status) = 'done'"
-        ).fetchall()
+        rows = conn.execute("SELECT filepath FROM pipeline_files WHERE LOWER(status) = 'done'").fetchall()
     except sqlite3.Error:
         return InvariantResult(name, severity, True, "state DB query failed — skipped")
     finally:
@@ -1099,6 +1081,88 @@ def check_media_report_not_collapsed() -> InvariantResult:
 # --------------------------------------------------------------------------
 
 
+def check_no_stale_active_rows(db_path: Optional[Path] = None, max_age_mins: int = 30) -> InvariantResult:
+    """Rows stuck in an ACTIVE status with no recent progress.
+
+    Enforcement for discipline rule 14, which until 2026-07-25 had none — the
+    rule the contract spends the most words on had no programmatic check
+    anywhere in the repo. The 2026-05-19 incident: the supervisor died at 10:34,
+    the row counters kept reporting "165 done", in-flight rows sat at age=460min,
+    and the answer given was "no concerns". The operator found out hours later
+    from a dashboard indicator.
+
+    A genuinely-encoding row is NOT stale: the encode progress writer updates
+    ``last_updated`` continuously (an active 4K encode shows an age of seconds).
+    So an ACTIVE row that hasn't moved in 30 minutes means the worker that owned
+    it is gone.
+
+    A deliberate pause is not a fault — rows legitimately sit while the GPU is
+    idled — so the check stands down when a pause is in force.
+    """
+    name = "no_stale_active_rows"
+    severity: Severity = "HIGH"
+    conn = _open_state_db(db_path)
+    if conn is None:
+        return InvariantResult(name, severity, True, "pipeline_state.db not present - skipped")
+
+    # Paused is a legitimate reason for rows to sit still.
+    try:
+        from paths import STAGING_DIR  # noqa: PLC0415
+        from pipeline.control import PipelineControl  # noqa: PLC0415
+
+        if PipelineControl(str(STAGING_DIR))._get_pause_type() is not None:
+            conn.close()
+            return InvariantResult(name, severity, True, "pipeline paused - stale check stood down")
+    except Exception:  # noqa: BLE001
+        pass  # pause state unknowable — fall through and check anyway
+
+    try:
+        from pipeline.state import ACTIVE_STATUSES  # noqa: PLC0415
+
+        actives = [s.value for s in ACTIVE_STATUSES]
+        placeholders = ",".join("?" * len(actives))
+        rows = conn.execute(
+            f"SELECT filepath, status, stage, last_updated FROM pipeline_files WHERE status IN ({placeholders})",
+            actives,
+        ).fetchall()
+    except Exception as e:  # noqa: BLE001
+        conn.close()
+        return InvariantResult(name, severity, False, f"DB query failed: {e}")
+    conn.close()
+
+    now = datetime.now()
+    stale: list[tuple[str, str, str, float]] = []
+    for r in rows:
+        try:
+            age_mins = (now - datetime.fromisoformat(r["last_updated"])).total_seconds() / 60.0
+        except (TypeError, ValueError):
+            continue
+        if age_mins > max_age_mins:
+            stale.append((r["filepath"], r["status"], r["stage"] or "", age_mins))
+    stale.sort(key=lambda t: -t[3])
+
+    offenders = [fp for fp, _, _, _ in stale]
+    passed = not offenders
+    message = (
+        f"{len(offenders)} row(s) ACTIVE with no progress for > {max_age_mins} min "
+        f"(oldest {stale[0][3]:.0f} min) - the owning worker is likely dead"
+        if offenders
+        else f"no active rows stalled beyond {max_age_mins} min"
+    )
+    return InvariantResult(
+        name,
+        severity,
+        passed,
+        message,
+        violations=offenders,
+        details={
+            "rows": [
+                {"filepath": fp, "status": st, "stage": sg, "age_mins": round(age, 1)} for fp, st, sg, age in stale[:20]
+            ],
+        },
+    )
+
+
 def _invariant_runners(skip_ssh: bool) -> list[Callable[[], InvariantResult]]:
     """Ordered list of zero-arg callables producing an InvariantResult each."""
     return [
@@ -1107,6 +1171,7 @@ def _invariant_runners(skip_ssh: bool) -> list[Callable[[], InvariantResult]]:
         check_no_done_with_error_reason,
         check_no_done_with_foreign_audio,
         check_no_elevated_breaker_counters,
+        check_no_stale_active_rows,
         lambda: check_no_stale_tmp_on_nas(skip_ssh=skip_ssh),
         lambda: check_no_zombie_mkvmerge(skip_ssh=skip_ssh),
         check_no_ghost_python_processes,
@@ -1199,8 +1264,7 @@ def _format_table(results: list[InvariantResult]) -> str:
 
     def fmt(row: tuple[str, ...]) -> str:
         return "  ".join(
-            (cell[: widths[i]] if i == len(widths) - 1 else cell).ljust(widths[i])
-            for i, cell in enumerate(row)
+            (cell[: widths[i]] if i == len(widths) - 1 else cell).ljust(widths[i]) for i, cell in enumerate(row)
         )
 
     lines = [fmt(headers), fmt(tuple("-" * w for w in widths))]

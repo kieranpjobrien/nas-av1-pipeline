@@ -19,6 +19,7 @@ manual "rescore this title" click. Batch rescoring still goes through the CLI
 batch endpoint because the UI doesn't need one (seed edits are meant to be
 infrequent; batch rescore is a deliberate, long-running operation).
 """
+
 from __future__ import annotations
 
 import json
@@ -115,8 +116,7 @@ def get_ranked(limit: int = 100, library_type: str = "all") -> dict[str, Any]:
             row = dict(r)
             reasons_csv = row.get("upgrade_reasons") or ""
             row["upgrade_reasons"] = [x for x in reasons_csv.split(",") if x]
-            for col in ("current_has_atmos", "has_atmos_available",
-                        "has_4k_hdr_available", "has_truehd_available"):
+            for col in ("current_has_atmos", "has_atmos_available", "has_4k_hdr_available", "has_truehd_available"):
                 if row.get(col) is not None:
                     row[col] = bool(row[col])
             rows.append(row)
@@ -152,6 +152,7 @@ class SeedBundle(BaseModel):
 def _seeds_path() -> Path:
     """Locate taste_seeds.json relative to the tools.upgrades package."""
     from tools.upgrades import taste_scorer  # local import — keeps FastAPI cold-start light
+
     return taste_scorer.SEEDS_PATH
 
 
@@ -202,8 +203,7 @@ def put_seeds(bundle: SeedBundle) -> dict[str, Any]:
         "low": [s.model_dump() for s in bundle.low],
     }
     _write_seeds(out)
-    return {"ok": True, "version": new_version,
-            "high_count": len(out["high"]), "low_count": len(out["low"])}
+    return {"ok": True, "version": new_version, "high_count": len(out["high"]), "low_count": len(out["low"])}
 
 
 class SeedAddRequest(BaseModel):
@@ -218,16 +218,12 @@ def add_seed(req: SeedAddRequest) -> dict[str, Any]:
     tier_list: list[dict[str, Any]] = list(seeds.get(req.tier, []))
     # Replace-if-exists by (title, year)
     key = (req.seed.title.lower(), req.seed.year)
-    tier_list = [
-        s for s in tier_list
-        if ((s.get("title") or "").lower(), s.get("year")) != key
-    ]
+    tier_list = [s for s in tier_list if ((s.get("title") or "").lower(), s.get("year")) != key]
     tier_list.append(req.seed.model_dump())
     seeds[req.tier] = tier_list
     seeds["version"] = int(seeds.get("version", 1)) + 1
     _write_seeds(seeds)
-    return {"ok": True, "version": seeds["version"], "tier": req.tier,
-            "tier_count": len(tier_list)}
+    return {"ok": True, "version": seeds["version"], "tier": req.tier, "tier_count": len(tier_list)}
 
 
 @router.delete("/seeds/{tier}")
@@ -239,17 +235,13 @@ def delete_seed(tier: str, title: str, year: int) -> dict[str, Any]:
     seeds = _read_seeds()
     tier_list: list[dict[str, Any]] = list(seeds.get(tier, []))
     key = (title.lower(), year)
-    kept = [
-        s for s in tier_list
-        if ((s.get("title") or "").lower(), s.get("year")) != key
-    ]
+    kept = [s for s in tier_list if ((s.get("title") or "").lower(), s.get("year")) != key]
     if len(kept) == len(tier_list):
         raise HTTPException(404, detail=f"{tier} seed not found: {title} ({year})")
     seeds[tier] = kept
     seeds["version"] = int(seeds.get("version", 1)) + 1
     _write_seeds(seeds)
-    return {"ok": True, "version": seeds["version"], "tier": tier,
-            "removed": {"title": title, "year": year}}
+    return {"ok": True, "version": seeds["version"], "tier": tier, "removed": {"title": title, "year": year}}
 
 
 # --------------------------------------------------------------------------
@@ -277,6 +269,7 @@ def rescore(req: RescoreRequest) -> dict[str, Any]:
 
     try:
         import anthropic
+
         from tools.upgrades import taste_scorer
     except ImportError as exc:
         raise HTTPException(500, detail=f"taste_scorer deps missing: {exc}")
@@ -301,8 +294,11 @@ def rescore(req: RescoreRequest) -> dict[str, Any]:
             raise HTTPException(502, detail=f"Claude API error: {exc}")
 
         taste_scorer.persist_score(
-            conn, title=req.title, year=req.year,
-            result=result, seed_ver=seed_ver,
+            conn,
+            title=req.title,
+            year=req.year,
+            result=result,
+            seed_ver=seed_ver,
         )
         return {
             "ok": True,
@@ -354,11 +350,7 @@ def get_radarr_profiles() -> dict[str, Any]:
         raise HTTPException(502, detail=f"Radarr API error: {exc}")
     return {
         "disabled": False,
-        "profiles": [
-            {"id": p.get("id"), "name": p.get("name")}
-            for p in profiles
-            if p.get("id") is not None
-        ],
+        "profiles": [{"id": p.get("id"), "name": p.get("name")} for p in profiles if p.get("id") is not None],
     }
 
 
@@ -422,11 +414,7 @@ def get_sonarr_profiles() -> dict[str, Any]:
         raise HTTPException(502, detail=f"Sonarr API error: {exc}")
     return {
         "disabled": False,
-        "profiles": [
-            {"id": p.get("id"), "name": p.get("name")}
-            for p in profiles
-            if p.get("id") is not None
-        ],
+        "profiles": [{"id": p.get("id"), "name": p.get("name")} for p in profiles if p.get("id") is not None],
     }
 
 

@@ -13,6 +13,7 @@ Routes:
     GET  /api/flagged           - list flagged files with rationale + detected language
     POST /api/flagged/action    - perform action on one flagged file
 """
+
 from __future__ import annotations
 
 import logging
@@ -74,24 +75,26 @@ def list_flagged() -> dict[str, Any]:
         audio_streams = entry.get("audio_streams") or []
         # Pick the first audio's detection for display
         first_audio = audio_streams[0] if audio_streams else {}
-        items.append({
-            "filepath": fp,
-            "filename": os.path.basename(fp),
-            "status": r["status"],
-            "reason": r["reason"] or "",
-            "mode": r["mode"] or "",
-            "stage": r["stage"] or "",
-            "last_updated": r["last_updated"],
-            # Media-report context
-            "library_type": entry.get("library_type") or "",
-            "title": tmdb.get("title") or tmdb.get("name") or "",
-            "year": tmdb.get("release_year") or tmdb.get("first_air_year"),
-            "original_language": tmdb.get("original_language") or "",
-            "audio_language_tag": (first_audio.get("language") or "und"),
-            "detected_language": first_audio.get("detected_language") or "",
-            "detection_confidence": first_audio.get("detection_confidence") or 0,
-            "detection_method": first_audio.get("detection_method") or "",
-        })
+        items.append(
+            {
+                "filepath": fp,
+                "filename": os.path.basename(fp),
+                "status": r["status"],
+                "reason": r["reason"] or "",
+                "mode": r["mode"] or "",
+                "stage": r["stage"] or "",
+                "last_updated": r["last_updated"],
+                # Media-report context
+                "library_type": entry.get("library_type") or "",
+                "title": tmdb.get("title") or tmdb.get("name") or "",
+                "year": tmdb.get("release_year") or tmdb.get("first_air_year"),
+                "original_language": tmdb.get("original_language") or "",
+                "audio_language_tag": (first_audio.get("language") or "und"),
+                "detected_language": first_audio.get("detected_language") or "",
+                "detection_confidence": first_audio.get("detection_confidence") or 0,
+                "detection_method": first_audio.get("detection_method") or "",
+            }
+        )
     return {"count": len(items), "items": items}
 
 
@@ -125,10 +128,7 @@ def flagged_action(req: FlaggedAction) -> dict[str, Any]:
     from paths import NAS_MOVIES, NAS_SERIES  # noqa: PLC0415
 
     _norm = os.path.normpath(fp)
-    if not (
-        _norm.startswith(os.path.normpath(str(NAS_MOVIES)))
-        or _norm.startswith(os.path.normpath(str(NAS_SERIES)))
-    ):
+    if not (_norm.startswith(os.path.normpath(str(NAS_MOVIES))) or _norm.startswith(os.path.normpath(str(NAS_SERIES)))):
         raise HTTPException(403, detail="Path is outside NAS media directories")
 
     if not os.path.exists(fp):
@@ -152,13 +152,28 @@ def flagged_action(req: FlaggedAction) -> dict[str, Any]:
 
 
 def _action_dismiss(filepath: str) -> dict[str, Any]:
-    """Accept the flagged file as-is. Status -> DONE."""
-    _set_status(
-        filepath,
-        FileStatus.DONE,
-        reason="user-dismissed flag (accepted as-is)",
-        mode="flagged_action",
-    )
+    """Accept the flagged file as-is. Status -> DONE.
+
+    Routed through ``PipelineState.set_file`` rather than the module's raw-SQL
+    ``_set_status``. CLAUDE.md names the guard inside ``set_file`` as rule 1's
+    enforcement mechanism, and this was the only DONE-writing path in the repo
+    that bypassed it — so the deferred/skipped-reason rejection, the stale
+    failure-reason scrub, the breaker-counter reset and the extras read-back
+    parse all sat unused here. (2026-07-25)
+    """
+    from paths import PIPELINE_STATE_DB  # noqa: PLC0415
+    from pipeline.state import PipelineState  # noqa: PLC0415
+
+    st = PipelineState(str(PIPELINE_STATE_DB))
+    try:
+        st.set_file(
+            filepath,
+            FileStatus.DONE,
+            reason="user-dismissed flag (accepted as-is)",
+            mode="flagged_action",
+        )
+    finally:
+        st.close()
     return {"ok": True, "filepath": filepath, "new_status": "done"}
 
 

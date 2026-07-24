@@ -49,10 +49,7 @@ def main() -> int:
     parser.add_argument(
         "--write-control",
         action="store_true",
-        help=(
-            "Write tools/audit_requeue.json with the non-compliant filepaths. "
-            "Read-only without this flag."
-        ),
+        help=("Write tools/audit_requeue.json with the non-compliant filepaths. Read-only without this flag."),
     )
     parser.add_argument(
         "--limit-show",
@@ -86,7 +83,7 @@ def main() -> int:
     for entry in files:
         try:
             res = _compliance_for_entry(entry)
-        except Exception as e:
+        except Exception:
             # Don't let one weird entry kill the audit.
             violation_counter["audit_check_failed"] += 1
             continue
@@ -134,9 +131,7 @@ def main() -> int:
             "total": total,
             "compliant": compliant,
             "needs_full_reencode": needs_full_reencode,
-            "needs_targeted_fix": [
-                {"filepath": fp, "violations": vs} for fp, vs in needs_targeted_fix
-            ],
+            "needs_targeted_fix": [{"filepath": fp, "violations": vs} for fp, vs in needs_targeted_fix],
             "violation_counts": dict(violation_counter),
         }
         out.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")

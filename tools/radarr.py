@@ -21,6 +21,7 @@ changes without restart):
 If either is unset, the client methods return a ``{"disabled": True}``
 sentinel so the UI renders "Radarr (off)" instead of surfacing a stack trace.
 """
+
 from __future__ import annotations
 
 import json
@@ -53,8 +54,7 @@ def _require_config() -> tuple[str, str]:
     key = os.environ.get(RADARR_API_KEY_ENV) or ""
     if not url or not key:
         raise RadarrNotConfigured(
-            "RADARR_URL and/or RADARR_API_KEY not set. "
-            "Set them in your environment to enable Radarr integration."
+            "RADARR_URL and/or RADARR_API_KEY not set. Set them in your environment to enable Radarr integration."
         )
     return url, key
 
@@ -133,7 +133,7 @@ def find_movie_by_path(filepath: str) -> dict[str, Any] | None:
 
     The match is done by trailing-path comparison because Radarr stores paths
     in its own root (e.g. ``/movies/...``) while we see UNC paths (e.g.
-    ``\\KieranNAS\Media\Movies\...``). We normalise both to forward slashes
+    ``\\KieranNAS\\Media\\Movies\\...``). We normalise both to forward slashes
     and compare the tail after the shared ``Movies/`` segment.
     """
     norm_target = _normalise_path(filepath)
@@ -229,7 +229,7 @@ def upgrade_via_radarr(
 def _normalise_path(p: str) -> str:
     """Windows → POSIX-ish: backslash → slash, lowercase, strip trailing slashes.
 
-    We don't try to map ``\\KieranNAS\Media\Movies\X`` to Radarr's root path
+    We don't try to map ``\\KieranNAS\\Media\\Movies\\X`` to Radarr's root path
     — we match on the trailing segment instead (see ``_paths_match``).
     """
     s = p.replace("\\", "/").lower()
@@ -245,12 +245,14 @@ def _paths_match(radarr_path: str, our_path: str) -> bool:
     """
     a = _normalise_path(radarr_path)
     b = _normalise_path(our_path)
+
     # Take the last two path components — that's the movie folder + file.
     # This handles the common case where Radarr uses a unix mount and we use
     # a Windows UNC path for the same NAS volume.
     def tail(path: str, n: int = 2) -> str:
         parts = [p for p in path.split("/") if p]
         return "/".join(parts[-n:])
+
     return tail(a) == tail(b) or Path(a).name == Path(b).name
 
 
@@ -260,6 +262,7 @@ def _norm_title(s: str) -> str:
     Handles "The Martian" / "Martian, The" / "The Martian (2015)" → same key.
     """
     import re
+
     s = s.lower()
     s = re.sub(r"\b(the|a|an)\b", "", s)
     s = re.sub(r"\(\d{4}\)", "", s)

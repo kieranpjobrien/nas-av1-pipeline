@@ -29,7 +29,6 @@ before pulling the trigger).
 from __future__ import annotations
 
 import argparse
-import os
 import subprocess
 import sys
 import time
@@ -48,16 +47,16 @@ def _enumerate_bak_files() -> list[tuple[str, int, float]]:
     """
     bases = [str(NAS_MOVIES), str(NAS_SERIES)]
     cmd = [
-        "powershell", "-NoProfile", "-Command",
+        "powershell",
+        "-NoProfile",
+        "-Command",
         "$bases = @('"
         + "','".join(b.replace("'", "''") for b in bases)
         + "'); foreach ($b in $bases) { Get-ChildItem $b -Recurse -File "
         "-Filter '*.original.bak' -ErrorAction SilentlyContinue | "
-        "ForEach-Object { \"$($_.FullName)$($_.Length)$([int][double]::Parse(($_.LastWriteTime.ToFileTime() / 1e7).ToString()))\" } }",
+        'ForEach-Object { "$($_.FullName)$($_.Length)$([int][double]::Parse(($_.LastWriteTime.ToFileTime() / 1e7).ToString()))" } }',
     ]
-    result = subprocess.run(
-        cmd, capture_output=True, text=True, timeout=600, encoding="utf-8", errors="replace"
-    )
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=600, encoding="utf-8", errors="replace")
     files: list[tuple[str, int, float]] = []
     for line in result.stdout.splitlines():
         parts = line.split("")
@@ -73,11 +72,14 @@ def _enumerate_bak_files() -> list[tuple[str, int, float]]:
 def main() -> int:
     parser = argparse.ArgumentParser(description="List or emit a deletion script for .original.bak files.")
     parser.add_argument(
-        "--older-than-days", type=float, default=7,
+        "--older-than-days",
+        type=float,
+        default=7,
         help="Only target files older than this (default: 7). Pass 0 for everything.",
     )
     parser.add_argument(
-        "--emit", default=None,
+        "--emit",
+        default=None,
         help="Write a PowerShell deletion script to this path (apostrophe-safe).",
     )
     args = parser.parse_args()

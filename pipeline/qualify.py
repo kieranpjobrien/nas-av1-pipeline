@@ -37,12 +37,13 @@ Step 4 of the 2026-04-25 build (see CLAUDE.md history). Step 5 will refactor
 ``full_gamut`` to consume QualifyResult instead of re-doing the analysis,
 removing the redundant detection that lives there today.
 """
+
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Optional
+from typing import Optional
 
 from pipeline.audio_exclusion import is_foreign_audio_ok
 from pipeline.compliance import video_is_finished
@@ -381,9 +382,7 @@ def qualify_file(
     # truly unknown — we have no right to claim it's anything. Falling back
     # to TMDb in that case would silently keep a Swedish-dubbed Bluey on
     # the assumption it's English, which is the opposite of what we want.
-    all_und = has_und_track and all(
-        lang in {"und", "unk", ""} for _, lang, _, _ in track_langs
-    )
+    all_und = has_und_track and all(lang in {"und", "unk", ""} for _, lang, _, _ in track_langs)
 
     if original_lang:
         if not has_original_track:
@@ -391,14 +390,13 @@ def qualify_file(
                 # Whisper exhausted on every track. TMDb knows the original
                 # language — trust it and proceed with low-confidence inference.
                 result.rationale = (
-                    f"all audio tracks `und` after whisper; inferring "
-                    f"original_language={original_lang} from TMDb"
+                    f"all audio tracks `und` after whisper; inferring original_language={original_lang} from TMDb"
                 )
                 result.outcome = QualifyOutcome.QUALIFIED
                 # Mark every und track with the inferred language so the
                 # downstream keep-rule recognises them as original-language
                 # tracks rather than stripping them.
-                for stream in (enriched.get("audio_streams") or []):
+                for stream in enriched.get("audio_streams") or []:
                     cur = (stream.get("language") or "").lower().strip()
                     if cur in {"und", "unk", ""}:
                         det = (stream.get("detected_language") or "").lower().strip()
@@ -411,10 +409,7 @@ def qualify_file(
                 # Whisper wasn't run; we have no detection evidence at all.
                 # Flag UND — user reviews / re-runs with whisper enabled.
                 result.outcome = QualifyOutcome.FLAGGED_UND
-                result.rationale = (
-                    f"audio is `und` and whisper hasn't been run; "
-                    f"original_language={original_lang}"
-                )
+                result.rationale = f"audio is `und` and whisper hasn't been run; original_language={original_lang}"
                 return result
             elif is_foreign_audio_ok(filepath):
                 # User opted this title out of the foreign-audio policy
@@ -423,21 +418,19 @@ def qualify_file(
                 # let it fall through to the encode gate rather than flagging.
                 # 2026-07-14.
                 logger.info(
-                    "  %s: foreign audio accepted via audio_foreign_ok override "
-                    "(original_language=%s)", name, original_lang,
+                    "  %s: foreign audio accepted via audio_foreign_ok override (original_language=%s)",
+                    name,
+                    original_lang,
                 )
                 # fall through to the codec-compliance gate below
             else:
                 # We have at least one CONFIDENTLY-detected track and none
                 # match the original. That's a real foreign-only file
                 # (e.g. English-dub-only of a Spanish film). Flag.
-                detected_summary = ", ".join(
-                    f"a:{i}={lang}" for i, lang, _, _ in track_langs
-                )
+                detected_summary = ", ".join(f"a:{i}={lang}" for i, lang, _, _ in track_langs)
                 result.outcome = QualifyOutcome.FLAGGED_FOREIGN
                 result.rationale = (
-                    f"no audio track matches original_language={original_lang} "
-                    f"(detected: {detected_summary})"
+                    f"no audio track matches original_language={original_lang} (detected: {detected_summary})"
                 )
                 return result
     else:
@@ -463,7 +456,7 @@ def qualify_file(
     # is documented as "what an already-AV1 file needs to be fully
     # done" — its silence on a non-AV1 file means "no audio/sub
     # cleanup", not "compliant".
-    video = (enriched.get("video") or {})
+    video = enriched.get("video") or {}
     src_codec_raw = (video.get("codec_raw") or "").lower()
     # AV1 OR HEVC counts as a finished source (relaxed 2026-07-18) — a HEVC
     # source with no audio/sub gaps is NOTHING_TO_DO, not re-encoded to AV1.
@@ -474,9 +467,7 @@ def qualify_file(
             # Non-AV1 source, audio/subs are clean, but the file still
             # needs codec conversion. Send to encode.
             result.outcome = QualifyOutcome.QUALIFIED
-            result.rationale = (
-                f"source codec is {src_codec_raw or 'unknown'} — needs encode to AV1"
-            )
+            result.rationale = f"source codec is {src_codec_raw or 'unknown'} — needs encode to AV1"
             return result
         # AV1 + no gaps = genuinely compliant.
         result.outcome = QualifyOutcome.NOTHING_TO_DO

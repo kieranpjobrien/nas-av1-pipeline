@@ -39,12 +39,9 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import os
 import sqlite3
-import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from pathlib import Path
 
 from pipeline.config import GRADE_CQ_TOLERANCE
 
@@ -93,6 +90,7 @@ def _build_bitrate_to_cq_table(state_db: str, files_by_path: dict) -> dict:
     Returns {(grade, res_key): {cq: median_bitrate_kbps}}.
     """
     from collections import defaultdict
+
     from pipeline.content_grade import derive_grade
 
     raw: dict[tuple, dict[int, list[int]]] = defaultdict(lambda: defaultdict(list))
@@ -117,9 +115,7 @@ def _build_bitrate_to_cq_table(state_db: str, files_by_path: dict) -> dict:
             bitrate = video.get("bitrate_kbps") or f.get("overall_bitrate_kbps") or 0
             if bitrate <= 0:
                 continue
-            res_key = "4K_HDR" if (res == "4K" and video.get("hdr")) else (
-                "4K_SDR" if res == "4K" else res
-            )
+            res_key = "4K_HDR" if (res == "4K" and video.get("hdr")) else ("4K_SDR" if res == "4K" else res)
             raw[(grade, res_key)][cq].append(int(bitrate))
         conn.close()
     except sqlite3.Error:
@@ -181,9 +177,7 @@ def _read_db_cq(state_db: str, filepath: str) -> int | None:
     try:
         conn = sqlite3.connect(state_db)
         cur = conn.cursor()
-        cur.execute(
-            "SELECT extras FROM pipeline_files WHERE filepath = ?", (filepath,)
-        )
+        cur.execute("SELECT extras FROM pipeline_files WHERE filepath = ?", (filepath,))
         row = cur.fetchone()
         conn.close()
     except sqlite3.Error:
@@ -303,16 +297,19 @@ def main() -> int:
 
     if args.report is None:
         from paths import MEDIA_REPORT
+
         report_path = str(MEDIA_REPORT)
     else:
         report_path = args.report
     if args.state_db is None:
         from paths import PIPELINE_STATE_DB
+
         state_db = str(PIPELINE_STATE_DB)
     else:
         state_db = args.state_db
 
     from pipeline.config import build_config
+
     cfg = build_config()
 
     def _base_cq(content_type: str, res_key: str) -> int:
@@ -349,6 +346,7 @@ def main() -> int:
 
     # Tally
     from collections import Counter
+
     buckets = Counter(r["bucket"] for r in results)
     grades = Counter(r["grade"] for r in results)
     sources = Counter(r["source"] for r in results)
@@ -409,7 +407,7 @@ def main() -> int:
 
     patch_report(_patch)
     logging.info("")
-    logging.info(f"Audit written into media_report.json (per-file `audit` field + top-level `audit_summary`)")
+    logging.info("Audit written into media_report.json (per-file `audit` field + top-level `audit_summary`)")
     return 0
 
 

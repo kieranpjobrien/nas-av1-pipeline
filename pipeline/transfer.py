@@ -18,7 +18,6 @@ from typing import Optional
 from pipeline.ffmpeg import format_bytes, format_duration
 from pipeline.state import FileStatus, PipelineState
 
-
 # Windows OSError.winerror codes that mean "SMB transport hiccupped, try again".
 # Source: WinError.h.
 #   59  ERROR_UNEXP_NET_ERR              — "an unexpected network error occurred"
@@ -47,8 +46,7 @@ def _is_retryable_smb_error(exc: BaseException) -> bool:
     return False
 
 
-def robust_copy(src: str, dst: str, max_retries: int = 3,
-                backoff_secs: float = 2.0) -> None:
+def robust_copy(src: str, dst: str, max_retries: int = 3, backoff_secs: float = 2.0) -> None:
     """``shutil.copy2`` with retry on transient SMB/network errors.
 
     Retries are linear: 2s, 4s, 8s by default — total ~14s of patience

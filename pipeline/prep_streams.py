@@ -41,8 +41,6 @@ from __future__ import annotations
 import logging
 import os
 import re
-from typing import Optional
-
 
 # Keep regex shared with compliance.py — title-based commentary detection.
 # Must match the same patterns the post-encode gate uses, else prep won't
@@ -133,10 +131,7 @@ def compute_sub_drop_indices(item: dict, config: dict) -> list[int]:
     # Confirmed-eng detection: any sub tagged eng/en (regardless of
     # forced/SDH disposition). One such track is enough to let us drop
     # und/zxx — the eng track is the user-facing fallback.
-    has_confirmed_eng = any(
-        (s.get("language") or "").lower().strip() in ("eng", "en")
-        for s in sub_streams
-    )
+    has_confirmed_eng = any((s.get("language") or "").lower().strip() in ("eng", "en") for s in sub_streams)
 
     drop: set[int] = set()
     eng_regular_seen: list[int] = []
@@ -161,10 +156,7 @@ def compute_sub_drop_indices(item: dict, config: dict) -> list[int]:
         if lang in ("eng", "en"):
             is_forced = "forced" in title or s.get("forced") is True
             is_sdh = (
-                "sdh" in title
-                or "(cc)" in title
-                or "hearing impaired" in title
-                or s.get("hearing_impaired") is True
+                "sdh" in title or "(cc)" in title or "hearing impaired" in title or s.get("hearing_impaired") is True
             )
             if not is_forced and not is_sdh:
                 eng_regular_seen.append(i)

@@ -13,7 +13,6 @@ import json
 import logging
 import os
 import re
-import shutil
 import subprocess
 import threading
 import time
@@ -45,14 +44,20 @@ def _probe_full(path: str) -> dict:
     try:
         result = subprocess.run(
             [
-                "ffprobe", "-v", "error",
-                "-print_format", "json",
+                "ffprobe",
+                "-v",
+                "error",
+                "-print_format",
+                "json",
                 "-show_format",
                 "-show_streams",
                 path,
             ],
-            capture_output=True, text=True, timeout=60,
-            encoding="utf-8", errors="replace",
+            capture_output=True,
+            text=True,
+            timeout=60,
+            encoding="utf-8",
+            errors="replace",
         )
         if result.returncode != 0:
             return {"error": (result.stderr.strip().splitlines() or ["probe failed"])[-1]}
@@ -79,14 +84,16 @@ def _probe_full(path: str) -> dict:
                 "color_space": s.get("color_space"),
             }
         elif st == "audio":
-            audio.append({
-                "codec": s.get("codec_name"),
-                "channels": s.get("channels"),
-                "channel_layout": s.get("channel_layout"),
-                "bit_rate_kbps": int(s["bit_rate"]) // 1000 if str(s.get("bit_rate", "")).isdigit() else None,
-                "language": (s.get("tags") or {}).get("language"),
-                "title": (s.get("tags") or {}).get("title", "") or "",
-            })
+            audio.append(
+                {
+                    "codec": s.get("codec_name"),
+                    "channels": s.get("channels"),
+                    "channel_layout": s.get("channel_layout"),
+                    "bit_rate_kbps": int(s["bit_rate"]) // 1000 if str(s.get("bit_rate", "")).isdigit() else None,
+                    "language": (s.get("tags") or {}).get("language"),
+                    "title": (s.get("tags") or {}).get("title", "") or "",
+                }
+            )
         elif st == "subtitle":
             # Include title + disposition so downstream consumers
             # (compliance.check_compliance, streams.is_hi_internal,
@@ -105,17 +112,21 @@ def _probe_full(path: str) -> dict:
             # downstream of the title/disposition-aware compliance
             # carve-out for SDH won't see the SDH unless we hand
             # over the data here.
-            subs.append({
-                "codec": s.get("codec_name"),
-                "language": (s.get("tags") or {}).get("language"),
-                "title": (s.get("tags") or {}).get("title", "") or "",
-                "disposition": dict(s.get("disposition") or {}),
-            })
+            subs.append(
+                {
+                    "codec": s.get("codec_name"),
+                    "language": (s.get("tags") or {}).get("language"),
+                    "title": (s.get("tags") or {}).get("title", "") or "",
+                    "disposition": dict(s.get("disposition") or {}),
+                }
+            )
 
     return {
         "format": {
             "name": fmt.get("format_name"),
-            "duration_secs": float(fmt["duration"]) if str(fmt.get("duration", "")).replace(".", "", 1).isdigit() else None,
+            "duration_secs": float(fmt["duration"])
+            if str(fmt.get("duration", "")).replace(".", "", 1).isdigit()
+            else None,
             "size_bytes": int(fmt["size"]) if str(fmt.get("size", "")).isdigit() else None,
             "bit_rate_kbps": int(fmt["bit_rate"]) // 1000 if str(fmt.get("bit_rate", "")).isdigit() else None,
         },
@@ -270,8 +281,7 @@ def _prepare_for_encode_locked(
         _ai = _cached.get("actual_input") if isinstance(_cached, dict) else None
         if _ai and not os.path.exists(_ai):
             logging.info(
-                f"  prep: cached input missing on disk ({os.path.basename(str(_ai))}) "
-                f"— re-prepping: {filename}"
+                f"  prep: cached input missing on disk ({os.path.basename(str(_ai))}) — re-prepping: {filename}"
             )
         else:
             return _cached
@@ -312,15 +322,10 @@ def _prepare_for_encode_locked(
                 # Any terminal state (DONE / FLAGGED_*) means the file is settled
                 # by another worker — exit silently rather than waiting forever.
                 if status and is_terminal(status):
-                    logging.info(
-                        f"prep: file became terminal during wait ({status}) — releasing: {filename}"
-                    )
+                    logging.info(f"prep: file became terminal during wait ({status}) — releasing: {filename}")
                     return None
                 if waited >= max_wait_secs:
-                    logging.error(
-                        f"prep: gave up waiting for fetch after {waited}s "
-                        f"(status={status}): {filename}"
-                    )
+                    logging.error(f"prep: gave up waiting for fetch after {waited}s (status={status}): {filename}")
                     return None
                 time.sleep(2)
                 waited += 2
@@ -468,22 +473,15 @@ def _prepare_for_encode_locked(
         # had silently disabled the rule-8 probe for essentially the whole
         # queue. Machine stamps carry force_source="auto"; dashboard requeues
         # don't, so the user override still works.
-        if (
-            existing
-            and existing.get("force_reencode")
-            and existing.get("force_source") != "auto"
-        ):
-            logging.info(
-                "  prep: force_reencode=true → skipping source-integrity probe (user override)"
-            )
+        if existing and existing.get("force_reencode") and existing.get("force_source") != "auto":
+            logging.info("  prep: force_reencode=true → skipping source-integrity probe (user override)")
         else:
             from tools.probe_source_integrity import probe_file as _probe_source
 
             probe_result = _probe_source(actual_input)
             if not probe_result.healthy:
                 broken_summary = (
-                    probe_result.fatal
-                    or f"decode errors in windows={','.join(probe_result.windows_failed)}"
+                    probe_result.fatal or f"decode errors in windows={','.join(probe_result.windows_failed)}"
                 )
                 logging.error(
                     f"  prep: source-integrity probe FAILED — {broken_summary}. "
@@ -540,7 +538,10 @@ def _prepare_for_encode_locked(
             # The previous actual_input + any remux output are garbage
             # (superseded). Hand them to _cleanup so they get removed
             # alongside the encoded artefacts later.
-            prev_actual_input = actual_input
+            # NOTE: the superseded pre-strip input needs no separate handle —
+            # it is always local_path or remuxed_path, both of which every
+            # _cleanup call already covers. What DID leak is the new stripped
+            # sibling; see stripped_leftover in _encode_only.
             actual_input = stripped_input
             # Re-probe so item.audio_streams / subtitle_streams reflect
             # the now-stripped input. The encoder's stream selector
@@ -582,10 +583,7 @@ def _prepare_for_encode_locked(
                     ]
                     item["audio_streams"] = new_audio
                     item["subtitle_streams"] = new_subs
-                    logging.info(
-                        f"  prep: post-strip layout — {len(new_audio)} audio, "
-                        f"{len(new_subs)} sub"
-                    )
+                    logging.info(f"  prep: post-strip layout — {len(new_audio)} audio, {len(new_subs)} sub")
             except Exception as e:
                 logging.warning(f"  prep: post-strip re-probe failed (non-fatal): {e}")
 
@@ -657,7 +655,6 @@ def full_gamut(
     the optimisation: the GPU thread doesn't burn time on CPU prep.
     """
     filename = item["filename"]
-    library_type = item.get("library_type", "")
 
     try:
         # === GUARD: AV1 source requires force_reencode=true to proceed ===
@@ -673,6 +670,7 @@ def full_gamut(
         # tool — and that flag is only set on rows where we have reliable
         # CQ data (audit source = tag or state_db, not bitrate_inferred).
         from pipeline.compliance import video_is_finished
+
         existing_pre = state.get_file(filepath)
         item_codec = (item.get("video_codec") or "").lower()
         if video_is_finished(item_codec):
@@ -839,6 +837,12 @@ def _encode_only(
     external_subs = prep_data.get("external_subs") or []
     output_path = prep_data.get("output_path")
     local_path = existing.get("local_path")
+    # The pre-encode strip writes a `<src>.stripped.mkv` sibling and hands it
+    # back as actual_input. It was in NO _cleanup call, so it survived every
+    # exit path and only the startup orphan sweep ever removed it — 84 GB was
+    # sitting in fetch/ across 5 files on 2026-07-25. Clean it alongside the
+    # rest. (local_path / remuxed_path are already covered.)
+    stripped_leftover = actual_input if actual_input and actual_input not in (local_path, remuxed_path) else None
 
     try:
         # === STEP 5 (cmd build only — remux already happened in prep) ===
@@ -856,8 +860,12 @@ def _encode_only(
             logging.info(f"  Muxing {len(eng_external)} external English subtitle(s) (cached)")
 
         cmd = build_ffmpeg_cmd(
-            actual_input, output_path, item, config,
-            include_subs=True, external_subs=eng_external or None,
+            actual_input,
+            output_path,
+            item,
+            config,
+            include_subs=True,
+            external_subs=eng_external or None,
         )
 
         encode_start = time.time()
@@ -878,11 +886,9 @@ def _encode_only(
                     cmd, actual_input, output_path, item, config, state, filepath, result_out=encode_info
                 )
         else:
-            success = _run_encode(
-                cmd, actual_input, output_path, item, config, state, filepath, result_out=encode_info
-            )
+            success = _run_encode(cmd, actual_input, output_path, item, config, state, filepath, result_out=encode_info)
         if not success:
-            _cleanup(local_path, remuxed_path, output_path)
+            _cleanup(local_path, remuxed_path, output_path, stripped_leftover)
             return False
 
         state.set_file(
@@ -915,9 +921,7 @@ def _encode_only(
         # shipped +30%/+24%). The prior grow-refuse was AV1->AV1 only.
         _bloat_attempt = 0
         while True:
-            _action, _retry_cq = _bloat_retry_plan(
-                output_size, input_size, params.get("cq", 30), _bloat_attempt
-            )
+            _action, _retry_cq = _bloat_retry_plan(output_size, input_size, params.get("cq", 30), _bloat_attempt)
             if _action == "ship":
                 break
             if _action == "flag":
@@ -927,7 +931,7 @@ def _encode_only(
                     f"{format_bytes(input_size)} -> {format_bytes(output_size)} — "
                     f"keeping source, flagging for review."
                 )
-                _cleanup(local_path, remuxed_path, output_path)
+                _cleanup(local_path, remuxed_path, output_path, stripped_leftover)
                 state.set_file(
                     filepath,
                     FileStatus.FLAGGED_MANUAL,
@@ -949,16 +953,28 @@ def _encode_only(
             if gpu_semaphore is not None:
                 with gpu_semaphore:
                     success = _run_encode(
-                        _retry_cmd, actual_input, output_path, item, config, state,
-                        filepath, result_out=encode_info,
+                        _retry_cmd,
+                        actual_input,
+                        output_path,
+                        item,
+                        config,
+                        state,
+                        filepath,
+                        result_out=encode_info,
                     )
             else:
                 success = _run_encode(
-                    _retry_cmd, actual_input, output_path, item, config, state,
-                    filepath, result_out=encode_info,
+                    _retry_cmd,
+                    actual_input,
+                    output_path,
+                    item,
+                    config,
+                    state,
+                    filepath,
+                    result_out=encode_info,
                 )
             if not success:
-                _cleanup(local_path, remuxed_path, output_path)
+                _cleanup(local_path, remuxed_path, output_path, stripped_leftover)
                 return False
             output_size = os.path.getsize(output_path)
             saved = input_size - output_size
@@ -975,11 +991,9 @@ def _encode_only(
             # file is never re-examined and the Grade-Optimised KPI reports a
             # quality level the file doesn't have (rule 11). (2026-07-25)
             params["cq"] = _retry_cq
-            state.set_file(
-                filepath, FileStatus.PROCESSING, encode_params_used=dict(params)
-            )
+            state.set_file(filepath, FileStatus.PROCESSING, encode_params_used=dict(params))
 
-        _cleanup(local_path, remuxed_path)
+        _cleanup(local_path, remuxed_path, stripped_leftover)
 
         final_name = clean_name if clean_name else Path(filename).stem + ".mkv"
         if not final_name.endswith(".mkv"):
@@ -1077,18 +1091,12 @@ def _purge_stale_source_path(filepath: str, final_path: str, state: PipelineStat
     try:
         remove_entry(filepath)
     except Exception as e:  # noqa: BLE001
-        logging.warning(
-            f"  Stale-entry cleanup: media_report remove failed for {os.path.basename(filepath)}: {e}"
-        )
+        logging.warning(f"  Stale-entry cleanup: media_report remove failed for {os.path.basename(filepath)}: {e}")
     try:
         state.remove_ghosts([filepath])
     except Exception as e:  # noqa: BLE001
-        logging.warning(
-            f"  Stale-entry cleanup: state row remove failed for {os.path.basename(filepath)}: {e}"
-        )
-    logging.info(
-        f"  Removed stale source-path entry: {os.path.basename(filepath)} → {os.path.basename(final_path)}"
-    )
+        logging.warning(f"  Stale-entry cleanup: state row remove failed for {os.path.basename(filepath)}: {e}")
+    logging.info(f"  Removed stale source-path entry: {os.path.basename(filepath)} → {os.path.basename(final_path)}")
     return True
 
 
@@ -1132,6 +1140,7 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
         # blip on these errors landed the file in ERROR with no retry
         # budget (Snatch 2026-05-12 12:44 was this).
         from pipeline.transfer import robust_copy
+
         robust_copy(output_path, dest_path)
     except Exception as e:
         state.set_file(filepath, FileStatus.ERROR, error=f"upload failed: {e}", stage="upload")
@@ -1234,9 +1243,7 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
         # parse (truncated container header, unknown codec tag, etc.) skipped BOTH the
         # integrity check AND the standards-compliance check and was committed to the
         # library. Now it's a hard ERROR and the file is parked for manual review.
-        logging.error(
-            f"  Output integrity probe failed ({output_probe['error']}) — parking in ERROR."
-        )
+        logging.error(f"  Output integrity probe failed ({output_probe['error']}) — parking in ERROR.")
         try:
             os.remove(dest_path)
         except OSError:
@@ -1252,9 +1259,7 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
         out_video = output_probe.get("video") or {}
         out_codec = (out_video.get("codec") or "").lower()
         out_bitrate_kbps = (
-            out_video.get("bit_rate_kbps")
-            or (output_probe.get("format") or {}).get("bit_rate_kbps")
-            or 0
+            out_video.get("bit_rate_kbps") or (output_probe.get("format") or {}).get("bit_rate_kbps") or 0
         )
         input_bitrate_kbps = int((input_size / input_duration * 8 / 1000)) if input_duration > 0 else 0
         # AV1 is much more efficient than H.264/HEVC — use a lower ratio floor so
@@ -1312,13 +1317,14 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
     #   * UNRECOVERABLE — out-of-band issue (probe error). Same effect as
     #     REFUSE; surfaces for manual triage.
     if output_probe and not output_probe.get("error"):
-        from pipeline.compliance import categorise, check_compliance, Category
+        from pipeline.compliance import Category, categorise, check_compliance
         from pipeline.compliance_fixers import FIXERS
 
         # Resolve item from media_report so it has tmdb/library_type for the check.
         try:
             from paths import MEDIA_REPORT  # noqa: PLC0415
             from server.helpers import read_json_safe  # noqa: PLC0415
+
             _report = read_json_safe(MEDIA_REPORT) or {}
             _entry = next(
                 (f for f in _report.get("files", []) if f.get("filepath") in (filepath, final_path)),
@@ -1339,8 +1345,8 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
         }
         if _entry:
             compliance_item["tmdb"] = _entry.get("tmdb") or {}
-            compliance_item["resolution"] = ((_entry.get("video") or {}).get("resolution_class", ""))
-            compliance_item["hdr"] = ((_entry.get("video") or {}).get("hdr", False))
+            compliance_item["resolution"] = (_entry.get("video") or {}).get("resolution_class", "")
+            compliance_item["hdr"] = (_entry.get("video") or {}).get("hdr", False)
             compliance_item.setdefault("library_type", _entry.get("library_type", ""))
 
         # Pull the encode_params used and source AV1-ness from state extras.
@@ -1362,8 +1368,8 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
             _grade = encode_params_used.get("content_grade") or "default"
             if _cq is not None:
                 _encoder = (
-                    f"av1_nvenc cq={_cq} preset={encode_params_used.get('preset','p7')} "
-                    f"multipass={encode_params_used.get('multipass','fullres')} "
+                    f"av1_nvenc cq={_cq} preset={encode_params_used.get('preset', 'p7')} "
+                    f"multipass={encode_params_used.get('multipass', 'fullres')} "
                     f"grade={_grade} base_cq={encode_params_used.get('base_cq', _cq)} "
                     f"offset={'+' if (encode_params_used.get('cq_offset') or 0) >= 0 else ''}"
                     f"{encode_params_used.get('cq_offset') or 0}"
@@ -1385,17 +1391,17 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
             try:
                 _out = subprocess.run(
                     [r"C:/Program Files/MKVToolNix/mkvextract.exe", "tags", p],
-                    capture_output=True, timeout=60,
+                    capture_output=True,
+                    timeout=60,
                 )
                 if _out.returncode != 0:
                     return {}
                 _xml = _out.stdout.decode("utf-8", "replace")
                 import re as _re
+
                 return {
                     m.group(1).upper(): m.group(2)
-                    for m in _re.finditer(
-                        r"<Simple>\s*<Name>([^<]+)</Name>\s*<String>([^<]*)</String>", _xml
-                    )
+                    for m in _re.finditer(r"<Simple>\s*<Name>([^<]+)</Name>\s*<String>([^<]*)</String>", _xml)
                 }
             except Exception:
                 return {}
@@ -1497,16 +1503,13 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
         # drops is gone by design; the post-encode gate is now a thin
         # verifier with nothing to repair for the drop class.
         drop_violations = [
-            v for v in grouped[Category.FIXABLE]
-            if v.tag in ("foreign_audio", "commentary_audio",
-                         "foreign_subs", "extra_eng_subs")
+            v
+            for v in grouped[Category.FIXABLE]
+            if v.tag in ("foreign_audio", "commentary_audio", "foreign_subs", "extra_eng_subs")
         ]
         if drop_violations:
             for v in drop_violations:
-                logging.error(
-                    f"  PREP MISS — drop violation survived pre-encode strip: "
-                    f"{v.tag} | {v.message}"
-                )
+                logging.error(f"  PREP MISS — drop violation survived pre-encode strip: {v.tag} | {v.message}")
             try:
                 os.remove(dest_path)
             except OSError:
@@ -1517,8 +1520,7 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
             prev_extras = state.get_file(filepath) or {}
             refuse_count = int(prev_extras.get("compliance_refuse_count", 0) or 0) + 1
             err_msg = (
-                f"prep miss: {drop_violations[0].tag} survived pre-encode strip — "
-                f"{drop_violations[0].message[:160]}"
+                f"prep miss: {drop_violations[0].tag} survived pre-encode strip — {drop_violations[0].message[:160]}"
             )
             if refuse_count >= COMPLIANCE_REFUSE_BREAKER:
                 # A surviving drop violation is a compliance/policy hold,
@@ -1645,18 +1647,26 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
     #
     # Cost: ~300-500 ms on a clean file (header + first GOP only). Worth it.
     integrity_signatures = (
-        "exceeds containing master element", "exceeds max length",
-        "unknown-sized element", "inside parent with finite size",
-        "obu_forbidden_bit out of range", "failed to parse temporal unit",
-        "unknown obu type", "overrun in obu bit buffer", "error parsing obu data",
-        "invalid data found when processing input", "error submitting packet to decoder",
+        "exceeds containing master element",
+        "exceeds max length",
+        "unknown-sized element",
+        "inside parent with finite size",
+        "obu_forbidden_bit out of range",
+        "failed to parse temporal unit",
+        "unknown obu type",
+        "overrun in obu bit buffer",
+        "error parsing obu data",
+        "invalid data found when processing input",
+        "error submitting packet to decoder",
     )
     try:
         result = subprocess.run(
-            ["ffmpeg", "-v", "error", "-hide_banner",
-             "-i", dest_path, "-t", "10", "-f", "null", "-"],
-            capture_output=True, text=True, timeout=60,
-            encoding="utf-8", errors="replace",
+            ["ffmpeg", "-v", "error", "-hide_banner", "-i", dest_path, "-t", "10", "-f", "null", "-"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            encoding="utf-8",
+            errors="replace",
         )
         stderr_lo = (result.stderr or "").lower()
         hits = [sig for sig in integrity_signatures if sig in stderr_lo]
@@ -1775,6 +1785,7 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
     if _SCENE_TAG_RE.search(final_name):
         try:
             from pipeline.filename import clean_filename
+
             proposed = clean_filename(final_path, library_type)
         except Exception:
             proposed = None
@@ -1886,14 +1897,10 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
         try:
             bak_size = os.path.getsize(backup_path)
             os.remove(backup_path)
-            logging.info(
-                f"  Removed backup: {os.path.basename(backup_path)} "
-                f"({format_bytes(bak_size)} freed)"
-            )
+            logging.info(f"  Removed backup: {os.path.basename(backup_path)} ({format_bytes(bak_size)} freed)")
         except OSError as e:
             logging.warning(
-                f"  Backup removal failed for {os.path.basename(backup_path)}: {e} "
-                f"— leaving for the next bulk purge"
+                f"  Backup removal failed for {os.path.basename(backup_path)}: {e} — leaving for the next bulk purge"
             )
 
     # === DONE ===
@@ -1964,6 +1971,7 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
         report_video = report_entry.get("video", {}) or {}
 
         fetch_time = entry.get("fetch_time_secs") or 0
+
         def _mbps(bytes_, secs):
             if not bytes_ or not secs:
                 return None
@@ -1974,9 +1982,8 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
         if out_probe.get("error") or not out_probe.get("video"):
             out_probe = _probe_full(final_path)
 
-        input_bitrate_kbps = (
-            report_entry.get("overall_bitrate_kbps")
-            or (int(input_size / input_duration * 8 / 1000) if input_duration > 0 else None)
+        input_bitrate_kbps = report_entry.get("overall_bitrate_kbps") or (
+            int(input_size / input_duration * 8 / 1000) if input_duration > 0 else None
         )
 
         # Pull Tier 1 telemetry stashed earlier during encode
@@ -1997,7 +2004,6 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
             "tier": entry.get("tier") or entry.get("tier_name") or "",
             "mode": entry.get("mode") or "full_gamut",
             "release": release_info,
-
             # Sizes + timings + speeds
             "input_bytes": input_size,
             "output_bytes": output_size,
@@ -2009,26 +2015,20 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
             "fetch_speed_mb_s": _mbps(input_size, fetch_time),
             "upload_speed_mb_s": _mbps(output_size, upload_elapsed),
             "encode_speed_x_realtime": (
-                round(input_duration / encode_time, 2)
-                if encode_time and input_duration else None
+                round(input_duration / encode_time, 2) if encode_time and input_duration else None
             ),
-
             # Durations — catch timestamp-bug outputs via side-by-side comparison
             "input_duration_secs": round(input_duration, 1) if input_duration else None,
-            "output_duration_secs": (
-                round((out_probe.get("format") or {}).get("duration_secs") or 0, 1) or None
-            ),
-
+            "output_duration_secs": (round((out_probe.get("format") or {}).get("duration_secs") or 0, 1) or None),
             # Tier 1 — encoder config + retry telemetry
-            "encode_params": encode_params_used,         # cq, preset, multipass, lookahead, maxrate, bufsize
-            "ffmpeg_stats": ffmpeg_stats,                # speed, fps, dup, drop, frame, size from stderr
+            "encode_params": encode_params_used,  # cq, preset, multipass, lookahead, maxrate, bufsize
+            "ffmpeg_stats": ffmpeg_stats,  # speed, fps, dup, drop, frame, size from stderr
             "retry": {
                 "ffmpeg_retry_mode": encode_retry_mode,  # none / no_subs / audio_copy
                 "ffmpeg_attempts": encode_attempts,
                 "duration_retry_count": state_extras.get("duration_retry_count", 0),
                 "integrity_retry_count": state_extras.get("integrity_retry_count", 0),
             },
-
             # Source stream details (pre-encode) — preserved so we can compare later
             "source": {
                 "video": {
@@ -2059,7 +2059,6 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
                     for s in (report_entry.get("external_subtitles") or [])
                 ],
             },
-
             # Output stream details (post-encode) — live probe of the file we just wrote
             "output": {
                 "video": out_probe.get("video") or {},
@@ -2156,6 +2155,7 @@ def _run_encode(
             # producing no progress lines and growing the output file by 0
             # bytes for 7.5 hours before the user noticed.
             import threading
+
             stall_secs = float(config.get("encode_output_stall_secs", 180.0))
             output_growth_stop = threading.Event()
             output_growth_thread = threading.Thread(
@@ -2215,7 +2215,9 @@ def _run_encode(
                 retry_mode = "no_subs"
                 tried_modes.add("no_subs")
                 continue
-            if "audio_copy" not in tried_modes and ("non-monotonic dts" in stderr_low or "non monotonic dts" in stderr_low):
+            if "audio_copy" not in tried_modes and (
+                "non-monotonic dts" in stderr_low or "non monotonic dts" in stderr_low
+            ):
                 retry_mode = "audio_copy"
                 tried_modes.add("audio_copy")
                 continue
@@ -2372,9 +2374,7 @@ def _stream_encode_progress(process, state: PipelineState, filepath: str, durati
             fps = float(fps_s) if fps_s else 0.0
             speed = float(speed_s) if speed_s else 0.0
             pct = int(elapsed_out / duration_secs * 100) if duration_secs > 0 else None
-            eta_secs = (
-                (duration_secs - elapsed_out) / speed if speed > 0 and duration_secs else None
-            )
+            eta_secs = (duration_secs - elapsed_out) / speed if speed > 0 and duration_secs else None
             eta_text = None
             if eta_secs and eta_secs > 0:
                 h, rem = divmod(int(eta_secs), 3600)
@@ -2445,9 +2445,7 @@ def _build_audio_copy_cmd(cmd: list[str]) -> list[str]:
     # If it doesn't, running it would produce zero-audio output with rc=0 — a
     # silent-damage path. Fail here rather than ship the audio-less encode.
     has_audio_map = any(
-        out[i] == "-map" and out[i + 1].startswith("0:a")
-        for i in range(len(out) - 1)
-        if out[i] == "-map"
+        out[i] == "-map" and out[i + 1].startswith("0:a") for i in range(len(out) - 1) if out[i] == "-map"
     )
     if not has_audio_map:
         raise ValueError(

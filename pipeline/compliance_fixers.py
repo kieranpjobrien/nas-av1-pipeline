@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import logging
 import os
-import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -110,10 +109,12 @@ def _ffmpeg_drop_streams_to_path(
         # Nothing to do — copy src to dst (caller wants dst regardless).
         # We could symlink but Windows symlinks need admin; just copy.
         import shutil as _shutil
+
         _shutil.copy2(src, dst)
         return True
 
     from pipeline.full_gamut import _probe_full
+
     probe = _probe_full(src)
     n_audio = len(probe.get("audio") or [])
     n_sub = len(probe.get("subs") or [])
@@ -123,9 +124,7 @@ def _ffmpeg_drop_streams_to_path(
     if drop_audio_indices is not None:
         keep_audio = [i for i in range(n_audio) if i not in drop_audio_indices]
         if not keep_audio:
-            logging.error(
-                f"refusing to drop ALL audio tracks (would produce zero-audio file): {src}"
-            )
+            logging.error(f"refusing to drop ALL audio tracks (would produce zero-audio file): {src}")
             return False
     else:
         keep_audio = list(range(n_audio))
@@ -136,9 +135,15 @@ def _ffmpeg_drop_streams_to_path(
         keep_sub = list(range(n_sub))
 
     cmd = [
-        "ffmpeg", "-y", "-nostats", "-loglevel", "error",
-        "-i", src,
-        "-map", "0:v",  # always keep all video (covers cover-art too)
+        "ffmpeg",
+        "-y",
+        "-nostats",
+        "-loglevel",
+        "error",
+        "-i",
+        src,
+        "-map",
+        "0:v",  # always keep all video (covers cover-art too)
     ]
     for i in keep_audio:
         cmd.extend(["-map", f"0:a:{i}"])
@@ -151,10 +156,7 @@ def _ffmpeg_drop_streams_to_path(
     try:
         out = subprocess.run(cmd, capture_output=True, timeout=timeout_secs)
     except Exception as e:
-        logging.error(
-            f"ffmpeg drop-to-path raised (timeout={timeout_secs}s, "
-            f"src_size={src_size/1024**3:.1f}GB): {e}"
-        )
+        logging.error(f"ffmpeg drop-to-path raised (timeout={timeout_secs}s, src_size={src_size / 1024**3:.1f}GB): {e}")
         if os.path.exists(dst):
             try:
                 os.remove(dst)
@@ -162,10 +164,7 @@ def _ffmpeg_drop_streams_to_path(
                 pass
         return False
     if out.returncode != 0:
-        logging.error(
-            f"ffmpeg drop-to-path rc={out.returncode}: "
-            f"{out.stderr.decode('utf-8','replace')[:300]}"
-        )
+        logging.error(f"ffmpeg drop-to-path rc={out.returncode}: {out.stderr.decode('utf-8', 'replace')[:300]}")
         if os.path.exists(dst):
             try:
                 os.remove(dst)
@@ -191,8 +190,8 @@ def _ffmpeg_drop_streams_to_path(
     # 254 MB = 40% — well below 50% — but track-count-correct).
     if out_size < src_size * 0.10:
         logging.error(
-            f"ffmpeg drop-to-path output too small ({out_size/1024**2:.1f} MB vs "
-            f"{src_size/1024**2:.1f} MB source, <10%) — discarding as truncated"
+            f"ffmpeg drop-to-path output too small ({out_size / 1024**2:.1f} MB vs "
+            f"{src_size / 1024**2:.1f} MB source, <10%) — discarding as truncated"
         )
         try:
             os.remove(dst)
@@ -254,6 +253,7 @@ def _mkvmerge_drop_streams(
 
     # One probe for both audio + sub fixes — saves an SMB round-trip.
     from pipeline.full_gamut import _probe_full
+
     probe = _probe_full(src)
     # ``_probe_full`` returns ``video`` as a SINGLE DICT (the first video
     # stream), not a list. ``len(dict)`` returns the key count (~9 fields),
@@ -265,17 +265,15 @@ def _mkvmerge_drop_streams(
     n_video = 1 if probe.get("video") else 0
     n_audio = len(probe.get("audio") or [])
     n_sub = len(probe.get("subs") or [])
-    audio_id_offset = n_video             # audio global IDs: [n_video, n_video+n_audio)
-    sub_id_offset = n_video + n_audio     # sub global IDs:   [offset, offset+n_sub)
+    audio_id_offset = n_video  # audio global IDs: [n_video, n_video+n_audio)
+    sub_id_offset = n_video + n_audio  # sub global IDs:   [offset, offset+n_sub)
 
     cmd = [MKVMERGE, "-o", tmp_out]
 
     if drop_audio_indices is not None:
         keep_audio_per_type = [i for i in range(n_audio) if i not in drop_audio_indices]
         if not keep_audio_per_type:
-            logging.error(
-                f"compliance fix refuses to drop ALL audio tracks (would produce zero-audio file): {src}"
-            )
+            logging.error(f"compliance fix refuses to drop ALL audio tracks (would produce zero-audio file): {src}")
             return False
         keep_audio_global = [audio_id_offset + i for i in keep_audio_per_type]
         cmd.extend(["--audio-tracks", ",".join(str(i) for i in keep_audio_global)])
@@ -309,8 +307,7 @@ def _mkvmerge_drop_streams(
         out = subprocess.run(cmd, capture_output=True, timeout=timeout_secs)
     except Exception as e:
         logging.error(
-            f"compliance fix mkvmerge raised (timeout={timeout_secs}s, "
-            f"src_size={src_size/1024**3:.1f}GB): {e}"
+            f"compliance fix mkvmerge raised (timeout={timeout_secs}s, src_size={src_size / 1024**3:.1f}GB): {e}"
         )
         if os.path.exists(tmp_out):
             try:
@@ -319,10 +316,7 @@ def _mkvmerge_drop_streams(
                 pass
         return False
     if out.returncode != 0:
-        logging.error(
-            f"compliance fix mkvmerge rc={out.returncode}: "
-            f"{out.stderr.decode('utf-8','replace')[:200]}"
-        )
+        logging.error(f"compliance fix mkvmerge rc={out.returncode}: {out.stderr.decode('utf-8', 'replace')[:200]}")
         if os.path.exists(tmp_out):
             try:
                 os.remove(tmp_out)
@@ -344,8 +338,8 @@ def _mkvmerge_drop_streams(
     out_size = os.path.getsize(tmp_out)
     if out_size < src_size * 0.10:
         logging.error(
-            f"compliance fix output too small ({out_size/1024**2:.1f} MB vs "
-            f"{src_size/1024**2:.1f} MB source, <10%) — refusing replace as truncated"
+            f"compliance fix output too small ({out_size / 1024**2:.1f} MB vs "
+            f"{src_size / 1024**2:.1f} MB source, <10%) — refusing replace as truncated"
         )
         try:
             os.remove(tmp_out)
@@ -420,10 +414,7 @@ def _mkvmerge_drop_streams(
             last_exc = e
             break
     # Exhausted retries OR hit a non-PermissionError. Log + clean up tmp.
-    logging.error(
-        f"compliance fix atomic replace failed after retries: {last_exc!r} — "
-        f"src={os.path.basename(src)}"
-    )
+    logging.error(f"compliance fix atomic replace failed after retries: {last_exc!r} — src={os.path.basename(src)}")
     try:
         if os.path.exists(tmp_out):
             os.remove(tmp_out)
@@ -448,9 +439,7 @@ def fix_commentary_audio(filepath: str, v: Violation) -> bool:
     return _mkvmerge_drop_streams(filepath, drop_audio_indices=v.data["indices"])
 
 
-def fix_missing_encode_tags(
-    filepath: str, v: Violation, *, encode_params: dict
-) -> bool:
+def fix_missing_encode_tags(filepath: str, v: Violation, *, encode_params: dict) -> bool:
     """Stamp ENCODER + CQ + CONTENT_GRADE via merge_global_tags."""
     from pipeline.mkv_tags import merge_global_tags
 
@@ -460,8 +449,8 @@ def fix_missing_encode_tags(
         logging.error("fix_missing_encode_tags: encode_params has no cq")
         return False
     encoder_str = (
-        f"av1_nvenc cq={cq} preset={encode_params.get('preset','p7')} "
-        f"multipass={encode_params.get('multipass','fullres')} "
+        f"av1_nvenc cq={cq} preset={encode_params.get('preset', 'p7')} "
+        f"multipass={encode_params.get('multipass', 'fullres')} "
         f"grade={grade} base_cq={encode_params.get('base_cq', cq)} "
         f"offset={'+' if (encode_params.get('cq_offset') or 0) >= 0 else ''}"
         f"{encode_params.get('cq_offset') or 0}"

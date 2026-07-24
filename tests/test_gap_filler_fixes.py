@@ -66,16 +66,17 @@ class TestTrackStripFailure:
             return_value=False,
         ):
             # Also stub metadata / report so we don't hit the network
-            with patch("pipeline.metadata.enrich_and_tag", return_value=None, create=True), \
-                 patch("pipeline.report.update_entry", return_value=True):
+            with (
+                patch("pipeline.metadata.enrich_and_tag", return_value=None, create=True),
+                patch("pipeline.report.update_entry", return_value=True),
+            ):
                 gap_fill(filepath, entry, gaps, min_config, state)
 
         saved = state.get_file(filepath)
         state.close()
         assert saved is not None, "expected a state row after gap_fill"
         assert saved["status"] == FileStatus.ERROR.value, (
-            f"expected ERROR on strip failure, got {saved.get('status')!r} "
-            f"with reason={saved.get('reason')!r}"
+            f"expected ERROR on strip failure, got {saved.get('status')!r} with reason={saved.get('reason')!r}"
         )
         # Stage is the machine-readable hook that the next queue build uses to retry.
         assert saved.get("stage") == "track_strip"
@@ -117,16 +118,12 @@ class TestFetchMissingSource:
 
         saved = state.get_file(source)
         state.close()
-        assert result is SOURCE_MISSING, (
-            f"missing source must return SOURCE_MISSING sentinel; got {result!r}"
-        )
+        assert result is SOURCE_MISSING, f"missing source must return SOURCE_MISSING sentinel; got {result!r}"
         # Critically: NO DONE state row. The original incident was 'mark
         # DONE on failure'; that's still forbidden. ERROR rows were the
         # 2026-04-23 fix but produced rename-ghost pollution; now the
         # caller handles cleanup.
-        assert saved is None or saved["status"] != FileStatus.DONE.value, (
-            "missing source must NEVER be marked DONE"
-        )
+        assert saved is None or saved["status"] != FileStatus.DONE.value, "missing source must NEVER be marked DONE"
 
 
 class TestStateGuard:
@@ -189,9 +186,16 @@ class TestProbeFailure:
                 fh.write(b"y" * 500_000)
 
         # Force _probe_full to report a probe failure on the staging output
-        with patch("pipeline.full_gamut.shutil.copy2", side_effect=_fake_copy2), \
-             patch("pipeline.full_gamut.get_duration", return_value=1800), \
-             patch("pipeline.full_gamut._probe_full", return_value={"error": "bad container header"}):
+        # Patch shutil.copy2 at the module itself. This used to be spelled
+        # "pipeline.full_gamut.shutil.copy2", which only worked by reaching
+        # THROUGH full_gamut's (otherwise unused) shutil import to the same
+        # global module object — so it silently depended on a dead import
+        # surviving in full_gamut. Same effect, honest target. (2026-07-25)
+        with (
+            patch("shutil.copy2", side_effect=_fake_copy2),
+            patch("pipeline.full_gamut.get_duration", return_value=1800),
+            patch("pipeline.full_gamut._probe_full", return_value={"error": "bad container header"}),
+        ):
             ok = finalize_upload(filepath, state, min_config)
 
         saved = state.get_file(filepath)

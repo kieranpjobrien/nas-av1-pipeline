@@ -60,3 +60,8 @@ python_functions = "test_*"
 
 [tool.hatch.build.targets.wheel]
 packages = ["pipeline", "server", "tools"]
+
+[dependency-groups]
+dev = [
+    "pre-commit>=4.6.1",
+]

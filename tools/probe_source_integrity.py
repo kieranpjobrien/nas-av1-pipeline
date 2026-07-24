@@ -82,8 +82,7 @@ class ProbeResult:
 
 def _probe_duration(filepath: str, timeout: int = 30) -> float:
     """Return the duration in seconds, or 0.0 if probe fails."""
-    cmd = [FFPROBE, "-v", "error", "-show_entries", "format=duration",
-           "-of", "default=nw=1:nk=1", filepath]
+    cmd = [FFPROBE, "-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", filepath]
     try:
         out = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -96,8 +95,9 @@ def _probe_duration(filepath: str, timeout: int = 30) -> float:
         return 0.0
 
 
-def _decode_window(filepath: str, start_secs: float, length_secs: float = 60,
-                   timeout: int = 180, max_retries: int = 1) -> tuple[bool, list[str]]:
+def _decode_window(
+    filepath: str, start_secs: float, length_secs: float = 60, timeout: int = 180, max_retries: int = 1
+) -> tuple[bool, list[str]]:
     """Decode ``length_secs`` of video starting at ``start_secs`` via
     ffmpeg's null muxer (no output). Return (ok, error_lines_sample).
 
@@ -121,20 +121,30 @@ def _decode_window(filepath: str, start_secs: float, length_secs: float = 60,
     that didn't reproduce on the next decode. Up (2009) was the
     original timeout-only case (2026-05-12).
     """
-    cmd = [FFMPEG, "-v", "error", "-nostdin",
-           "-ss", str(start_secs), "-i", filepath,
-           "-t", str(length_secs),
-           "-f", "null", "-"]
+    cmd = [
+        FFMPEG,
+        "-v",
+        "error",
+        "-nostdin",
+        "-ss",
+        str(start_secs),
+        "-i",
+        filepath,
+        "-t",
+        str(length_secs),
+        "-f",
+        "null",
+        "-",
+    ]
     attempts = max_retries + 1
     last_msgs: list[str] = []
     for attempt in range(1, attempts + 1):
         try:
-            out = subprocess.run(cmd, capture_output=True, text=True,
-                                 timeout=timeout, encoding="utf-8", errors="replace")
+            out = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=timeout, encoding="utf-8", errors="replace"
+            )
         except subprocess.TimeoutExpired:
-            last_msgs = [
-                f"timeout after {timeout}s at ss={start_secs:.0f}s (attempt {attempt}/{attempts})"
-            ]
+            last_msgs = [f"timeout after {timeout}s at ss={start_secs:.0f}s (attempt {attempt}/{attempts})"]
             if attempt < attempts:
                 continue  # retry — could be flaky SMB
             return False, last_msgs
@@ -167,8 +177,7 @@ def probe_file(filepath: str) -> ProbeResult:
         return ProbeResult(filepath=filepath, healthy=False, fatal="file missing")
     duration = _probe_duration(filepath)
     if duration <= 0:
-        return ProbeResult(filepath=filepath, healthy=False,
-                           fatal="duration probe failed (corrupt container?)")
+        return ProbeResult(filepath=filepath, healthy=False, fatal="duration probe failed (corrupt container?)")
     result = ProbeResult(filepath=filepath, duration_seconds=duration)
     # Three windows: start, middle, end. For files < 3 min we just probe
     # the whole thing.
@@ -176,9 +185,9 @@ def probe_file(filepath: str) -> ProbeResult:
         windows = [("full", 0.0, duration)]
     else:
         windows = [
-            ("start",  0.0,             60.0),
-            ("middle", duration / 2,    60.0),
-            ("end",    max(0, duration - 65),  60.0),
+            ("start", 0.0, 60.0),
+            ("middle", duration / 2, 60.0),
+            ("end", max(0, duration - 65), 60.0),
         ]
     for tag, start, length in windows:
         ok, errs = _decode_window(filepath, start, length)
@@ -190,8 +199,7 @@ def probe_file(filepath: str) -> ProbeResult:
     return result
 
 
-def _files_from_state(only_pending_error: bool = True,
-                       statuses: list[str] | None = None) -> list[str]:
+def _files_from_state(only_pending_error: bool = True, statuses: list[str] | None = None) -> list[str]:
     """Return filepaths from pipeline_state.db.
 
     By default returns pending + error rows. If ``statuses`` is provided,
@@ -211,10 +219,7 @@ def _files_from_state(only_pending_error: bool = True,
             lowered,
         ).fetchall()
     elif only_pending_error:
-        rows = con.execute(
-            "SELECT filepath FROM pipeline_files "
-            "WHERE LOWER(status) IN ('pending', 'error')"
-        ).fetchall()
+        rows = con.execute("SELECT filepath FROM pipeline_files WHERE LOWER(status) IN ('pending', 'error')").fetchall()
     else:
         rows = con.execute("SELECT filepath FROM pipeline_files").fetchall()
     con.close()
@@ -245,15 +250,13 @@ def _heal_to_pending(filepath: str, result: ProbeResult) -> None:
     confirmed false positives in one shot.
     """
     from pipeline import state as st
+
     ps = st.PipelineState(str(PIPELINE_STATE_DB))
     ps.set_file(
         filepath,
         status=st.FileStatus.PENDING,
         stage=None,
-        reason=(
-            f"resurrected by re-probe: healthy "
-            f"({result.duration_seconds:.0f}s probed, 3 windows decoded cleanly)"
-        ),
+        reason=(f"resurrected by re-probe: healthy ({result.duration_seconds:.0f}s probed, 3 windows decoded cleanly)"),
         source_probe_at=time.time(),
         source_probe_result="healthy",
         source_probe_duration_secs=result.duration_seconds,
@@ -269,6 +272,7 @@ def _refresh_corrupt_probe_metadata(filepath: str, result: ProbeResult) -> None:
     the 'when was this last verified?' question that drives the
     re-download frustration cycle."""
     from pipeline import state as st
+
     ps = st.PipelineState(str(PIPELINE_STATE_DB))
     sample = result.sample_errors[0][:140] if result.sample_errors else ""
     ps.set_file(
@@ -290,6 +294,7 @@ def _flag_broken_in_state(filepath: str, result: ProbeResult) -> None:
     queue builder skips it. The user has to re-acquire (Radarr/Sonarr)
     and force_flagged=true the requeue endpoint to retry."""
     from pipeline import state as st
+
     ps = st.PipelineState(str(PIPELINE_STATE_DB))
     reason = (
         f"source corruption detected at windows={','.join(result.windows_failed)}: "
@@ -312,28 +317,37 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
     src_group = parser.add_mutually_exclusive_group(required=True)
     src_group.add_argument("path", nargs="?", help="probe a single file")
-    src_group.add_argument("--from-state", action="store_true",
-                           help="probe all pending+error rows in pipeline_state.db")
-    src_group.add_argument("--from-report", action="store_true",
-                           help="probe all files in media_report.json (slow sweep)")
-    src_group.add_argument("--probe-status", type=str, default=None,
-                           help="probe all state-DB rows with this status "
-                                "(comma-separated; e.g. flagged_corrupt). Use when "
-                                "you've re-acquired sources and want to clear stale "
-                                "false-positive flags.")
-    parser.add_argument("--heal", action="store_true",
-                        help="when used with --probe-status, files that probe "
-                             "HEALTHY are reset to pending (clears stale flags). "
-                             "Files that probe corrupt have their reason + "
-                             "source_probe_at timestamp refreshed so the operator "
-                             "sees when the last re-check ran.")
-    parser.add_argument("--json", action="store_true",
-                        help="emit each result as a JSONL line on stdout, "
-                             "final summary at end. Progress on stderr regardless.")
-    parser.add_argument("--apply", action="store_true",
-                        help="mark broken files as flagged_corrupt in state DB")
-    parser.add_argument("--limit", type=int, default=0,
-                        help="cap the number of files probed (0 = no cap)")
+    src_group.add_argument(
+        "--from-state", action="store_true", help="probe all pending+error rows in pipeline_state.db"
+    )
+    src_group.add_argument(
+        "--from-report", action="store_true", help="probe all files in media_report.json (slow sweep)"
+    )
+    src_group.add_argument(
+        "--probe-status",
+        type=str,
+        default=None,
+        help="probe all state-DB rows with this status "
+        "(comma-separated; e.g. flagged_corrupt). Use when "
+        "you've re-acquired sources and want to clear stale "
+        "false-positive flags.",
+    )
+    parser.add_argument(
+        "--heal",
+        action="store_true",
+        help="when used with --probe-status, files that probe "
+        "HEALTHY are reset to pending (clears stale flags). "
+        "Files that probe corrupt have their reason + "
+        "source_probe_at timestamp refreshed so the operator "
+        "sees when the last re-check ran.",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="emit each result as a JSONL line on stdout, final summary at end. Progress on stderr regardless.",
+    )
+    parser.add_argument("--apply", action="store_true", help="mark broken files as flagged_corrupt in state DB")
+    parser.add_argument("--limit", type=int, default=0, help="cap the number of files probed (0 = no cap)")
     args = parser.parse_args(argv)
 
     if args.path:
@@ -363,16 +377,14 @@ def main(argv: Optional[list[str]] = None) -> int:
         r = probe_file(fp)
         results.append(r)
         tag = "OK" if r.healthy else ("BROKEN " + (r.fatal or ",".join(r.windows_failed)))
-        sys.stderr.write(
-            f"{tag}  dur={r.duration_seconds:.0f}s  took={r.probe_time_secs:.1f}s\n"
-        )
+        sys.stderr.write(f"{tag}  dur={r.duration_seconds:.0f}s  took={r.probe_time_secs:.1f}s\n")
         sys.stderr.flush()
         if not r.healthy:
             broken.append(r)
             if args.apply and r.fatal is None:
                 try:
                     _flag_broken_in_state(fp, r)
-                    sys.stderr.write(f"  -> marked flagged_corrupt in state DB\n")
+                    sys.stderr.write("  -> marked flagged_corrupt in state DB\n")
                     sys.stderr.flush()
                 except Exception as e:  # noqa: BLE001
                     sys.stderr.write(f"  -> apply failed: {e}\n")
@@ -393,7 +405,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             # on next queue refresh.
             try:
                 _heal_to_pending(fp, r)
-                sys.stderr.write(f"  -> HEALED: status=pending\n")
+                sys.stderr.write("  -> HEALED: status=pending\n")
                 sys.stderr.flush()
             except Exception as e:  # noqa: BLE001
                 sys.stderr.write(f"  -> heal failed: {e}\n")
@@ -406,11 +418,16 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     if args.json:
         # Trailing summary line as JSONL so the final state is greppable.
-        sys.stdout.write(json.dumps({
-            "summary": True,
-            "probed": len(results),
-            "broken": len(broken),
-        }) + "\n")
+        sys.stdout.write(
+            json.dumps(
+                {
+                    "summary": True,
+                    "probed": len(results),
+                    "broken": len(broken),
+                }
+            )
+            + "\n"
+        )
         sys.stdout.flush()
 
     sys.stderr.write(f"\n=== {len(broken)}/{len(results)} sources are corrupt ===\n")

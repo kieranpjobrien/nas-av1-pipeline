@@ -106,6 +106,7 @@ def _derive_current_state(entry: dict[str, Any]) -> dict[str, Any]:
     # Prefer TMDb title if enriched; else parse "(YYYY)" cleanly off the filename
     # using the same parser the rest of the pipeline uses.
     from pipeline.metadata import parse_movie_filename
+
     parsed_title, parsed_year = parse_movie_filename(entry.get("filename", ""))
     clean_title = tmdb.get("title") or parsed_title
 
@@ -163,13 +164,16 @@ def cmd_refresh(args: argparse.Namespace) -> int:
             match = matcher.best_match(title, year, candidates)
             if match is None:
                 logger.warning("refresh: no match for %s (%s)", title, year)
-                updb.upsert(conn, {
-                    **current,
-                    "last_checked": now_iso,
-                    "upgrade_score": 0,
-                    "upgrade_reasons": [],
-                    "confidence": "unknown",
-                })
+                updb.upsert(
+                    conn,
+                    {
+                        **current,
+                        "last_checked": now_iso,
+                        "upgrade_score": 0,
+                        "upgrade_reasons": [],
+                        "confidence": "unknown",
+                    },
+                )
                 processed += 1
                 continue
 
@@ -232,8 +236,9 @@ def cmd_top(args: argparse.Namespace) -> int:
         reasons = r.get("upgrade_reasons") or ""
         title = (r.get("title") or "")[:45]
         year = r.get("year") or ""
-        print(f"{r.get('upgrade_score') or 0:>5}  {r.get('confidence') or '':<14}  "
-              f"{title:<45}  {str(year):<5}  {reasons}")
+        print(
+            f"{r.get('upgrade_score') or 0:>5}  {r.get('confidence') or '':<14}  {title:<45}  {str(year):<5}  {reasons}"
+        )
     return 0
 
 
@@ -270,6 +275,7 @@ def cmd_taste_rescore(args: argparse.Namespace) -> int:
     """
     try:
         import anthropic
+
         from tools.upgrades import taste_scorer
     except ImportError as exc:
         logger.error("taste-rescore requires anthropic + pydantic (see pyproject.toml): %s", exc)
@@ -285,8 +291,12 @@ def cmd_taste_rescore(args: argparse.Namespace) -> int:
         seeds = taste_scorer.load_seeds()
         seed_ver = taste_scorer.seed_version(seeds)
         system_prompt = taste_scorer.build_system_prompt(seeds)
-        logger.info("taste-rescore: seed_version=%d, %d high + %d low seeds",
-                    seed_ver, len(seeds.get("high", [])), len(seeds.get("low", [])))
+        logger.info(
+            "taste-rescore: seed_version=%d, %d high + %d low seeds",
+            seed_ver,
+            len(seeds.get("high", [])),
+            len(seeds.get("low", [])),
+        )
 
         # Walk report for distinct (title, year) combinations.
         entries = _iter_report_entries(library_type=args.library_type)
@@ -311,11 +321,15 @@ def cmd_taste_rescore(args: argparse.Namespace) -> int:
                 director = str(directors) if directors else None
             genres = tmdb.get("genres") or []
             overview = tmdb.get("overview") or ""
-            to_score.append({
-                "title": title, "year": year, "director": director,
-                "genres": genres if isinstance(genres, list) else [],
-                "overview": overview,
-            })
+            to_score.append(
+                {
+                    "title": title,
+                    "year": year,
+                    "director": director,
+                    "genres": genres if isinstance(genres, list) else [],
+                    "overview": overview,
+                }
+            )
 
         if args.limit:
             to_score = to_score[: args.limit]
@@ -334,9 +348,7 @@ def cmd_taste_rescore(args: argparse.Namespace) -> int:
 
         for i, film in enumerate(to_score, 1):
             if not args.force:
-                cached = taste_scorer.fetch_score(
-                    conn, film["title"], film["year"], seed_ver
-                )
+                cached = taste_scorer.fetch_score(conn, film["title"], film["year"], seed_ver)
                 if cached:
                     skipped_cached += 1
                     continue
@@ -352,8 +364,7 @@ def cmd_taste_rescore(args: argparse.Namespace) -> int:
                     system_prompt=system_prompt,
                 )
             except Exception as exc:  # noqa: BLE001 — LLM errors are varied
-                logger.error("  [%d/%d] %s (%s): %s",
-                             i, total, film["title"], film["year"], exc)
+                logger.error("  [%d/%d] %s (%s): %s", i, total, film["title"], film["year"], exc)
                 errors += 1
                 continue
 
@@ -373,22 +384,33 @@ def cmd_taste_rescore(args: argparse.Namespace) -> int:
                 cache_hits += 1
             logger.info(
                 "  [%d/%d] %s (%s) -> %d  (cache: %s)",
-                i, total, film["title"], film["year"], result.score,
+                i,
+                total,
+                film["title"],
+                film["year"],
+                result.score,
                 "HIT" if result.cache_hit else "WRITE" if result.cache_creation_tokens else "miss",
             )
 
         logger.info(
             "taste-rescore: done — %d scored, %d skipped (cached), %d errors",
-            scored, skipped_cached, errors,
+            scored,
+            skipped_cached,
+            errors,
         )
         if scored:
             logger.info(
                 "  cache hit rate: %.0f%% (%d/%d)",
-                (100 * cache_hits / scored), cache_hits, scored,
+                (100 * cache_hits / scored),
+                cache_hits,
+                scored,
             )
             logger.info(
                 "  tokens — input: %d, output: %d, cache read: %d, cache write: %d",
-                total_input, total_output, total_cache_read, total_cache_creation,
+                total_input,
+                total_output,
+                total_cache_read,
+                total_cache_creation,
             )
         return 0 if errors == 0 else 1
     finally:
@@ -402,6 +424,7 @@ def cmd_taste_score_one(args: argparse.Namespace) -> int:
     """Score a single film by title+year, for testing / UI triggers."""
     try:
         import anthropic
+
         from tools.upgrades import taste_scorer
     except ImportError as exc:
         logger.error("taste-score-one requires anthropic + pydantic: %s", exc)
@@ -427,20 +450,30 @@ def cmd_taste_score_one(args: argparse.Namespace) -> int:
             system_prompt=system_prompt,
         )
         taste_scorer.persist_score(
-            conn, title=args.title, year=args.year,
-            result=result, seed_ver=seed_ver,
+            conn,
+            title=args.title,
+            year=args.year,
+            result=result,
+            seed_ver=seed_ver,
         )
-        print(json.dumps({
-            "title": args.title, "year": args.year,
-            "score": result.score, "rationale": result.rationale,
-            "cache_hit": result.cache_hit,
-            "tokens": {
-                "input": result.input_tokens,
-                "output": result.output_tokens,
-                "cache_read": result.cache_read_tokens,
-                "cache_creation": result.cache_creation_tokens,
-            },
-        }, indent=2))
+        print(
+            json.dumps(
+                {
+                    "title": args.title,
+                    "year": args.year,
+                    "score": result.score,
+                    "rationale": result.rationale,
+                    "cache_hit": result.cache_hit,
+                    "tokens": {
+                        "input": result.input_tokens,
+                        "output": result.output_tokens,
+                        "cache_read": result.cache_read_tokens,
+                        "cache_creation": result.cache_creation_tokens,
+                    },
+                },
+                indent=2,
+            )
+        )
         return 0
     finally:
         conn.close()
@@ -459,7 +492,8 @@ def cmd_ranked(args: argparse.Namespace) -> int:
     """
     conn = updb.connect()
     try:
-        cur = conn.execute("""
+        cur = conn.execute(
+            """
             SELECT
                 u.filepath,
                 u.title,
@@ -483,7 +517,9 @@ def cmd_ranked(args: argparse.Namespace) -> int:
             WHERE u.upgrade_score IS NOT NULL
             ORDER BY combined_score DESC, u.title ASC
             LIMIT ?
-        """, (int(args.limit),))
+        """,
+            (int(args.limit),),
+        )
         rows = [dict(r) for r in cur.fetchall()]
     finally:
         conn.close()
@@ -513,8 +549,7 @@ def cmd_ranked(args: argparse.Namespace) -> int:
         year = r.get("year") or ""
         reasons = r.get("upgrade_reasons") or ""
         print(
-            f"{combined:>8.1f}  {gap:>3}  "
-            f"{'?' if taste is None else taste:>5}  {title:<42}  {str(year):<5}  {reasons}"
+            f"{combined:>8.1f}  {gap:>3}  {'?' if taste is None else taste:>5}  {title:<42}  {str(year):<5}  {reasons}"
         )
     return 0
 
@@ -532,11 +567,15 @@ def _build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     p_refresh = sub.add_parser("refresh", help="Scrape + score missing titles, update DB.")
-    p_refresh.add_argument("--limit", type=int, default=0,
-                           help="Process at most N files (0 = all). Useful for smoke tests.")
-    p_refresh.add_argument("--library-type", default="movie",
-                           choices=["movie", "series"],
-                           help="Restrict to one library type (default: movie).")
+    p_refresh.add_argument(
+        "--limit", type=int, default=0, help="Process at most N files (0 = all). Useful for smoke tests."
+    )
+    p_refresh.add_argument(
+        "--library-type",
+        default="movie",
+        choices=["movie", "series"],
+        help="Restrict to one library type (default: movie).",
+    )
     p_refresh.set_defaults(func=cmd_refresh)
 
     p_top = sub.add_parser("top", help="Show the top-N upgrade candidates.")
@@ -553,15 +592,20 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Score every film for upgrade worthiness using Claude (LLM-based taste scorer).",
     )
     p_taste.add_argument(
-        "--limit", type=int, default=0,
+        "--limit",
+        type=int,
+        default=0,
         help="Score at most N films (0 = all). Useful for smoke tests / budget control.",
     )
     p_taste.add_argument(
-        "--library-type", default="movie", choices=["movie", "series"],
+        "--library-type",
+        default="movie",
+        choices=["movie", "series"],
         help="Restrict to one library type (default: movie). Series scoring is experimental.",
     )
     p_taste.add_argument(
-        "--force", action="store_true",
+        "--force",
+        action="store_true",
         help="Rescore even films whose cached score matches the current seed version.",
     )
     p_taste.set_defaults(func=cmd_taste_rescore)

@@ -17,16 +17,20 @@ Usage:
 # interned-string pointers. Process-start reset gives a known-good
 # baseline.
 import json.encoder as _json_encoder
+
 _json_encoder.JSONEncoder.key_separator = ": "
 _json_encoder.JSONEncoder.item_separator = ", "
 
-from fastapi import FastAPI
-from fastapi.staticfiles import StaticFiles
+# E402 is deliberate below: the JSONEncoder reset above MUST run before any
+# module that might serialise JSON is imported — that ordering is the whole
+# point of the 2026-05-22/23 corruption workaround.
+from fastapi import FastAPI  # noqa: E402
+from fastapi.staticfiles import StaticFiles  # noqa: E402
 
-from server.audit import AuditLogMiddleware
-from server.helpers import FRONTEND_DIST
-from server.middleware import BearerTokenMiddleware
-from server.process_manager import PROCESS_CONFIGS, ProcessManager
+from server.audit import AuditLogMiddleware  # noqa: E402
+from server.helpers import FRONTEND_DIST  # noqa: E402
+from server.middleware import BearerTokenMiddleware  # noqa: E402
+from server.process_manager import PROCESS_CONFIGS, ProcessManager  # noqa: E402
 
 # Re-export for backward compatibility
 __all__ = ["app", "PROCESS_CONFIGS"]
@@ -43,7 +47,18 @@ pm = ProcessManager()
 app.state.pm = pm
 
 # --- Include routers ---
-from server.routers import admin, diagnostics, files, flagged, library, pipeline, process, reclaim, upgrades, ws  # noqa: E402
+from server.routers import (  # noqa: E402
+    admin,
+    diagnostics,
+    files,
+    flagged,
+    library,
+    pipeline,
+    process,
+    reclaim,
+    upgrades,
+    ws,
+)
 
 app.include_router(pipeline.router)
 app.include_router(process.router)

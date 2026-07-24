@@ -11,7 +11,6 @@ Run: ``uv run python -m tools.fix_malformed_filenames``
 
 from __future__ import annotations
 
-import json
 import os
 import sqlite3
 import sys

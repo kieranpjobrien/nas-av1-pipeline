@@ -13,10 +13,11 @@ hero-stat converts get done overnight without ever running two GPU encoders:
 Runs detached; logs to overnight_controller.log. Safe to leave unattended:
 it never starts the pipeline until the GPU is idle, so the two never overlap.
 """
+
 import json
 import os
-import subprocess
 import sqlite3
+import subprocess
 import time
 
 from paths import STAGING_DIR  # noqa: E402
@@ -39,10 +40,16 @@ def log(msg: str) -> None:
 
 def nvenc_util() -> int:
     try:
-        out = subprocess.run(
-            ["nvidia-smi", "--query-gpu=utilization.encoder", "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, timeout=10,
-        ).stdout.strip().splitlines()
+        out = (
+            subprocess.run(
+                ["nvidia-smi", "--query-gpu=utilization.encoder", "--format=csv,noheader,nounits"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            .stdout.strip()
+            .splitlines()
+        )
         return int(out[0]) if out else 0
     except Exception:  # noqa: BLE001
         return 0
@@ -51,10 +58,17 @@ def nvenc_util() -> int:
 def pipeline_running() -> bool:
     try:
         out = subprocess.run(
-            ["powershell", "-NoProfile", "-Command",
-             "(Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | "
-             "Where-Object { $_.CommandLine -match '-m pipeline' } | Measure-Object).Count"],
-            capture_output=True, text=True, timeout=20).stdout.strip()
+            [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                "(Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | "
+                "Where-Object { $_.CommandLine -match '-m pipeline' } | Measure-Object).Count",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        ).stdout.strip()
         return int(out or "0") > 0
     except Exception:  # noqa: BLE001
         return False
@@ -65,7 +79,8 @@ def active_rows() -> int:
     try:
         return con.execute(
             "SELECT COUNT(*) FROM pipeline_files WHERE status IN "
-            "('pending','qualifying','fetching','processing','uploading')").fetchone()[0]
+            "('pending','qualifying','fetching','processing','uploading')"
+        ).fetchone()[0]
     finally:
         con.close()
 
@@ -98,8 +113,11 @@ def main() -> None:
         with open(f"{STAGING}/pipeline.log", "a", encoding="utf-8") as plog:
             p = subprocess.Popen(
                 ["D:/MediaProject/.venv/Scripts/python.exe", "-m", "pipeline", "--resume"],
-                cwd="D:/MediaProject", stdout=plog, stderr=subprocess.STDOUT,
-                creationflags=DETACHED)
+                cwd="D:/MediaProject",
+                stdout=plog,
+                stderr=subprocess.STDOUT,
+                creationflags=DETACHED,
+            )
         log(f"pipeline launched pid={p.pid}")
 
     # 4. let it build the queue, then watch until drained

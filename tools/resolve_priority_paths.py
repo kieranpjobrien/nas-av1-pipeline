@@ -50,16 +50,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from paths import MEDIA_REPORT, PIPELINE_STATE_DB, STAGING_DIR
 
-
 # The two rename patterns the bulk_rename_clean run produced on 2026-05-15.
 # Anchored to the basename, not the full path — most renames keep the
 # directory unchanged.
-_SERIES_RENAME_RE_YEAR = re.compile(
-    r"(.+?) \(\d{4}\) - (S\d+E\d+(?:-E\d+)?) - (.+?)(\.\w+)$", re.I
-)
-_SERIES_RENAME_RE_NOYEAR = re.compile(
-    r"(.+?) - (S\d+E\d+(?:-E\d+)?) - (.+?)(\.\w+)$", re.I
-)
+_SERIES_RENAME_RE_YEAR = re.compile(r"(.+?) \(\d{4}\) - (S\d+E\d+(?:-E\d+)?) - (.+?)(\.\w+)$", re.I)
+_SERIES_RENAME_RE_NOYEAR = re.compile(r"(.+?) - (S\d+E\d+(?:-E\d+)?) - (.+?)(\.\w+)$", re.I)
 
 
 def _series_rename_target(basename: str) -> str | None:
@@ -83,9 +78,12 @@ def _ext_swap(filepath: str) -> str | None:
     return None
 
 
-def resolve(prio_paths: list[str], report_paths_by_path: dict[str, dict],
-            report_by_basename: dict[str, list[dict]],
-            state_by_path: dict[str, str]) -> tuple[list[str], dict]:
+def resolve(
+    prio_paths: list[str],
+    report_paths_by_path: dict[str, dict],
+    report_by_basename: dict[str, list[dict]],
+    state_by_path: dict[str, str],
+) -> tuple[list[str], dict]:
     """Returns (new_list, stats).
 
     new_list preserves order of prio_paths so user-controlled priority
@@ -102,8 +100,10 @@ def resolve(prio_paths: list[str], report_paths_by_path: dict[str, dict],
         "dropped_flagged": 0,
     }
     terminal_flagged = {
-        "flagged_corrupt", "flagged_foreign_audio",
-        "flagged_undetermined", "flagged_manual",
+        "flagged_corrupt",
+        "flagged_foreign_audio",
+        "flagged_undetermined",
+        "flagged_manual",
     }
 
     for fp in prio_paths:
@@ -163,11 +163,13 @@ def resolve(prio_paths: list[str], report_paths_by_path: dict[str, dict],
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--apply", action="store_true",
-                        help="Actually write priority.json (default: dry-run)")
-    parser.add_argument("--prio-path", type=str,
-                        default=os.path.join(str(STAGING_DIR), "control", "priority.json"),
-                        help="Path to priority.json")
+    parser.add_argument("--apply", action="store_true", help="Actually write priority.json (default: dry-run)")
+    parser.add_argument(
+        "--prio-path",
+        type=str,
+        default=os.path.join(str(STAGING_DIR), "control", "priority.json"),
+        help="Path to priority.json",
+    )
     args = parser.parse_args()
 
     prio_path = args.prio_path
@@ -190,9 +192,7 @@ def main() -> int:
         by_basename.setdefault(bn, []).append(e)
 
     con = sqlite3.connect(str(PIPELINE_STATE_DB))
-    state_by_path = {row[0]: row[1] for row in con.execute(
-        "SELECT filepath, status FROM pipeline_files"
-    )}
+    state_by_path = {row[0]: row[1] for row in con.execute("SELECT filepath, status FROM pipeline_files")}
     con.close()
 
     new_paths, stats_paths = resolve(paths_list, by_path, by_basename, state_by_path)

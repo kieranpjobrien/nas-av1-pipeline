@@ -45,8 +45,7 @@ def _ghost_candidate_paths(state: PipelineState) -> list[str]:
     just because the file is momentarily unreachable.
     """
     paths = list(state.get_files_by_status(FileStatus.DONE))
-    for flag in (FileStatus.FLAGGED_CORRUPT, FileStatus.FLAGGED_FOREIGN_AUDIO,
-                 FileStatus.FLAGGED_UNDETERMINED):
+    for flag in (FileStatus.FLAGGED_CORRUPT, FileStatus.FLAGGED_FOREIGN_AUDIO, FileStatus.FLAGGED_UNDETERMINED):
         paths += list(state.get_files_by_status(flag))
     return paths
 
@@ -158,8 +157,7 @@ class Orchestrator:
                 # with hardware/driver interned-string-pointer corruption).
                 # Passing explicit separators bypasses the corrupted class
                 # default — caught with explicit-sep dumps+loads ok=True.
-                _json.dump(status, f, indent=2, ensure_ascii=False,
-                           separators=(",", ": "))
+                _json.dump(status, f, indent=2, ensure_ascii=False, separators=(",", ": "))
             # Read-back validation — see tools.report_lock for the 2026-05-18
             # corruption incident that motivated this. If the bytes on disk
             # don't parse, drop the tmp and skip the replace; the existing
@@ -185,6 +183,7 @@ class Orchestrator:
                 except OSError:
                     raw_head = b"<unreadable>"
                 import json.encoder as _je
+
                 cls_keysep = getattr(_je.JSONEncoder, "key_separator", "<missing>")
                 cls_itemsep = getattr(_je.JSONEncoder, "item_separator", "<missing>")
                 inst = _je.JSONEncoder()
@@ -203,9 +202,12 @@ class Orchestrator:
                     "  inst  key_sep=%r item_sep=%r\n"
                     "  explicit-sep dumps+loads: ok=%s\n"
                     "  status dict keys=%r",
-                    je, raw_head,
-                    cls_keysep, cls_itemsep,
-                    inst_keysep, inst_itemsep,
+                    je,
+                    raw_head,
+                    cls_keysep,
+                    cls_itemsep,
+                    inst_keysep,
+                    inst_itemsep,
                     explicit_ok,
                     sorted(status.keys()) if isinstance(status, dict) else "<not-dict>",
                 )
@@ -312,7 +314,7 @@ class Orchestrator:
         # it via session_id rather than duplicating MBs of environment across thousands of rows.
         self._write_session_env()
 
-        for subdir in ("fetch", "encoded", "force", "whisper_tmp", "ocr_tmp"):
+        for subdir in ("fetch", "encoded", "force", "whisper_tmp", "ocr_tmp", "gap_stage"):
             os.makedirs(os.path.join(self.staging_dir, subdir), exist_ok=True)
 
         # Reset any non-terminal states from previous crashed runs
@@ -370,10 +372,11 @@ class Orchestrator:
         # them as if real media, and they waste disk. Pass 1: sweep whatever the
         # state DB knows about. Pass 2: walk the NAS itself because a crash
         # could have written a tmp file that was never recorded in state.
-        state_tmp_paths = [
-            p for p in self.state.all_filepaths()
-            if p.endswith(_PIPELINE_TMP_SUFFIXES)
-        ] if hasattr(self.state, "all_filepaths") else []
+        state_tmp_paths = (
+            [p for p in self.state.all_filepaths() if p.endswith(_PIPELINE_TMP_SUFFIXES)]
+            if hasattr(self.state, "all_filepaths")
+            else []
+        )
         if state_tmp_paths:
             deleted = 0
             for p in state_tmp_paths:
@@ -465,7 +468,6 @@ class Orchestrator:
         # and skip files matching those paths. Anything left is safe to
         # remove — it really was abandoned by a previous crashed run.
         import time as _time
-        import json as _json
 
         live_paths: set[str] = set()
         try:
@@ -496,7 +498,10 @@ class Orchestrator:
         now = _time.time()
         AGE_FALLBACK_SECS = 24 * 3600  # if state lookup failed, only kill very old files
 
-        for subdir in ("fetch", "encoded"):
+        # gap_stage added 2026-07-25: staged copies of files >= 2 GB land there,
+        # and any exception escaping the gap_fill lock block skips both cleanup
+        # paths. Nothing ever swept it — 244 GB of orphans had accumulated.
+        for subdir in ("fetch", "encoded", "gap_stage"):
             d = os.path.join(self.staging_dir, subdir)
             if not os.path.isdir(d):
                 continue
@@ -534,10 +539,7 @@ class Orchestrator:
                     except OSError:
                         pass
             if cleaned or preserved:
-                logging.info(
-                    f"  {subdir}/: cleaned {cleaned} orphaned, preserved {preserved} "
-                    f"referenced by live state"
-                )
+                logging.info(f"  {subdir}/: cleaned {cleaned} orphaned, preserved {preserved} referenced by live state")
             if still_locked:
                 logging.warning(
                     f"  {len(still_locked)} file(s) in {subdir}/ still locked after retry — "
@@ -580,7 +582,12 @@ class Orchestrator:
         # container remux) AHEAD of the GPU worker. Multiple instances run
         # in parallel so a slow whisper escalation on one file doesn't
         # starve the GPU pipeline. CPU-only, never touches NVENC, safe.
-        prep_concurrency = max(0, int(self.config.get("prep_concurrency", 2)))
+        # Fallback MUST be 1, matching config.py's default. A missing key
+        # previously defaulted to 2 — and each prep worker calls
+        # detect_all_languages / qualify_file with use_whisper=True, so on the
+        # GPU whisper path that is two concurrent CUDA contexts (rule 9c). This
+        # is the same footgun the 9b test forbids for gpu_concurrency.
+        prep_concurrency = max(0, int(self.config.get("prep_concurrency", 1)))
         for i in range(prep_concurrency):
             name = f"prep-{i}"
             threads[name] = threading.Thread(
@@ -732,13 +739,10 @@ class Orchestrator:
                 try:
                     from pipeline.state import FileStatus as _FS  # noqa: PLC0415
 
-                    self.state.set_file(
-                        filepath, _FS.ERROR, error=f"gpu worker: {e}", stage="gpu_worker"
-                    )
+                    self.state.set_file(filepath, _FS.ERROR, error=f"gpu worker: {e}", stage="gpu_worker")
                 except Exception:  # noqa: BLE001
                     logging.error(
-                        "  …and the ERROR write also failed (poisoned row?) — "
-                        "left as-is so the worker survives"
+                        "  …and the ERROR write also failed (poisoned row?) — left as-is so the worker survives"
                     )
 
             if encode_ok:
@@ -931,16 +935,11 @@ class Orchestrator:
                 filepath,
                 FileStatus.FLAGGED_CORRUPT,
                 stage="fetch",
-                reason="source missing on disk (renamed/deleted); "
-                       "auto-resets if a file reappears at this path",
+                reason="source missing on disk (renamed/deleted); auto-resets if a file reappears at this path",
             )
-            logging.warning(
-                f"  → removed missing source from queue + flagged: "
-                f"{os.path.basename(filepath)}"
-            )
+            logging.warning(f"  → removed missing source from queue + flagged: {os.path.basename(filepath)}")
         except Exception as e:  # noqa: BLE001
-            logging.warning(f"  → cleanup after SOURCE_MISSING failed for "
-                          f"{os.path.basename(filepath)}: {e}")
+            logging.warning(f"  → cleanup after SOURCE_MISSING failed for {os.path.basename(filepath)}: {e}")
 
     def _post_fetch(self, item: dict) -> None:
         """Eager CPU work on a freshly-fetched file so the GPU worker doesn't pay the cost.
@@ -1000,6 +999,7 @@ class Orchestrator:
         whole gap_filler loop.
         """
         import json as _json
+
         from paths import MEDIA_REPORT  # noqa: PLC0415
 
         try:
@@ -1017,11 +1017,7 @@ class Orchestrator:
         except (OSError, _json.JSONDecodeError):
             return {}
 
-        lookup = {
-            entry["filepath"]: entry
-            for entry in (report.get("files") or [])
-            if entry.get("filepath")
-        }
+        lookup = {entry["filepath"]: entry for entry in (report.get("files") or []) if entry.get("filepath")}
         self._fresh_report_cache = (mtime, lookup)
         return lookup
 
@@ -1148,9 +1144,7 @@ class Orchestrator:
                 f"Gap filler: {skipped_now_compliant} item(s) skipped — fresh report shows no gaps "
                 f"(out-of-band cleanup since queue-build)"
             )
-        logging.info(
-            f"Gap filler: {mux_total} mux (mkvmerge SSH) + {quick_total} quick (rename/meta/delete)"
-        )
+        logging.info(f"Gap filler: {mux_total} mux (mkvmerge SSH) + {quick_total} quick (rename/meta/delete)")
 
         # Single circuit breaker for the SSH path. threshold=5, cooldown=300s matches
         # the overnight-2026-04-23 forensic — 5 consecutive SSH+docker failures is the
@@ -1206,8 +1200,7 @@ class Orchestrator:
                 breaker.record(success)
                 if not was_open_before and breaker.is_open():
                     logging.warning(
-                        f"[{name}] circuit breaker OPENED (5 consecutive failures) — "
-                        f"worker will pause for 300s"
+                        f"[{name}] circuit breaker OPENED (5 consecutive failures) — worker will pause for 300s"
                     )
 
                 mux_queue.task_done()
@@ -1338,6 +1331,7 @@ class Orchestrator:
             backend_host = SERVER.get("host") or None
         elif backend == "local":
             from pipeline import local_mux as _local_mux
+
             backend_available = _local_mux.is_available()
             backend_host = "local" if backend_available else None
 
@@ -1348,14 +1342,16 @@ class Orchestrator:
         )
 
         if backend_available:
-            threads.append(threading.Thread(
-                target=mux_worker,
-                # `machine` is only meaningful for the remote backend — local
-                # ignores it. Pass SERVER either way; the dispatcher in
-                # gap_filler._strip_tracks selects by backend.
-                args=("SRV" if backend == "remote" else "LOCAL", SERVER if backend == "remote" else {}),
-                daemon=True,
-            ))
+            threads.append(
+                threading.Thread(
+                    target=mux_worker,
+                    # `machine` is only meaningful for the remote backend — local
+                    # ignores it. Pass SERVER either way; the dispatcher in
+                    # gap_filler._strip_tracks selects by backend.
+                    args=("SRV" if backend == "remote" else "LOCAL", SERVER if backend == "remote" else {}),
+                    daemon=True,
+                )
+            )
         elif mux_total > 0:
             if backend == "remote":
                 logging.warning(
@@ -1459,9 +1455,7 @@ class Orchestrator:
             existing = self.state.get_file(fp)
             status = existing["status"] if existing else None
             if status and (
-                status in (s.value for s in ACTIVE_STATUSES)
-                or status == FileStatus.ERROR.value
-                or is_terminal(status)
+                status in (s.value for s in ACTIVE_STATUSES) or status == FileStatus.ERROR.value or is_terminal(status)
             ):
                 continue
             return item
@@ -1506,10 +1500,8 @@ class Orchestrator:
                 # traceback so the next occurrence points at the actual
                 # json.loads call site.
                 import traceback as _tb
-                logging.error(
-                    f"{tag}: finalize_upload failed for "
-                    f"{os.path.basename(picked)}: {e}\n{_tb.format_exc()}"
-                )
+
+                logging.error(f"{tag}: finalize_upload failed for {os.path.basename(picked)}: {e}\n{_tb.format_exc()}")
                 self.state.stats["errors"] = self.state.stats.get("errors", 0) + 1
                 self.state.save()
             finally:
@@ -1521,9 +1513,7 @@ class Orchestrator:
         """Find one filepath in UPLOADING status that isn't already being uploaded."""
         try:
             conn = self.state._get_conn()
-            rows = conn.execute(
-                "SELECT filepath FROM pipeline_files WHERE status = 'uploading'"
-            ).fetchall()
+            rows = conn.execute("SELECT filepath FROM pipeline_files WHERE status = 'uploading'").fetchall()
         except Exception:
             return None
 
@@ -1585,12 +1575,11 @@ class Orchestrator:
 
             filepath = picked["filepath"]
             try:
-                prep_data = prepare_for_encode(
-                    filepath, picked, self.config, self.state, self.staging_dir
-                )
+                prep_data = prepare_for_encode(filepath, picked, self.config, self.state, self.staging_dir)
                 if prep_data is None:
-                    logging.info(f"{tag}: prep parked {os.path.basename(filepath)} "
-                                 "(flagged / nothing-to-do / fetch failed)")
+                    logging.info(
+                        f"{tag}: prep parked {os.path.basename(filepath)} (flagged / nothing-to-do / fetch failed)"
+                    )
                 else:
                     logging.info(f"{tag}: prep done for {os.path.basename(filepath)}")
                 # Success — reset the circuit-breaker counter.
@@ -1598,10 +1587,7 @@ class Orchestrator:
             except Exception as e:
                 fails = self._prep_fail_counts.get(filepath, 0) + 1
                 self._prep_fail_counts[filepath] = fails
-                logging.warning(
-                    f"{tag}: prep crashed on {os.path.basename(filepath)} "
-                    f"({fails}/3): {e}"
-                )
+                logging.warning(f"{tag}: prep crashed on {os.path.basename(filepath)} ({fails}/3): {e}")
                 if fails >= 3:
                     # Trip the breaker. Try to mark the row flagged_manual
                     # so the queue builder doesn't hand it back. If THAT
@@ -1647,8 +1633,8 @@ class Orchestrator:
             row = conn.execute(
                 "SELECT COUNT(*) FROM pipeline_files WHERE status = 'processing' "
                 "AND extras LIKE '%\"prep_done\": true%' "
-                "AND extras NOT LIKE '%\"stage\": \"encoding\"%' "
-                "AND extras NOT LIKE '%\"stage\": \"pending_upload\"%'"
+                'AND extras NOT LIKE \'%"stage": "encoding"%\' '
+                'AND extras NOT LIKE \'%"stage": "pending_upload"%\''
             ).fetchone()
             return int(row[0]) if row else 0
         except Exception:
@@ -1793,9 +1779,7 @@ class Orchestrator:
             last_report_mtime = mtime
 
             try:
-                added_full, added_gap = self._merge_new_files(
-                    full_gamut_queue, gap_filler_queue, report_path
-                )
+                added_full, added_gap = self._merge_new_files(full_gamut_queue, gap_filler_queue, report_path)
                 if added_full or added_gap:
                     logging.info(
                         f"Queue refresh: +{added_full} full_gamut, "
@@ -1823,22 +1807,15 @@ class Orchestrator:
         )
 
         with self._dispatched_lock:
-            pruned = _prune_done_from_priority(
-                staging_dir=self.staging_dir, state=self.state
-            )
+            pruned = _prune_done_from_priority(staging_dir=self.staging_dir, state=self.state)
             if pruned:
-                logging.info(
-                    f"Priority prune (mid-run): dropped {pruned} done/flagged "
-                    f"entries from priority.json"
-                )
+                logging.info(f"Priority prune (mid-run): dropped {pruned} done/flagged entries from priority.json")
             priority_paths = _read_priority_paths(staging_dir=self.staging_dir)
             if not priority_paths:
                 logging.info("Priority re-sort: priority list is empty — no bump")
                 return
             _sort_full_gamut(full_gamut_queue, self.config, priority_paths)
-            in_queue = sum(
-                1 for it in full_gamut_queue if it.get("filepath") in priority_paths
-            )
+            in_queue = sum(1 for it in full_gamut_queue if it.get("filepath") in priority_paths)
             logging.info(
                 f"Priority re-sort applied: {in_queue} of {len(full_gamut_queue)} "
                 f"queued items lifted to the front (priority list has "
@@ -1883,6 +1860,7 @@ class Orchestrator:
         # priority.json silently fall to "skip" because the qualifier
         # sees no gaps.
         from pipeline.__main__ import _read_priority_paths as _rpp_for_categ
+
         priority_paths_for_categ = _rpp_for_categ(staging_dir=self.staging_dir)
 
         new_full: list[dict] = []
@@ -1894,7 +1872,10 @@ class Orchestrator:
             if fp in known_full or fp in known_gap:
                 continue
             category, item = categorise_entry(
-                entry, self.config, self.state, self.control,
+                entry,
+                self.config,
+                self.state,
+                self.control,
                 priority_paths=priority_paths_for_categ,
             )
             if category == "full_gamut":

@@ -4,10 +4,6 @@ import argparse
 import copy
 import faulthandler
 import json
-import logging
-import os
-import sys
-from datetime import datetime
 
 # Defensive re-set of JSONEncoder defaults (2026-05-23). Across 5 incidents
 # we've caught JSONEncoder.key_separator silently mutated from ': ' to a
@@ -18,6 +14,11 @@ from datetime import datetime
 # explicitly so they survive future corruption — see
 # pipeline.orchestrator._write_heavy_worker_status for context.
 import json.encoder as _json_encoder
+import logging
+import os
+import sys
+from datetime import datetime
+
 _json_encoder.JSONEncoder.key_separator = ": "
 _json_encoder.JSONEncoder.item_separator = ", "
 
@@ -44,9 +45,7 @@ _FAULT_LOG_PATH = os.path.join(
 try:
     os.makedirs(os.path.dirname(_FAULT_LOG_PATH), exist_ok=True)
     _fault_log = open(_FAULT_LOG_PATH, "a", encoding="utf-8", buffering=1)
-    _fault_log.write(
-        f"\n--- pipeline start {datetime.now().isoformat(timespec='seconds')} (pid={os.getpid()}) ---\n"
-    )
+    _fault_log.write(f"\n--- pipeline start {datetime.now().isoformat(timespec='seconds')} (pid={os.getpid()}) ---\n")
     _fault_log.flush()
     faulthandler.enable(file=_fault_log, all_threads=True)
 except OSError:
@@ -126,14 +125,26 @@ def _ffprobe_video_codec(filepath: str, *, timeout: int = 15) -> str | None:
     codec disagrees with 'av1'. Small set, infrequent path, cost negligible.
     """
     import subprocess
+
     if not os.path.exists(filepath):
         return None
     try:
         out = subprocess.run(
-            ["ffprobe", "-v", "error", "-select_streams", "v:0",
-             "-show_entries", "stream=codec_name",
-             "-of", "csv=p=0", filepath],
-            capture_output=True, text=True, timeout=timeout,
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=codec_name",
+                "-of",
+                "csv=p=0",
+                filepath,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -383,8 +394,7 @@ def categorise_entry(
         # lets the encode through.
         if priority_paths and filepath in priority_paths:
             if not (existing and existing.get("force_reencode")):
-                _stamp_force_reencode(state, filepath, existing,
-                                      reason="priority.json membership")
+                _stamp_force_reencode(state, filepath, existing, reason="priority.json membership")
             return ("full_gamut", _build_full_gamut_item(entry))
 
         # CQ adherence check (2026-05-21). Policy: an AV1 file whose
@@ -413,8 +423,7 @@ def categorise_entry(
             # preserved" without encoding. Stamp the flag so the encode
             # actually runs.
             if not (existing and existing.get("force_reencode")):
-                _stamp_force_reencode(state, filepath, existing,
-                                      reason=f"cq off-target ({cur_cq} vs {tgt_cq})")
+                _stamp_force_reencode(state, filepath, existing, reason=f"cq off-target ({cur_cq} vs {tgt_cq})")
             return ("full_gamut", _build_full_gamut_item(entry))
         # User-initiated force re-encode wins over the codec check.
         # Without this an already-AV1 file at the wrong CQ can never be
@@ -439,8 +448,7 @@ def categorise_entry(
             # the intended transcode never runs (the LotR-AC-3 / Opus-on-Sonos
             # class of silent-wrong-audio DONE). Stamp it so the encode runs.
             if not (existing and existing.get("force_reencode")):
-                _stamp_force_reencode(state, filepath, existing,
-                                      reason="audio needs transcode to eac-3")
+                _stamp_force_reencode(state, filepath, existing, reason="audio needs transcode to eac-3")
             return ("full_gamut", _build_full_gamut_item(entry))
         if gaps.needs_anything:
             return ("gap_filler", entry)
@@ -460,8 +468,7 @@ def categorise_entry(
     if video_is_finished(codec_raw):
         if priority_paths and filepath in priority_paths:
             if not (existing and existing.get("force_reencode")):
-                _stamp_force_reencode(state, filepath, existing,
-                                      reason="priority.json membership")
+                _stamp_force_reencode(state, filepath, existing, reason="priority.json membership")
             return ("full_gamut", _build_full_gamut_item(entry))
         if existing and existing.get("force_reencode"):
             return ("full_gamut", _build_full_gamut_item(entry))
@@ -472,8 +479,7 @@ def categorise_entry(
             # and brings the audio into policy. (A file that needs an audio
             # transcode was never really "finished".)
             if not (existing and existing.get("force_reencode")):
-                _stamp_force_reencode(state, filepath, existing,
-                                      reason="finished-video audio needs transcode to eac-3")
+                _stamp_force_reencode(state, filepath, existing, reason="finished-video audio needs transcode to eac-3")
             return ("full_gamut", _build_full_gamut_item(entry))
         if gaps.needs_anything:
             # Subtitle / track-strip / metadata only (no audio transcode) —
@@ -489,8 +495,7 @@ def categorise_entry(
     return ("full_gamut", _build_full_gamut_item(entry))
 
 
-def _prune_done_from_priority(staging_dir: str | None = None,
-                              state: "PipelineState | None" = None) -> int:
+def _prune_done_from_priority(staging_dir: str | None = None, state: "PipelineState | None" = None) -> int:
     """Remove DONE / flagged_* rows from ``control/priority.json -> paths``.
 
     Priority is "lift these to the front" — once a file's been encoded
@@ -515,8 +520,7 @@ def _prune_done_from_priority(staging_dir: str | None = None,
     if not paths or state is None:
         return 0
     # Anything terminal — done OR any flagged_* — drops off.
-    TERMINAL = {"done", "flagged_corrupt", "flagged_foreign_audio",
-                "flagged_undetermined", "flagged_manual"}
+    TERMINAL = {"done", "flagged_corrupt", "flagged_foreign_audio", "flagged_undetermined", "flagged_manual"}
     kept = []
     removed = 0
     for fp in paths:

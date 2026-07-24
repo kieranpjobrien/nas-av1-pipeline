@@ -27,11 +27,7 @@ def main() -> int:
     from tools.report_lock import read_report
 
     rep = read_report()
-    audit = {
-        f["filepath"]: f["audit"]
-        for f in rep.get("files", [])
-        if f.get("audit")
-    }
+    audit = {f["filepath"]: f["audit"] for f in rep.get("files", []) if f.get("audit")}
 
     con = sqlite3.connect(str(PIPELINE_STATE_DB))
     cur = con.cursor()
@@ -88,10 +84,7 @@ def main() -> int:
     print("Files (sorted by size):")
     for sz, fp, a in sorted(chosen):
         name = fp.split(BACKSLASH)[-1][:55]
-        print(
-            f"  {sz/1024**3:5.2f} GB  cq {a['current_cq']} -> {a['target_cq']:2}  "
-            f"grade={a['grade']:18}  {name}"
-        )
+        print(f"  {sz / 1024**3:5.2f} GB  cq {a['current_cq']} -> {a['target_cq']:2}  grade={a['grade']:18}  {name}")
 
     prio_path = "F:/AV1_Staging/control/priority.json"
     try:
@@ -126,7 +119,7 @@ def main() -> int:
 
     print()
     print(f"priority.json updated with {len(chosen)} priority paths")
-    print(f"pre-encode snapshot saved: F:/AV1_Staging/overnight_test_snapshot.json")
+    print("pre-encode snapshot saved: F:/AV1_Staging/overnight_test_snapshot.json")
     return 0
 
 

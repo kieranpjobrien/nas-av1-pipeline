@@ -30,11 +30,9 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import json
 import sqlite3
 import sys
 from collections import Counter
-from pathlib import Path
 
 from paths import PIPELINE_STATE_DB
 
@@ -59,15 +57,10 @@ def main() -> int:
     from tools.report_lock import read_report
 
     rep = read_report()
-    results = [
-        {"filepath": f["filepath"], **f["audit"]}
-        for f in rep.get("files", [])
-        if f.get("audit")
-    ]
+    results = [{"filepath": f["filepath"], **f["audit"]} for f in rep.get("files", []) if f.get("audit")]
     if not results:
         print(
-            "media_report.json has no per-file audit blobs — run first:\n"
-            "  uv run python -m tools.audit_encode_cq",
+            "media_report.json has no per-file audit blobs — run first:\n  uv run python -m tools.audit_encode_cq",
             file=sys.stderr,
         )
         return 0

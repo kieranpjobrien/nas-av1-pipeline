@@ -29,9 +29,7 @@ import os
 import shutil
 import subprocess
 import time
-from pathlib import Path
 from typing import Optional
-
 
 _MKVMERGE_SEARCH = (
     r"C:\Program Files\MKVToolNix\mkvmerge.exe",

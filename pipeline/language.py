@@ -23,9 +23,9 @@ import queue
 import re
 import shutil
 import subprocess
-import time
 import sys
 import threading
+import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -165,6 +165,23 @@ _TESSERACT_SEARCH = [
 ]
 
 
+def whisper_cpu_forced() -> bool:
+    """True when WHISPER_FORCE_CPU asks for the CPU whisper path.
+
+    ONE definition, used by every site that branches on it. They had drifted
+    apart, and the drift was a rule-9c hazard rather than a cosmetic one:
+      * device selection tested ``.strip() in {"1","true","yes"}`` — no
+        ``.lower()``, so ``WHISPER_FORCE_CPU=True`` selected the **GPU**;
+      * the 9c worker clamp tested ``("1","true","True","TRUE","yes")`` — which
+        DID match "True", so it concluded CPU and **skipped the clamp**.
+    Together: GPU inference with multiple worker threads, each holding its own
+    CUDA context — exactly the configuration behind the 2026-04-30 bugcheck
+    0x135 in nvlddmkm. A clamp must never be laxer than the device choice it
+    guards. (2026-07-25)
+    """
+    return os.environ.get("WHISPER_FORCE_CPU", "").strip().lower() in {"1", "true", "yes"}
+
+
 _TITLE_HINTS = {
     "english": "en",
     "eng": "en",
@@ -211,8 +228,8 @@ _FILENAME_HINTS = {
     "english": "en",
     "eng": "en",
     "french": "fr",
-    "vff": "fr",      # version française française (true French dub)
-    "vf": "fr",       # version française (French dub, looser variant)
+    "vff": "fr",  # version française française (true French dub)
+    "vf": "fr",  # version française (French dub, looser variant)
     "german": "de",
     "deutsch": "de",
     "ger": "de",
@@ -293,8 +310,8 @@ def _detect_lang_from_filename(filepath: str) -> Optional[str]:
 
 
 # Channel/bitrate heuristic thresholds — see _apply_channel_bitrate_heuristic.
-_CHANNEL_HEURISTIC_MIN_CHANNELS = 6     # 5.1 or above to count as "likely original"
-_BITRATE_HEURISTIC_RATIO = 1.5          # winner must be >= 1.5x next-highest
+_CHANNEL_HEURISTIC_MIN_CHANNELS = 6  # 5.1 or above to count as "likely original"
+_BITRATE_HEURISTIC_RATIO = 1.5  # winner must be >= 1.5x next-highest
 _HEURISTIC_CONF_CHANNEL_ONLY = 0.65
 _HEURISTIC_CONF_BITRATE_ONLY = 0.6
 _HEURISTIC_CONF_CORROBORATED = 0.75
@@ -766,12 +783,38 @@ def infer_subtitle_language(
             a_lang = (a0.get("detected_language") or "").lower().strip()
         if a_lang and a_lang not in UND_LANGS:
             # Map ISO 639-2 (eng) → ISO 639-1 (en) for consistency with title hint
-            iso1_map = {"eng": "en", "fra": "fr", "fre": "fr", "deu": "de", "ger": "de",
-                        "spa": "es", "ita": "it", "jpn": "ja", "kor": "ko", "chi": "zh",
-                        "zho": "zh", "por": "pt", "rus": "ru", "ara": "ar", "hin": "hi",
-                        "swe": "sv", "nor": "no", "dan": "da", "fin": "fi", "nld": "nl",
-                        "dut": "nl", "pol": "pl", "ces": "cs", "cze": "cs", "tur": "tr",
-                        "ell": "el", "gre": "el", "heb": "he", "tha": "th", "vie": "vi"}
+            iso1_map = {
+                "eng": "en",
+                "fra": "fr",
+                "fre": "fr",
+                "deu": "de",
+                "ger": "de",
+                "spa": "es",
+                "ita": "it",
+                "jpn": "ja",
+                "kor": "ko",
+                "chi": "zh",
+                "zho": "zh",
+                "por": "pt",
+                "rus": "ru",
+                "ara": "ar",
+                "hin": "hi",
+                "swe": "sv",
+                "nor": "no",
+                "dan": "da",
+                "fin": "fi",
+                "nld": "nl",
+                "dut": "nl",
+                "pol": "pl",
+                "ces": "cs",
+                "cze": "cs",
+                "tur": "tr",
+                "ell": "el",
+                "gre": "el",
+                "heb": "he",
+                "tha": "th",
+                "vie": "vi",
+            }
             lang_short = iso1_map.get(a_lang, a_lang)
             return lang_short, 0.80, f"sole audio track is '{a_lang}'"
 
@@ -923,7 +966,7 @@ def _get_whisper_model(size: str = "tiny"):
     # mode has no such contention, so allow it through even with the encoder
     # running. Useful for ad-hoc verification and the bulk audit pass which we
     # want to run alongside the pipeline.
-    force_cpu = os.environ.get("WHISPER_FORCE_CPU", "").strip() in {"1", "true", "yes"}
+    force_cpu = whisper_cpu_forced()
     if not force_cpu:
         _assert_encoder_not_running()
 
@@ -958,14 +1001,28 @@ def _get_whisper_model(size: str = "tiny"):
             try:
                 subprocess.run(
                     [
-                        "ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "lavfi",
-                        "-i", "anullsrc=r=16000:cl=mono", "-t", "0.5", "-y", silent_wav,
+                        "ffmpeg",
+                        "-hide_banner",
+                        "-loglevel",
+                        "error",
+                        "-f",
+                        "lavfi",
+                        "-i",
+                        "anullsrc=r=16000:cl=mono",
+                        "-t",
+                        "0.5",
+                        "-y",
+                        silent_wav,
                     ],
                     capture_output=True,
                     timeout=10,
                 )
                 _segs, _info = model.transcribe(
-                    silent_wav, beam_size=1, best_of=1, language=None, without_timestamps=True,
+                    silent_wav,
+                    beam_size=1,
+                    best_of=1,
+                    language=None,
+                    without_timestamps=True,
                 )
                 try:
                     next(iter(_segs))
@@ -1061,14 +1118,22 @@ def _extract_all_audio_samples(
         for si, offset in enumerate(offsets):
             wav_path = os.path.join(tmp_dir, f"{base}_a{aidx}_s{si}.wav")
             paths.append(wav_path)
-            cmd.extend([
-                "-ss", str(offset),
-                "-t", str(sample_duration),
-                "-map", f"0:a:{aidx}",
-                "-ac", "1",
-                "-ar", "16000",
-                "-y", wav_path,
-            ])
+            cmd.extend(
+                [
+                    "-ss",
+                    str(offset),
+                    "-t",
+                    str(sample_duration),
+                    "-map",
+                    f"0:a:{aidx}",
+                    "-ac",
+                    "1",
+                    "-ar",
+                    "16000",
+                    "-y",
+                    wav_path,
+                ]
+            )
         result[aidx] = paths
 
     # Timeout scales with sample count + duration. Stage 3 (10 × 300s) needs
@@ -1078,8 +1143,7 @@ def _extract_all_audio_samples(
     proc_returncode: Optional[int] = None
     proc_stderr: str = ""
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True,
-                              encoding="utf-8", errors="replace", timeout=timeout)
+        proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
         proc_returncode = proc.returncode
         proc_stderr = proc.stderr or ""
     except subprocess.TimeoutExpired:
@@ -1101,8 +1165,7 @@ def _extract_all_audio_samples(
         # multi-output runs. Last 5 lines is enough to see the real error.
         tail = "\n      ".join(proc_stderr.strip().splitlines()[-5:]) or "(empty)"
         logging.warning(
-            "ffmpeg extraction produced 0 wavs (rc=%s) for %s — "
-            "stderr tail:\n      %s",
+            "ffmpeg extraction produced 0 wavs (rc=%s) for %s — stderr tail:\n      %s",
             proc_returncode,
             os.path.basename(filepath),
             tail,
@@ -1114,9 +1177,7 @@ def _extract_all_audio_samples(
 def _whisper_detect_one(model, wav_path: str) -> tuple[Optional[str], float]:
     """Run whisper language detection on a single WAV sample."""
     try:
-        segments, info = model.transcribe(
-            wav_path, beam_size=1, best_of=1, language=None, without_timestamps=True
-        )
+        segments, info = model.transcribe(wav_path, beam_size=1, best_of=1, language=None, without_timestamps=True)
         for _ in segments:
             break
         if info.language and info.language_probability > 0.1:
@@ -1197,6 +1258,7 @@ def _cache_get(key: str) -> Optional[tuple[str, float, str]]:
         return None
     try:
         import sqlite3
+
         conn = sqlite3.connect(_cache_db_path(), timeout=5)
         try:
             conn.execute("""
@@ -1230,6 +1292,7 @@ def _cache_set(key: str, language: str, confidence: float, method: str) -> None:
         return
     try:
         import sqlite3
+
         conn = sqlite3.connect(_cache_db_path(), timeout=5)
         try:
             conn.execute("""
@@ -1271,9 +1334,9 @@ def _cache_set(key: str, language: str, confidence: float, method: str) -> None:
 
 _LADDER_STAGES: list[tuple[str, int, int]] = [
     # (model_size, sample_count, sample_duration_secs)
-    ("tiny",  3,  30),
-    ("small", 5,  60),
-    ("base",  10, 300),
+    ("tiny", 3, 30),
+    ("small", 5, 60),
+    ("base", 10, 300),
 ]
 _LADDER_MIN_CONFIDENCE = 0.85
 
@@ -1322,10 +1385,7 @@ def detect_audio_language_deep(
         hit = _cache_get(cache_key)
         if hit is not None:
             lang_c, conf_c, method_c = hit
-            logging.info(
-                f"    {name} a:{audio_stream_index} -> {lang_c} ({conf_c:.2f}) "
-                f"cached ({method_c})"
-            )
+            logging.info(f"    {name} a:{audio_stream_index} -> {lang_c} ({conf_c:.2f}) cached ({method_c})")
             return lang_c, conf_c, "cached"
 
     t0 = _time.monotonic()
@@ -1388,10 +1448,7 @@ def detect_audio_language_deep(
 
     if cache_key:
         _cache_set(cache_key, "und", 0.0, "whisper_exhausted")
-    logging.info(
-        f"    {name} a:{audio_stream_index} -> und (whisper_exhausted, "
-        f"total {_time.monotonic() - t0:.1f}s)"
-    )
+    logging.info(f"    {name} a:{audio_stream_index} -> und (whisper_exhausted, total {_time.monotonic() - t0:.1f}s)")
     return "und", 0.0, "whisper_exhausted"
 
 
@@ -1539,9 +1596,7 @@ def process_file(
                     # line. Try the metadata-only fallback chain (track title /
                     # sibling subs / sole-audio / TMDb) before giving up. This
                     # rescues short / forced / corrupt-extraction tracks.
-                    fb_lang, fb_conf, fb_reason = infer_subtitle_language(
-                        file_entry, sub_all_idx, detected_text_langs
-                    )
+                    fb_lang, fb_conf, fb_reason = infer_subtitle_language(file_entry, sub_all_idx, detected_text_langs)
                     if fb_lang and fb_conf >= 0.5:
                         text_results.append(
                             {
@@ -1619,9 +1674,7 @@ def process_file(
             # 2026-04-29: same metadata-only fallback chain as text subs.
             # Track title / sole-audio / TMDb give us a real shot at
             # bitmap subs Tesseract couldn't crack.
-            fb_lang, fb_conf, fb_reason = infer_subtitle_language(
-                file_entry, sub_all_idx, detected_text_langs
-            )
+            fb_lang, fb_conf, fb_reason = infer_subtitle_language(file_entry, sub_all_idx, detected_text_langs)
             if fb_lang and fb_conf >= 0.5:
                 results.append(
                     {
@@ -1670,7 +1723,9 @@ def process_file(
             detected, reason = infer_audio_language(file_entry, audio_idx)
             if not detected:
                 detected, reason = _infer_audio_from_sub_majority(
-                    file_entry, audio_idx, detected_text_langs,
+                    file_entry,
+                    audio_idx,
+                    detected_text_langs,
                 )
             conf = 0.9 if detected and "majority" not in reason else (0.8 if detected else 0.0)
 
@@ -1772,7 +1827,9 @@ def detect_all_languages(file_entry: dict, use_whisper: bool = False) -> dict:
 
         elif codec in BITMAP_SUB_CODECS:
             ocr_text = extract_bitmap_subtitle_text(
-                filepath, sub_all_idx, duration_secs=entry.get("duration_seconds", 0),
+                filepath,
+                sub_all_idx,
+                duration_secs=entry.get("duration_seconds", 0),
             )
             if ocr_text:
                 detected, confidence = detect_language(ocr_text)
@@ -1786,7 +1843,8 @@ def detect_all_languages(file_entry: dict, use_whisper: bool = False) -> dict:
     # `und` audio track — otherwise we can't tell which track the filename
     # tag refers to. Computed up-front so we don't re-parse for every track.
     und_audio_indices = [
-        i for i, s in enumerate(entry.get("audio_streams", []))
+        i
+        for i, s in enumerate(entry.get("audio_streams", []))
         if (s.get("language") or "und").lower().strip() in UND_LANGS
     ]
     filename_hint: Optional[str] = None
@@ -1937,6 +1995,7 @@ def _patch_entry_from_results(
 def _progress_state_path() -> str:
     """Return the absolute path of the lang-detect progress state file."""
     from paths import STAGING_DIR
+
     return os.path.join(str(STAGING_DIR), "lang_detect_state.json")
 
 
@@ -2107,12 +2166,21 @@ def _run_text_strategy(
     start_monotonic = time.monotonic()
     recent_files: list[dict] = []
 
-    write_progress_state({
-        "running": True, "started_at": started_at, "strategy": "text/OCR",
-        "total": total, "processed": 0, "detected": 0, "failed": 0,
-        "current_file": None, "rate_files_per_min": 0.0, "eta_secs": None,
-        "recent": [],
-    })
+    write_progress_state(
+        {
+            "running": True,
+            "started_at": started_at,
+            "strategy": "text/OCR",
+            "total": total,
+            "processed": 0,
+            "detected": 0,
+            "failed": 0,
+            "current_file": None,
+            "rate_files_per_min": 0.0,
+            "eta_secs": None,
+            "recent": [],
+        }
+    )
 
     progress_lock = threading.Lock()
     save_lock = threading.Lock()
@@ -2143,10 +2211,12 @@ def _run_text_strategy(
             except Exception as e:
                 logging.warning(f"  Language detection error: {e}")
                 with progress_lock:
-                    recent_files.append({
-                        "file": (futures[future].get("filename") or "")[:80],
-                        "detected": "error",
-                    })
+                    recent_files.append(
+                        {
+                            "file": (futures[future].get("filename") or "")[:80],
+                            "detected": "error",
+                        }
+                    )
                     if len(recent_files) > 5:
                         recent_files.pop(0)
 
@@ -2157,16 +2227,21 @@ def _run_text_strategy(
                 elapsed = max(time.monotonic() - start_monotonic, 0.001)
                 rate = completed / elapsed * 60.0
                 eta_secs = (total - completed) / (rate / 60.0) if rate > 0 else None
-                write_progress_state({
-                    "running": True, "started_at": started_at, "strategy": "text/OCR",
-                    "total": total, "processed": completed,
-                    "detected": stats.get("detected", 0),
-                    "failed": stats.get("failed", 0),
-                    "current_file": (futures[future].get("filename") or "")[:80],
-                    "rate_files_per_min": round(rate, 2),
-                    "eta_secs": int(eta_secs) if eta_secs is not None else None,
-                    "recent": list(recent_files),
-                })
+                write_progress_state(
+                    {
+                        "running": True,
+                        "started_at": started_at,
+                        "strategy": "text/OCR",
+                        "total": total,
+                        "processed": completed,
+                        "detected": stats.get("detected", 0),
+                        "failed": stats.get("failed", 0),
+                        "current_file": (futures[future].get("filename") or "")[:80],
+                        "rate_files_per_min": round(rate, 2),
+                        "eta_secs": int(eta_secs) if eta_secs is not None else None,
+                        "recent": list(recent_files),
+                    }
+                )
 
     clear_progress_state()
 
@@ -2194,7 +2269,7 @@ def _run_text_whisper_strategy(
     # GPU safety: multi-thread CUDA contexts BSOD this machine. If WHISPER_FORCE_CPU
     # isn't set, we're running on GPU — force a single worker no matter what the
     # caller asked for. Logged loudly so the override isn't silent.
-    cpu_forced = os.environ.get("WHISPER_FORCE_CPU", "").strip() in ("1", "true", "True", "TRUE", "yes")
+    cpu_forced = whisper_cpu_forced()
     if not cpu_forced and workers > 1:
         logging.info(
             f"  GPU mode detected (WHISPER_FORCE_CPU not set) — clamping whisper workers "
@@ -2215,9 +2290,7 @@ def _run_text_whisper_strategy(
         logging.info("  No audio tracks need whisper detection")
         return
 
-    logging.info(
-        f"  {actual_total} files to process (whisper ladder: tiny 3x30 -> tiny 5x30 -> small 5x30)"
-    )
+    logging.info(f"  {actual_total} files to process (whisper ladder: tiny 3x30 -> tiny 5x30 -> small 5x30)")
 
     tiny = _get_whisper_model("tiny")
     if not tiny:
@@ -2231,18 +2304,20 @@ def _run_text_whisper_strategy(
     started_at = datetime.now().isoformat(timespec="seconds")
     start_monotonic = time.monotonic()
     recent_files: list[dict] = []  # ring buffer of last 5
-    write_progress_state({
-        "running": True,
-        "started_at": started_at,
-        "total": actual_total,
-        "processed": 0,
-        "detected": 0,
-        "failed": 0,
-        "current_file": None,
-        "rate_files_per_min": 0.0,
-        "eta_secs": None,
-        "recent": [],
-    })
+    write_progress_state(
+        {
+            "running": True,
+            "started_at": started_at,
+            "total": actual_total,
+            "processed": 0,
+            "detected": 0,
+            "failed": 0,
+            "current_file": None,
+            "rate_files_per_min": 0.0,
+            "eta_secs": None,
+            "recent": [],
+        }
+    )
 
     def worker() -> None:
         while True:
@@ -2257,7 +2332,10 @@ def _run_text_whisper_strategy(
 
             for aidx in audio_indices:
                 lang, conf, method = detect_audio_language_deep(
-                    filepath, aidx, duration, min_confidence=min_confidence,
+                    filepath,
+                    aidx,
+                    duration,
+                    min_confidence=min_confidence,
                 )
                 results[aidx] = (lang, conf, method)
 
@@ -2309,21 +2387,21 @@ def _run_text_whisper_strategy(
 
                 elapsed = max(time.monotonic() - start_monotonic, 0.001)
                 rate = c / elapsed * 60.0
-                eta_secs = (
-                    (actual_total - c) / (rate / 60.0) if rate > 0 else None
+                eta_secs = (actual_total - c) / (rate / 60.0) if rate > 0 else None
+                write_progress_state(
+                    {
+                        "running": True,
+                        "started_at": started_at,
+                        "total": actual_total,
+                        "processed": c,
+                        "detected": stats.get("detected", 0),
+                        "failed": stats.get("failed", 0),
+                        "current_file": file_label,
+                        "rate_files_per_min": round(rate, 2),
+                        "eta_secs": int(eta_secs) if eta_secs is not None else None,
+                        "recent": list(recent_files),
+                    }
                 )
-                write_progress_state({
-                    "running": True,
-                    "started_at": started_at,
-                    "total": actual_total,
-                    "processed": c,
-                    "detected": stats.get("detected", 0),
-                    "failed": stats.get("failed", 0),
-                    "current_file": file_label,
-                    "rate_files_per_min": round(rate, 2),
-                    "eta_secs": int(eta_secs) if eta_secs is not None else None,
-                    "recent": list(recent_files),
-                })
 
             with save_lock:
                 _incremental_save(report, [entry])
@@ -2339,9 +2417,7 @@ def _run_text_whisper_strategy(
     # Mark complete on the dashboard.
     clear_progress_state()
 
-    logging.info(
-        f"  Whisper complete: {stats.get('detected', 0)} detected, {stats.get('failed', 0)} unresolved"
-    )
+    logging.info(f"  Whisper complete: {stats.get('detected', 0)} detected, {stats.get('failed', 0)} unresolved")
 
 
 def _run_deep_strategy(
@@ -2398,7 +2474,10 @@ def _run_deep_strategy(
         for entry, aidx, dur in items:
             try:
                 samples = _extract_all_audio_samples(
-                    entry.get("filepath", ""), [aidx], dur, sample_duration=30,
+                    entry.get("filepath", ""),
+                    [aidx],
+                    dur,
+                    sample_duration=30,
                 )
                 wavs = samples.get(aidx, [])
             except Exception as exc:
@@ -2409,9 +2488,7 @@ def _run_deep_strategy(
 
     extractor_count = 3
     chunks = [work_items[i::extractor_count] for i in range(extractor_count)]
-    extractor_threads = [
-        threading.Thread(target=_extract_worker, args=(c,), daemon=True) for c in chunks
-    ]
+    extractor_threads = [threading.Thread(target=_extract_worker, args=(c,), daemon=True) for c in chunks]
     for t in extractor_threads:
         t.start()
 
@@ -2459,8 +2536,7 @@ def _run_deep_strategy(
             residuals_p3.append((entry, aidx, dur, wavs))
         if i % 25 == 0 or i == len(residuals_p2):
             logging.info(
-                f"  Pass 2 (small): {i}/{len(residuals_p2)} attempted — "
-                f"{len(residuals_p3)} residuals for pass 3"
+                f"  Pass 2 (small): {i}/{len(residuals_p2)} attempted — {len(residuals_p3)} residuals for pass 3"
             )
 
     logging.info(f"  Pass 2 done — {len(residuals_p3)} residuals for pass 3 (medium all-5)")
@@ -2479,10 +2555,7 @@ def _run_deep_strategy(
         for w in wavs:
             _safe_remove(w)
         if i % 10 == 0 or i == len(residuals_p3):
-            logging.info(
-                f"  Pass 3 (medium): {i}/{len(residuals_p3)} attempted — "
-                f"{len(exhausted)} still ambiguous"
-            )
+            logging.info(f"  Pass 3 (medium): {i}/{len(residuals_p3)} attempted — {len(exhausted)} still ambiguous")
 
     logging.info(
         f"  Deep pass-based complete — "
@@ -2526,8 +2599,7 @@ def enrich_report(
         to_process = []
         for entry in files:
             has_und = any(
-                (s.get("language") or "und").lower().strip() in UND_LANGS
-                and not s.get("detection_method")
+                (s.get("language") or "und").lower().strip() in UND_LANGS and not s.get("detection_method")
                 for streams in (entry.get("subtitle_streams", []), entry.get("audio_streams", []))
                 for s in streams
             )
@@ -2538,9 +2610,7 @@ def enrich_report(
         logging.info("No tracks to process — skipping language detection")
         return report
 
-    logging.info(
-        f"Language detection: {len(to_process)} files to process (whisper={use_whisper}, all={whisper_all})"
-    )
+    logging.info(f"Language detection: {len(to_process)} files to process (whisper={use_whisper}, all={whisper_all})")
     if _find_tesseract():
         logging.info(f"  Tesseract: found at {_find_tesseract()}")
     else:
@@ -2554,16 +2624,18 @@ def enrich_report(
     elif use_whisper:
         logging.info(f"  Whisper: parallel mode (per-file worker pool, workers={workers})")
         _run_text_whisper_strategy(
-            to_process, whisper_all, min_confidence, stats, report,
+            to_process,
+            whisper_all,
+            min_confidence,
+            stats,
+            report,
             retry_unresolved=retry_unresolved,
             workers=workers,
         )
     else:
         _run_text_strategy(to_process, workers, min_confidence, stats, report=report)
 
-    logging.info(
-        f"  Language detection complete: {stats['detected']} detected, {stats['failed']} unresolved"
-    )
+    logging.info(f"  Language detection complete: {stats['detected']} detected, {stats['failed']} unresolved")
 
     _incremental_save(report, to_process)
     return report
@@ -2660,10 +2732,16 @@ def _apply_file_ffmpeg(filepath: str, detections: list[dict]) -> tuple[int, int]
 
     tmp_path = filepath + ".langfix_tmp.mkv"
     cmd = [
-        "ffmpeg", "-hide_banner", "-loglevel", "error",
-        "-i", filepath,
-        "-map", "0",
-        "-c", "copy",
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        filepath,
+        "-map",
+        "0",
+        "-c",
+        "copy",
     ]
     for det in detections:
         track_type = det["track_type"]
@@ -2787,19 +2865,23 @@ def _run_spot_check(report: dict, sample_size: int) -> None:
         if (idx + 1) % 20 == 0 or idx + 1 == sample_size:
             logging.info(f"  Progress: {idx + 1}/{sample_size} ({len(mismatches)} mismatches)")
         w_lang, w_conf = detect_audio_language_whisper(
-            entry["filepath"], audio_idx, entry.get("duration_seconds", 0),
+            entry["filepath"],
+            audio_idx,
+            entry.get("duration_seconds", 0),
         )
         if w_lang and w_conf >= 0.5:
             w_iso = to_iso2(w_lang)
             existing_iso = to_iso2(existing_tag)
             if w_iso != existing_iso:
-                mismatches.append({
-                    "filename": entry["filename"],
-                    "track": audio_idx,
-                    "tagged_as": existing_tag,
-                    "whisper_says": w_lang,
-                    "confidence": w_conf,
-                })
+                mismatches.append(
+                    {
+                        "filename": entry["filename"],
+                        "track": audio_idx,
+                        "tagged_as": existing_tag,
+                        "whisper_says": w_lang,
+                        "confidence": w_conf,
+                    }
+                )
 
     logging.info(f"\nSpot-check complete: {len(mismatches)} mismatches out of {sample_size}")
     if mismatches:
@@ -2829,24 +2911,27 @@ def _run_apply(report: dict, min_confidence: float) -> None:
     # file mtime) sees no activity for the entire apply phase and kills the
     # process — that's how we lost the 2026-04-30 01:20 attempt.
     apply_total = sum(
-        1 for entry in report.get("files", [])
+        1
+        for entry in report.get("files", [])
         if any(s.get("detected_language") for s in entry.get("subtitle_streams", []))
         or any(a.get("detected_language") for a in entry.get("audio_streams", []))
     )
     apply_started = datetime.now().isoformat(timespec="seconds")
-    write_progress_state({
-        "running": True,
-        "started_at": apply_started,
-        "strategy": "apply",
-        "total": apply_total,
-        "processed": 0,
-        "detected": 0,
-        "failed": 0,
-        "current_file": None,
-        "rate_files_per_min": 0.0,
-        "eta_secs": None,
-        "recent": [],
-    })
+    write_progress_state(
+        {
+            "running": True,
+            "started_at": apply_started,
+            "strategy": "apply",
+            "total": apply_total,
+            "processed": 0,
+            "detected": 0,
+            "failed": 0,
+            "current_file": None,
+            "rate_files_per_min": 0.0,
+            "eta_secs": None,
+            "recent": [],
+        }
+    )
     apply_t0 = time.monotonic()
 
     total_applied = 0
@@ -2857,22 +2942,26 @@ def _run_apply(report: dict, min_confidence: float) -> None:
         detections: list[dict] = []
         for i, s in enumerate(entry.get("subtitle_streams", [])):
             if s.get("detected_language"):
-                detections.append({
-                    "track_type": "subtitle",
-                    "stream_index": i,
-                    "detected_language": s["detected_language"],
-                    "confidence": s.get("detection_confidence", 0),
-                    "method": s.get("detection_method", ""),
-                })
+                detections.append(
+                    {
+                        "track_type": "subtitle",
+                        "stream_index": i,
+                        "detected_language": s["detected_language"],
+                        "confidence": s.get("detection_confidence", 0),
+                        "method": s.get("detection_method", ""),
+                    }
+                )
         for i, a in enumerate(entry.get("audio_streams", [])):
             if a.get("detected_language"):
-                detections.append({
-                    "track_type": "audio",
-                    "stream_index": i,
-                    "detected_language": a["detected_language"],
-                    "confidence": a.get("detection_confidence", 0),
-                    "method": a.get("detection_method", ""),
-                })
+                detections.append(
+                    {
+                        "track_type": "audio",
+                        "stream_index": i,
+                        "detected_language": a["detected_language"],
+                        "confidence": a.get("detection_confidence", 0),
+                        "method": a.get("detection_method", ""),
+                    }
+                )
 
         if not detections:
             continue
@@ -2881,7 +2970,9 @@ def _run_apply(report: dict, min_confidence: float) -> None:
         if file_count % 50 == 0 or file_count == 1:
             logging.info(f"  Progress: {file_count} files processed")
         applied, failed_count = apply_detections_for_file(
-            entry["filepath"], detections, min_confidence,
+            entry["filepath"],
+            detections,
+            min_confidence,
         )
         total_applied += applied
         total_failed += failed_count
@@ -2907,19 +2998,21 @@ def _run_apply(report: dict, min_confidence: float) -> None:
             rate = (file_count / elapsed * 60.0) if elapsed > 0 else 0.0
             remaining = max(0, apply_total - file_count)
             eta = int(remaining / max(rate / 60.0, 1e-6)) if rate > 0 else None
-            write_progress_state({
-                "running": True,
-                "started_at": apply_started,
-                "strategy": "apply",
-                "total": apply_total,
-                "processed": file_count,
-                "detected": total_applied,
-                "failed": total_failed,
-                "current_file": Path(entry["filepath"]).name,
-                "rate_files_per_min": round(rate, 2),
-                "eta_secs": eta,
-                "recent": [],
-            })
+            write_progress_state(
+                {
+                    "running": True,
+                    "started_at": apply_started,
+                    "strategy": "apply",
+                    "total": apply_total,
+                    "processed": file_count,
+                    "detected": total_applied,
+                    "failed": total_failed,
+                    "current_file": Path(entry["filepath"]).name,
+                    "rate_files_per_min": round(rate, 2),
+                    "eta_secs": eta,
+                    "recent": [],
+                }
+            )
 
     write_report(report)
     logging.info(f"Applied: {total_applied}  Failed: {total_failed}")
@@ -2935,45 +3028,55 @@ def main() -> None:
         description="Detect languages for undetermined subtitle/audio tracks",
     )
     parser.add_argument(
-        "--apply", action="store_true",
+        "--apply",
+        action="store_true",
         help="Write detected languages back to MKV files using mkvpropedit/ffmpeg",
     )
     parser.add_argument(
-        "--min-confidence", type=float, default=0.85,
+        "--min-confidence",
+        type=float,
+        default=0.85,
         help="Minimum confidence to apply a detection (default: 0.85)",
     )
     parser.add_argument(
-        "--whisper", action="store_true",
+        "--whisper",
+        action="store_true",
         help="Use faster-whisper for audio tracks that heuristics can't resolve",
     )
     parser.add_argument(
-        "--whisper-all", action="store_true",
+        "--whisper-all",
+        action="store_true",
         help="Run whisper on ALL audio tracks (verify existing tags)",
     )
     parser.add_argument(
-        "--deep", action="store_true",
+        "--deep",
+        action="store_true",
         help=(
             "Pass-based escalation ladder — tiny 3x30 -> small 5x30 -> medium 5x30 "
             "across every und audio track. Needs the encoder stopped."
         ),
     )
     parser.add_argument(
-        "--retry-unresolved", action="store_true",
+        "--retry-unresolved",
+        action="store_true",
         help="Retry previously unresolved whisper tracks",
     )
     parser.add_argument(
-        "--spot-check", type=int, default=0, metavar="N",
+        "--spot-check",
+        type=int,
+        default=0,
+        metavar="N",
         help="Whisper spot-check: verify N random already-tagged tracks",
     )
     parser.add_argument(
-        "--workers", type=int, default=6,
+        "--workers",
+        type=int,
+        default=6,
         help="Parallel workers for subtitle extraction (default: 6)",
     )
     args = parser.parse_args()
 
-    use_whisper = (
-        args.whisper or args.whisper_all or args.spot_check > 0 or args.retry_unresolved or args.deep
-    )
+    use_whisper = args.whisper or args.whisper_all or args.spot_check > 0 or args.retry_unresolved or args.deep
 
     if use_whisper:
         from paths import PIPELINE_STATE_DB
@@ -2984,7 +3087,7 @@ def main() -> None:
         # let whisper run alongside the encoder — this is the same model
         # the pipeline uses internally during qualify (whisper on CPU,
         # encode on GPU, no contention).
-        force_cpu = os.environ.get("WHISPER_FORCE_CPU", "").strip().lower() in {"1", "true", "yes"}
+        force_cpu = whisper_cpu_forced()
 
         db_path = str(PIPELINE_STATE_DB)
         if os.path.exists(db_path) and not force_cpu:

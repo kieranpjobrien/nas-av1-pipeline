@@ -11,21 +11,21 @@ Guards: arr connectivity pre-check (no deletions if unreachable); locate the
 title in the arr BEFORE deleting (never delete a file we can't re-grab);
 episode-precise EpisodeSearch for TV. User pre-authorised delete->re-source.
 """
+
 import os
 import re
-import subprocess
 import sqlite3
+import subprocess
 import sys
 import time
 
 sys.path.insert(0, "D:/MediaProject")
-from pipeline.state import FileStatus, PipelineState
-from tools import radarr, sonarr
-
 # Derive from paths (env-backed), never hardcode the staging drive. A stale
 # literal here would point this tool at an OLD state DB after the staging move,
 # and it DELETES media based on what it reads. (2026-07-25)
 from paths import STAGING_DIR  # noqa: E402
+from pipeline.state import FileStatus, PipelineState
+from tools import radarr, sonarr
 
 LOG = str(STAGING_DIR / "corrupt_handler.log")
 STATE_DB = str(STAGING_DIR / "pipeline_state.db")
@@ -72,8 +72,14 @@ def probe(fp):
         if not os.path.exists(fp):
             return "GONE"
     try:
-        p = subprocess.run([sys.executable, "-c", PROBE_CODE, fp], timeout=150,
-                           capture_output=True, text=True, encoding="utf-8", errors="replace")
+        p = subprocess.run(
+            [sys.executable, "-c", PROBE_CODE, fp],
+            timeout=150,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
     except subprocess.TimeoutExpired:
         return "HUNG"
     if p.returncode != 0:
@@ -170,8 +176,10 @@ def main():
     state = PipelineState(STATE_DB)
     con = sqlite3.connect(STATE_DB)
     con.row_factory = sqlite3.Row
-    corrupt = [r["filepath"] for r in con.execute(
-        "SELECT filepath FROM pipeline_files WHERE status='flagged_corrupt'").fetchall()]
+    corrupt = [
+        r["filepath"]
+        for r in con.execute("SELECT filepath FROM pipeline_files WHERE status='flagged_corrupt'").fetchall()
+    ]
     log(f"{len(corrupt)} flagged_corrupt to classify")
 
     tally = {"HEALTHY": 0, "BAD": 0, "GONE": 0, "HUNG": 0}
@@ -182,14 +190,20 @@ def main():
         tally[v] = tally.get(v, 0) + 1
         try:
             if v == "HEALTHY":
-                state.set_file(fp, FileStatus.PENDING, force_reencode=False,
-                               reason="re-probe HEALTHY: false corrupt-flag cleared, re-queued")
+                state.set_file(
+                    fp,
+                    FileStatus.PENDING,
+                    force_reencode=False,
+                    reason="re-probe HEALTHY: false corrupt-flag cleared, re-queued",
+                )
                 log(f"HEALTHY  {fn} -> un-flagged, re-queued for convert")
             elif v in ("BAD", "GONE"):
                 if destructive >= MAX_DESTRUCTIVE_PER_RUN:
-                    log(f"ABORT — {MAX_DESTRUCTIVE_PER_RUN} deletions already this run; "
+                    log(
+                        f"ABORT — {MAX_DESTRUCTIVE_PER_RUN} deletions already this run; "
                         f"refusing more (looks like an environment fault, not {len(corrupt)} "
-                        f"genuinely broken files). Remaining left flagged for review.")
+                        f"genuinely broken files). Remaining left flagged for review."
+                    )
                     break
                 destructive += 1
                 res = resource(fp, state, con)

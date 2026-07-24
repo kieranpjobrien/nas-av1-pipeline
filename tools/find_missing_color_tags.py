@@ -32,7 +32,6 @@ import json
 import os
 import subprocess
 import sys
-from collections import defaultdict
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -45,11 +44,21 @@ def _probe(filepath: str, timeout: int = 15) -> tuple[str, str, str, str] | None
     or None if probe failed. Each colour field is the raw ffprobe
     value (could be "unknown" / "reserved" / "" / None / a real name)."""
     out = subprocess.run(
-        ["ffprobe", "-v", "error", "-select_streams", "v:0",
-         "-show_entries",
-         "stream=color_primaries,color_transfer,color_space,pix_fmt",
-         "-of", "json", filepath],
-        capture_output=True, text=True, timeout=timeout,
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=color_primaries,color_transfer,color_space,pix_fmt",
+            "-of",
+            "json",
+            filepath,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
     )
     if out.returncode != 0:
         return None
@@ -72,23 +81,18 @@ def _is_missing(v) -> bool:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--limit", type=int, default=0,
-                        help="Stop after N AV1 files (0 = all)")
-    parser.add_argument("--out", type=str, default=None,
-                        help="Write a CSV of affected paths to this file")
+    parser.add_argument("--limit", type=int, default=0, help="Stop after N AV1 files (0 = all)")
+    parser.add_argument("--out", type=str, default=None, help="Write a CSV of affected paths to this file")
     args = parser.parse_args()
 
     rep = json.loads(Path(MEDIA_REPORT).read_text(encoding="utf-8"))
-    av1_files = [
-        f for f in rep.get("files", [])
-        if ((f.get("video") or {}).get("codec_raw") or "").lower() == "av1"
-    ]
+    av1_files = [f for f in rep.get("files", []) if ((f.get("video") or {}).get("codec_raw") or "").lower() == "av1"]
     print(f"AV1 files in media_report: {len(av1_files)}")
     if args.limit:
         av1_files = av1_files[: args.limit]
         print(f"  ...limited to first {args.limit} for this run")
 
-    high: list[tuple[str, str]] = []   # (path, pix_fmt)
+    high: list[tuple[str, str]] = []  # (path, pix_fmt)
     medium: list[tuple[str, str]] = []
     low: list[tuple[str, str, str, str, str]] = []  # (path, pix_fmt, p, t, s)
     probe_failed: list[str] = []
@@ -119,7 +123,7 @@ def main() -> int:
             print(f"  ...{i}/{len(av1_files)} probed", file=sys.stderr)
 
     print()
-    print(f"=== Sweep complete ===")
+    print("=== Sweep complete ===")
     print(f"  AV1 files probed:                {len(av1_files)}")
     print(f"  Probe failed:                    {len(probe_failed)}")
     print(f"  Fully tagged (OK):               {ok}")
@@ -160,9 +164,7 @@ def main() -> int:
             rows.append(("LOW", fp, pix, p, t, s))
         Path(args.out).write_text(
             "risk,filepath,pix_fmt,color_primaries,color_transfer,color_space\n"
-            + "\n".join(
-                ",".join(f'"{c}"' if "," in str(c) else str(c) for c in r) for r in rows
-            ),
+            + "\n".join(",".join(f'"{c}"' if "," in str(c) else str(c) for c in r) for r in rows),
             encoding="utf-8",
         )
         print(f"\nWrote CSV: {args.out}")

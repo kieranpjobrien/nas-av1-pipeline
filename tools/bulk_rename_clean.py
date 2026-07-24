@@ -183,7 +183,7 @@ def main() -> int:
     # 45% orphan paths after the bulk-rename run.
     prio_updated = _update_priority_paths(rename_map) if rename_map else 0
 
-    print(f"\n=== Summary ===")
+    print("\n=== Summary ===")
     print(f"  Renamed: {renamed}")
     print(f"  Failed:  {failed}")
     print(f"  priority.json entries remapped: {prio_updated}")

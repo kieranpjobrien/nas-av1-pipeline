@@ -134,7 +134,7 @@ def main() -> int:
     summary = _bucket_summary(paths)
     print(f"Bucket: {args.bucket}")
     print(f"  Files to re-queue: {len(paths)}")
-    print(f"  Violation tallies (a single file may hit multiple):")
+    print("  Violation tallies (a single file may hit multiple):")
     for v, n in summary.most_common():
         print(f"    {v:30s} {n}")
     print()
@@ -143,7 +143,7 @@ def main() -> int:
     action_counts: Counter = Counter()
     for _, vs in paths:
         action_counts[_classify_action(vs)] += 1
-    print(f"  Action types (worst-case per file):")
+    print("  Action types (worst-case per file):")
     for a, n in action_counts.most_common():
         print(f"    {a:50s} {n}")
     print()
@@ -182,7 +182,7 @@ def main() -> int:
     conn.commit()
     conn.close()
 
-    print(f"Applied:")
+    print("Applied:")
     print(f"  Reset to pending           : {updated}")
     print(f"  Already pending (skipped)  : {skipped_already_pending}")
     print(f"  Not in state DB (skipped)  : {missing}")
