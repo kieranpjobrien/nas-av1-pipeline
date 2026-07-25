@@ -980,7 +980,23 @@ class Orchestrator:
         if payload:
             payload["pre_processed"] = True
             try:
-                self.state.set_file(filepath, FileStatus.PROCESSING, **payload)
+                # Re-read before writing. This runs for seconds (language detect
+                # + sidecar scan), and in that window the prep or GPU worker can
+                # reach a TERMINAL verdict on the same file — DONE-already-
+                # compliant, flagged_foreign_audio, flagged_corrupt — and clean
+                # up its local copy. Blindly writing PROCESSING then resurrected
+                # the row into a state no picker will ever select (GPU pass 1
+                # needs the local file to exist, pass 2 skips ACTIVE, prep needs
+                # local, fetch skips non-PENDING): stranded until restart, with
+                # the flagged verdict silently discarded. (2026-07-25)
+                current = self.state.get_file(filepath)
+                if current and is_terminal(current.get("status") or ""):
+                    logging.debug(
+                        f"  post-fetch: {os.path.basename(filepath)} went terminal "
+                        f"({current.get('status')}) while we worked — not resurrecting"
+                    )
+                else:
+                    self.state.set_file(filepath, FileStatus.PROCESSING, **payload)
             except Exception as e:
                 logging.debug(f"  post-fetch state write failed: {e}")
 

@@ -194,12 +194,51 @@ class ProcessManager:
                 remove_file("pause_all.json")
                 return {"ok": True, "method": "graceful"}
             except subprocess.TimeoutExpired:
+                # The graceful wait can essentially never succeed: pause_all
+                # only makes the GPU worker idle BETWEEN files, so an in-flight
+                # encode never observes it and we always land here. A bare
+                # terminate() then kills only the supervisor — on Windows the
+                # children aren't in a job object — leaving ffmpeg ORPHANED,
+                # still holding NVENC and the fetch file. The next pipeline run
+                # then encodes alongside it (the rule-9b dual-NVENC BSOD
+                # configuration) and hits "stale fetch file locked". force_kill
+                # was fixed for exactly this in 2026-05-13; stop() never was.
+                reaped = self._reap_children(proc.pid)
                 proc.terminate()
                 remove_file("pause_all.json")
-                return {"ok": True, "method": "terminated"}
+                return {"ok": True, "method": "terminated", "children_reaped": reaped}
         else:
+            reaped = self._reap_children(proc.pid)
             proc.terminate()
-            return {"ok": True, "method": "terminated"}
+            return {"ok": True, "method": "terminated", "children_reaped": reaped}
+
+    @staticmethod
+    def _reap_children(parent_pid: int) -> list[int]:
+        """Kill ffmpeg/mkvmerge/mkvpropedit children of ``parent_pid``.
+
+        Children first, so they release their file handles before the parent
+        goes — otherwise the parent's shutdown can block on ffmpeg.wait().
+        Best-effort: a failure here must never stop the parent being terminated.
+        """
+        reaped: list[int] = []
+        try:
+            import psutil
+
+            targets = ("ffmpeg.exe", "mkvmerge.exe", "mkvpropedit.exe", "ffmpeg", "mkvmerge", "mkvpropedit")
+            for proc_info in psutil.process_iter(["pid", "name", "ppid"]):
+                info = proc_info.info
+                if (info.get("name") or "").lower() not in targets:
+                    continue
+                if info.get("ppid") != parent_pid:
+                    continue
+                try:
+                    psutil.Process(info["pid"]).kill()
+                    reaped.append(info["pid"])
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+        except Exception:  # noqa: BLE001
+            pass
+        return reaped
 
     def force_kill(self, name: str) -> dict:
         """Kill any OS process matching this pipeline command, even if not started by us.
@@ -255,8 +294,14 @@ class ProcessManager:
                 for proc_info in psutil.process_iter(["pid", "name", "ppid"]):
                     info = proc_info.info
                     pname = (info.get("name") or "").lower()
-                    if pname not in ("ffmpeg.exe", "mkvmerge.exe", "mkvpropedit.exe",
-                                     "ffmpeg", "mkvmerge", "mkvpropedit"):
+                    if pname not in (
+                        "ffmpeg.exe",
+                        "mkvmerge.exe",
+                        "mkvpropedit.exe",
+                        "ffmpeg",
+                        "mkvmerge",
+                        "mkvpropedit",
+                    ):
                         continue
                     if info.get("ppid") in target_pids:
                         child_pids.append(info["pid"])

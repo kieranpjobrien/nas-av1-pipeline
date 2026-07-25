@@ -1596,6 +1596,23 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
         # mkvpropedit on the encoded output and address encoder-side
         # post-conditions, not source-layout issues — keeping them.
         for v in grouped[Category.FIXABLE]:
+            # NEVER run the filename fixer here. It renames dest_path (the
+            # .av1.tmp) to `expected`, which at this point IS final_path. The
+            # replace block below then does os.remove(final_path) — deleting the
+            # freshly-encoded output — renames the source to .original.bak, finds
+            # dest_path gone so skips the replace, marks DONE, and deletes the
+            # backup: TOTAL LOSS of both the encode and the source.
+            # Unreachable today only because final_name and final_path are built
+            # from the same value, so filename_mismatch can't be raised from
+            # finalize_upload. That is a coincidence, not a guarantee — and the
+            # blast radius does not justify relying on it. Filename cleanup is
+            # the gap-filler's job, on the source, not the staging output.
+            if v.tag == "filename_mismatch":
+                logging.info(
+                    "  compliance fix skipped: filename_mismatch is not fixable on the "
+                    "staging output (would delete both files) — leaving for gap_filler"
+                )
+                continue
             fixer = FIXERS.get(v.tag)
             if not fixer:
                 logging.warning(f"  no fixer registered for {v.tag} — leaving violation")

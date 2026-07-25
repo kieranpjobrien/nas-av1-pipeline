@@ -64,30 +64,36 @@ class FileStatus(str, Enum):
 # is_* helpers below and the SQL clauses that use them.
 
 # Statuses that mean "no more work to do" — the queue builder skips these.
-TERMINAL_STATUSES: frozenset[FileStatus] = frozenset({
-    FileStatus.DONE,
-    FileStatus.FLAGGED_FOREIGN_AUDIO,
-    FileStatus.FLAGGED_UNDETERMINED,
-    FileStatus.FLAGGED_MANUAL,
-    FileStatus.FLAGGED_CORRUPT,
-})
+TERMINAL_STATUSES: frozenset[FileStatus] = frozenset(
+    {
+        FileStatus.DONE,
+        FileStatus.FLAGGED_FOREIGN_AUDIO,
+        FileStatus.FLAGGED_UNDETERMINED,
+        FileStatus.FLAGGED_MANUAL,
+        FileStatus.FLAGGED_CORRUPT,
+    }
+)
 
 # Statuses where a file is mid-flight. The orchestrator reaps these on
 # startup (they were stranded by a crash).
-ACTIVE_STATUSES: frozenset[FileStatus] = frozenset({
-    FileStatus.QUALIFYING,
-    FileStatus.FETCHING,
-    FileStatus.PROCESSING,
-    FileStatus.UPLOADING,
-})
+ACTIVE_STATUSES: frozenset[FileStatus] = frozenset(
+    {
+        FileStatus.QUALIFYING,
+        FileStatus.FETCHING,
+        FileStatus.PROCESSING,
+        FileStatus.UPLOADING,
+    }
+)
 
 # All FLAGGED_* — the UI's Flagged pane queries on this group.
-FLAGGED_STATUSES: frozenset[FileStatus] = frozenset({
-    FileStatus.FLAGGED_FOREIGN_AUDIO,
-    FileStatus.FLAGGED_UNDETERMINED,
-    FileStatus.FLAGGED_MANUAL,
-    FileStatus.FLAGGED_CORRUPT,
-})
+FLAGGED_STATUSES: frozenset[FileStatus] = frozenset(
+    {
+        FileStatus.FLAGGED_FOREIGN_AUDIO,
+        FileStatus.FLAGGED_UNDETERMINED,
+        FileStatus.FLAGGED_MANUAL,
+        FileStatus.FLAGGED_CORRUPT,
+    }
+)
 
 
 def is_flagged(status: str | FileStatus) -> bool:
@@ -114,13 +120,39 @@ def _remove_from_priority_json(filepath: str, staging_dir: str | None = None) ->
     acts as a safety net to catch anything this misses.
     """
     import os as _os
+
     if staging_dir is None:
         # Import lazily to avoid circular import on module load
         from paths import STAGING_DIR
+
         staging_dir = str(STAGING_DIR)
     prio_path = _os.path.join(staging_dir, "control", "priority.json")
     if not _os.path.exists(prio_path):
         return False
+    # Hold the shared priority lock across the whole read-modify-write.
+    # priority.json has THREE independent RMW writers — this one (fires on every
+    # terminal transition), _prune_done_from_priority (every queue build and
+    # every 10s resort), and the dashboard's set_priority. Unsynchronised, a
+    # user's "prioritise these 150" could be read by one writer, then overwritten
+    # by another that had read the pre-add list. That is a live, unfixed third
+    # cause of the recurring "priority adds keep vanishing". (2026-07-25)
+    try:
+        from tools.report_lock import _file_lock as _prio_lock  # noqa: PLC0415
+
+        _lock_ctx = _prio_lock(prio_path + ".lock", timeout=15.0)
+    except Exception:  # noqa: BLE001
+        from contextlib import nullcontext  # noqa: PLC0415
+
+        _lock_ctx = nullcontext()
+    with _lock_ctx:
+        return _remove_from_priority_locked(prio_path, filepath)
+
+
+def _remove_from_priority_locked(prio_path: str, filepath: str) -> bool:
+    """Read-modify-write body of :func:`_remove_from_priority_json`, run under
+    the priority lock."""
+    import os as _os
+
     try:
         with open(prio_path, encoding="utf-8") as f:
             data = json.load(f)
@@ -375,8 +407,7 @@ class PipelineState:
                     old_extras = json.loads(old.pop("extras", "{}") or "{}")
                 except (json.JSONDecodeError, TypeError):
                     logging.warning(
-                        f"state.set_file: corrupt extras JSON for {filepath!r} — "
-                        f"discarding the blob and continuing"
+                        f"state.set_file: corrupt extras JSON for {filepath!r} — discarding the blob and continuing"
                     )
                     old.pop("extras", None)
                     old_extras = {}
@@ -398,10 +429,19 @@ class PipelineState:
                 # keywords, clear it. Otherwise leave it alone (might be
                 # legit audit history like "compression 18.4%").
                 old_reason = (direct.get("reason") or "").lower()
-                if any(kw in old_reason for kw in (
-                    "error", "fail", "winerror", "stuck", "reset",
-                    "compliance unfixed", "refuse", "broken",
-                )):
+                if any(
+                    kw in old_reason
+                    for kw in (
+                        "error",
+                        "fail",
+                        "winerror",
+                        "stuck",
+                        "reset",
+                        "compliance unfixed",
+                        "refuse",
+                        "broken",
+                    )
+                ):
                     direct["reason"] = None
 
             # Apply new values
@@ -422,8 +462,7 @@ class PipelineState:
             # _stamp_force_reencode, finalize_upload retry) that bypass it. A
             # caller that explicitly re-supplies a key (kwargs) is not clobbered.
             if direct.get("status") == FileStatus.PENDING.value:
-                for _k in ("prep_data", "prep_done", "detected_audio",
-                           "detected_subs", "pre_processed"):
+                for _k in ("prep_data", "prep_done", "detected_audio", "detected_subs", "pre_processed"):
                     if _k not in all_data:
                         extras.pop(_k, None)
 
@@ -460,6 +499,7 @@ class PipelineState:
                 #   (c) a thread mutating the dict mid-dumps.
                 # Capture enough state here to discriminate next time.
                 import json.encoder as _je
+
                 cls_keysep = getattr(_je.JSONEncoder, "key_separator", "<missing>")
                 cls_itemsep = getattr(_je.JSONEncoder, "item_separator", "<missing>")
                 inst = _je.JSONEncoder()
@@ -489,10 +529,15 @@ class PipelineState:
                     "  inst  key_sep=%r item_sep=%r\n"
                     "  explicit-sep retry: dumps_ok=%s loads_ok=%s head=%r\n"
                     "  extras keys=%r",
-                    filepath, extras_json[:200],
-                    cls_keysep, cls_itemsep,
-                    inst_keysep, inst_itemsep,
-                    explicit_ok, explicit_loads_ok, explicit_head,
+                    filepath,
+                    extras_json[:200],
+                    cls_keysep,
+                    cls_itemsep,
+                    inst_keysep,
+                    inst_itemsep,
+                    explicit_ok,
+                    explicit_loads_ok,
+                    explicit_head,
                     safe_keys,
                 )
                 raise ValueError(
@@ -719,8 +764,7 @@ class PipelineState:
                 extras = json.loads(extras_raw)
             except (json.JSONDecodeError, TypeError) as exc:
                 logging.error(
-                    "Corrupt extras JSON for %s (%s); treating as empty. "
-                    "Raw head: %r",
+                    "Corrupt extras JSON for %s (%s); treating as empty. Raw head: %r",
                     filepath,
                     exc,
                     extras_raw[:120],

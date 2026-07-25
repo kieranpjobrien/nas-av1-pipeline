@@ -56,6 +56,20 @@ def drop_file(name: str, data: dict | None = None) -> Path:
     CONTROL_DIR.mkdir(parents=True, exist_ok=True)
     path = CONTROL_DIR / name
     if data:
+        # priority.json has three independent read-modify-write writers (this
+        # one, state._remove_from_priority_json on every terminal transition,
+        # and __main__._prune_done_from_priority on every queue build / 10s
+        # resort). Take the shared lock so a bulk priority add can't be
+        # overwritten by a prune that read the pre-add list. (2026-07-25)
+        if name == "priority.json":
+            try:
+                from tools.report_lock import _file_lock as _prio_lock
+
+                with _prio_lock(str(path) + ".lock", timeout=15.0):
+                    write_json_safe(path, data)
+                return path
+            except Exception:  # noqa: BLE001
+                pass  # lock unavailable — fall through, an unlocked write beats no write
         write_json_safe(path, data)
     else:
         # Marker file (pause_all.json etc.) — content-free by design.

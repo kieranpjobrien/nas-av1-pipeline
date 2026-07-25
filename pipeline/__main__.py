@@ -511,6 +511,24 @@ def _prune_done_from_priority(staging_dir: str | None = None, state: "PipelineSt
     prio_path = os.path.join(staging_dir, "control", "priority.json")
     if not os.path.exists(prio_path):
         return 0
+    # Shared priority lock — see pipeline.state._remove_from_priority_json.
+    # Three RMW writers on this file; without a common lock a user's bulk
+    # priority add can be silently overwritten by a prune that read the
+    # pre-add list. (2026-07-25)
+    try:
+        from tools.report_lock import _file_lock as _prio_lock  # noqa: PLC0415
+
+        _lock_ctx = _prio_lock(prio_path + ".lock", timeout=15.0)
+    except Exception:  # noqa: BLE001
+        from contextlib import nullcontext  # noqa: PLC0415
+
+        _lock_ctx = nullcontext()
+    with _lock_ctx:
+        return _prune_done_from_priority_locked(prio_path, state)
+
+
+def _prune_done_from_priority_locked(prio_path: str, state: "PipelineState | None") -> int:
+    """Read-modify-write body of :func:`_prune_done_from_priority`, under lock."""
     try:
         with open(prio_path, encoding="utf-8") as f:
             data = json.load(f)
