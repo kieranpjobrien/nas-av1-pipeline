@@ -190,6 +190,32 @@ actual file and line being changed. Do not trust the summary.
 Say so explicitly. "I have not verified this" / "I cannot check this
 from here". Never invent confidence.
 
+## Finish the job — remediation is implicit in the report
+
+When the user points at a defect ("there are 720p copies of Mank and
+Knives Out"), they are asking for it to be FIXED, not catalogued. Fixing
+the cause AND remediating the existing bad artefacts are both implied.
+Do not stop at the cause and then ask whether to clean up.
+
+Asking once, on a genuine fork with a real trade-off, is right. Asking
+the same question three times in a row — "want me to grab them?",
+"say the word", "want me to run it?" — is not caution, it is stalling,
+and it pushes work back onto the person who already told you what they
+wanted. 2026-07-26: the user had to say "get to a point where you don't
+need to ask me three times."
+
+The test: if the answer is obvious from what the user has already said,
+act, then report what you did. Reserve the question for cases where you
+genuinely cannot choose without them — a real quality/cost trade-off, an
+irreversible deletion, or something touching a machine or setting they
+have deliberately configured. State the recommendation and act on it
+rather than presenting a menu.
+
+Corollary: a rule the user states about one case ("modern films are
+1080p minimum") applies to the whole class. Work out the full affected
+set and deal with it, rather than fixing only the two examples they
+happened to notice.
+
 ---
 
 # Architecture quickref
