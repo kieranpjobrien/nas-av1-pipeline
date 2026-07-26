@@ -1163,6 +1163,53 @@ def check_no_stale_active_rows(db_path: Optional[Path] = None, max_age_mins: int
     )
 
 
+def check_no_undersized_sources(report: Optional[dict] = None) -> InvariantResult:
+    """No file in the library may sit below the quality floor for its resolution.
+
+    Exists so nobody has to spot these by eye. The operator found 200 MB West
+    Wing episodes, then 400 MB Fargo, then Brooklyn Nine-Nine — each time by
+    noticing one file. This check judges the whole library every run.
+
+    Judges the SOURCE: for anything already encoded that means the pre-encode
+    ``input_size_bytes``, because our own AV1 output is legitimately 40-50%
+    smaller and says nothing about the source. Animation gets the scaled floor.
+    """
+    name = "no_undersized_sources"
+    severity: Severity = "HIGH"
+    if report is None:
+        report = _load_media_report()
+    if report is None:
+        return InvariantResult(name, severity, True, "media_report.json not present - skipped")
+    try:
+        from pipeline.__main__ import _under_quality_floor  # noqa: PLC0415
+    except ImportError:
+        return InvariantResult(name, severity, True, "quality floor unavailable - skipped")
+
+    offenders: list[str] = []
+    scanned = 0
+    for entry in report.get("files") or []:
+        # AV1 is our own output; the floor measures source quality only.
+        if str((entry.get("video") or {}).get("codec_raw", "")).lower() == "av1":
+            continue
+        scanned += 1
+        under, mbmin, floor = _under_quality_floor(entry)
+        if under:
+            offenders.append(f"{entry.get('filepath', '?')} ({mbmin:.1f} < {floor:.1f} MB/min)")
+    passed = not offenders
+    return InvariantResult(
+        name,
+        severity,
+        passed,
+        (
+            f"{len(offenders)} source(s) below the quality floor"
+            if offenders
+            else "every source clears its resolution's quality floor"
+        ),
+        violations=offenders[:50],
+        details={"count": len(offenders), "scanned": scanned},
+    )
+
+
 def _invariant_runners(skip_ssh: bool) -> list[Callable[[], InvariantResult]]:
     """Ordered list of zero-arg callables producing an InvariantResult each."""
     return [
@@ -1181,6 +1228,7 @@ def _invariant_runners(skip_ssh: bool) -> list[Callable[[], InvariantResult]]:
         check_no_banned_ffmpeg_flags_in_log,
         check_heavy_worker_running,
         check_media_report_not_collapsed,
+        check_no_undersized_sources,
     ]
 
 
