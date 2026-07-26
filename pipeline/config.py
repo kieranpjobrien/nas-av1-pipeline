@@ -259,7 +259,13 @@ DEFAULT_CONFIG = {
     # User flipped this to largest_first on 2026-05-02 to stop the ETA
     # from growing every time the queue refresh discovered another 30 GB
     # 4K HDR title.
-    "encode_queue_order": "largest_first",
+    # "series_first"  — all series before any movie; series smallest-first
+    #                   (max files/hour while the library is still downloading),
+    #                   movies largest-first (biggest space wins first).
+    #                   Movies go last because they most often arrive already
+    #                   HEVC/AV1, which counts as finished video anyway.
+    # "largest_first" / "smallest_first" — flat size sort, type-agnostic.
+    "encode_queue_order": "series_first",
 }
 
 # Containers that can cause NVENC failures — remux to .mkv before encoding

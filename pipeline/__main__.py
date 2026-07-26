@@ -619,22 +619,40 @@ def _sort_full_gamut(queue: list, config: dict, priority_paths: set[str]) -> Non
          which was largest_first by default — so prioritising "150
          smallest" delivered the largest of those 150 first. That's
          the opposite of intent.
-      2. Everything else, sorted by size in the configured direction
-         (``encode_queue_order``, default ``largest_first`` so big
-         files burn down the ETA first).
+      2. Everything else, per ``encode_queue_order``:
+         * ``series_first`` (default) — ALL series before ANY movie;
+           series smallest-first, movies largest-first.
+         * ``largest_first`` / ``smallest_first`` — flat size sort,
+           library type ignored.
+
+    Why ``series_first`` is the default (2026-07-26, operator's call):
+    the library is still being acquired, and the aim is for the encoder
+    to catch up with the downloads rather than fall further behind.
+      * Series smallest-first maximises FILES COMPLETED per hour while
+        downloads are still landing — a 400 MB episode is minutes of
+        GPU, so the backlog count drops fast.
+      * Movies are deferred because they are the likeliest to arrive
+        already HEVC or AV1, which ``video_is_finished`` treats as done
+        — so much of that queue costs nothing to "process" anyway.
+      * Movies largest-first once reached, so the biggest space wins
+        land first.
     """
-    order = (config.get("encode_queue_order") or "largest_first").lower()
-    largest_first_default = order == "largest_first"
+    order = (config.get("encode_queue_order") or "series_first").lower()
+
+    def _is_series(item: dict) -> bool:
+        return (item.get("library_type") or "").lower() in ("series", "show", "tv", "anime")
 
     def _key(item: dict) -> tuple:
         is_priority = 0 if item.get("filepath") in priority_paths else 1
         size = item.get("file_size_bytes", 0)
-        # Within the priority bucket: always smallest-first (positive
-        # size for natural ascending sort). Outside the bucket: honour
-        # the global config.
+        # Within the priority bucket: always smallest-first, regardless of
+        # library type — the operator prioritised these to get quick wins.
         if is_priority == 0:
-            return (is_priority, size)
-        return (is_priority, -size if largest_first_default else size)
+            return (is_priority, 0, size)
+        if order == "series_first":
+            # Series (rank 0) ascending; movies (rank 1) descending.
+            return (is_priority, 0, size) if _is_series(item) else (is_priority, 1, -size)
+        return (is_priority, 0, -size if order == "largest_first" else size)
 
     queue.sort(key=_key)
 
