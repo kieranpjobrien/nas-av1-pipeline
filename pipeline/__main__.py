@@ -213,6 +213,22 @@ QUALITY_FLOOR_MBMIN: dict[str, float] = {
 }
 
 
+# Animation compresses far better than live action — flat colour fields and
+# clean line art carry much less high-frequency detail, so a perfectly good
+# 1080p animated episode legitimately sits well under the live-action floor.
+# Applying the live-action numbers parked healthy Bob's Burgers episodes
+# (15-17 MB/min) on the first run, so animation gets its own scale.
+ANIMATION_FLOOR_SCALE = 0.62
+
+
+def _is_animation(entry: dict) -> bool:
+    """True for animated content (TMDb genre, or an anime library)."""
+    if str(entry.get("library_type") or "").lower() == "anime":
+        return True
+    genres = (entry.get("tmdb") or {}).get("genres") or []
+    return any(str(g).lower() == "animation" for g in genres)
+
+
 def _source_mbmin(entry: dict) -> float | None:
     """Source size in MB per minute of runtime, or None if unknowable.
 
@@ -239,6 +255,8 @@ def _under_quality_floor(entry: dict) -> tuple[bool, float, float]:
     floor = QUALITY_FLOOR_MBMIN.get(res)
     if floor is None:
         return (False, 0.0, 0.0)
+    if _is_animation(entry):
+        floor *= ANIMATION_FLOOR_SCALE
     mbmin = _source_mbmin(entry)
     if mbmin is None:
         return (False, 0.0, floor)

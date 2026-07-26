@@ -103,6 +103,38 @@ def test_gate_can_be_disabled_by_config(state):
     assert category == "full_gamut"
 
 
+def test_animation_gets_a_lower_floor(state):
+    """Animation compresses better than live action, so healthy animated
+    episodes sit under the live-action floor legitimately.
+
+    Real case 2026-07-26: Bob's Burgers S01 at 15-17 MB/min (1080p) was
+    parked by the live-action floor of 18 on the first run. Those are fine.
+    """
+    live = _entry(mb=350, minutes=22, res="1080p")  # 15.9 MB/min
+    under_live, _, _ = _under_quality_floor(live)
+    assert under_live is True, "15.9 MB/min is genuinely low for live action"
+
+    toon = dict(live)
+    toon["tmdb"] = {"genres": ["Animation", "Comedy"]}
+    under_toon, mbmin, floor = _under_quality_floor(toon)
+    assert under_toon is False, f"healthy animation wrongly parked ({mbmin:.1f} < {floor:.1f})"
+
+
+def test_anime_library_counts_as_animation():
+    e = _entry(mb=350, minutes=22, res="1080p")
+    e["library_type"] = "anime"
+    under, _, _ = _under_quality_floor(e)
+    assert under is False
+
+
+def test_genuinely_tiny_animation_is_still_parked(state):
+    """The scale must not become a free pass — 5 MB/min is junk either way."""
+    e = _entry(mb=110, minutes=22, res="1080p")  # 5.0 MB/min
+    e["tmdb"] = {"genres": ["Animation"]}
+    under, _, _ = _under_quality_floor(e)
+    assert under is True
+
+
 def test_av1_output_is_never_parked_by_the_floor(state):
     """AV1 output is 40-50% smaller than its source BY DESIGN, so a
     correctly-encoded file sits below the source floor legitimately.
