@@ -192,6 +192,59 @@ def _stamp_force_reencode(
     )
 
 
+# Minimum acceptable source bitrate, MB per minute of runtime, keyed by
+# resolution class. Mirrors the Sonarr/Radarr Quality Definition minimums
+# set 2026-07-25 after the West Wing incident: every tier there had been
+# left at 2 MB/min, so a 44-minute episode only had to clear 88 MB to be
+# accepted and 417 junk-source episodes got through.
+#
+# Sonarr/Radarr gate ACQUISITION. This gates ENCODING — without it the
+# pipeline happily burns GPU on a 400 MB 720p Fargo episode and bakes the
+# junk permanently into AV1, which is strictly worse than leaving the
+# source alone until a proper release lands.
+QUALITY_FLOOR_MBMIN: dict[str, float] = {
+    "480p": 8.0,
+    "576p": 8.0,
+    "720p": 12.0,
+    "1080p": 18.0,
+    "1440p": 20.0,
+    "4k": 25.0,
+    "2160p": 25.0,
+}
+
+
+def _source_mbmin(entry: dict) -> float | None:
+    """Source size in MB per minute of runtime, or None if unknowable.
+
+    Deliberately size/duration rather than the probed video bitrate: it is
+    what the Sonarr/Radarr Quality Definitions measure, so the pipeline and
+    the acquisition side agree on what "too small" means.
+    """
+    size = entry.get("file_size_bytes") or 0
+    dur = entry.get("duration_seconds") or 0
+    if size <= 0 or dur <= 0:
+        return None
+    return (size / 1_000_000) / (dur / 60.0)
+
+
+def _under_quality_floor(entry: dict) -> tuple[bool, float, float]:
+    """``(is_under, mbmin, floor)`` for this entry.
+
+    Returns ``(False, ...)`` whenever the answer is not knowable — an
+    unreadable duration must never cause a file to be parked. Failing open
+    matters here: this gate parks files, and a false positive would strand
+    a perfectly good source.
+    """
+    res = str((entry.get("video") or {}).get("resolution_class") or "").lower()
+    floor = QUALITY_FLOOR_MBMIN.get(res)
+    if floor is None:
+        return (False, 0.0, 0.0)
+    mbmin = _source_mbmin(entry)
+    if mbmin is None:
+        return (False, 0.0, floor)
+    return (mbmin < floor, mbmin, floor)
+
+
 def categorise_entry(
     entry: dict,
     config: dict,
@@ -255,7 +308,17 @@ def categorise_entry(
     existing = state.get_file(filepath)
     if existing and is_terminal(existing["status"]):
         st = existing["status"]
-        if st in ("flagged_corrupt", "flagged_foreign_audio", "flagged_undetermined"):
+        if st in (
+            "flagged_corrupt",
+            "flagged_foreign_audio",
+            "flagged_undetermined",
+            # Undersized is a machine judgement about the CURRENT bytes on
+            # disk, so a replacement release must un-park it automatically —
+            # that replacement is the whole point of parking it. Contrast
+            # flagged_manual below, which is an operator park and must not
+            # self-clear.
+            "flagged_undersized",
+        ):
             file_mtime = entry.get("file_mtime", 0) or 0
             flag_time = 0.0
             last_updated = existing.get("last_updated")
@@ -370,6 +433,37 @@ def categorise_entry(
             reason="ffprobe could not determine video codec",
         )
         return ("skip", None)
+
+    # Quality floor (2026-07-26). A source below the MB/min floor for its
+    # resolution is junk — re-encoding it wastes GPU time AND bakes the junk
+    # permanently into AV1, which is worse than doing nothing. Park it so
+    # Sonarr/Radarr can replace it, and so it surfaces in the Flagged pane.
+    #
+    # Explicit operator intent still wins: a priority.json entry or a
+    # force_reencode stamp bypasses the gate entirely, so "encode this
+    # anyway" from the dashboard is never silently ignored.
+    # NOT for AV1: the floor measures SOURCE quality. Our own AV1 output is
+    # 40-50% smaller than the source by design, so a correctly-encoded file
+    # sits below the floor legitimately and must never be parked for it.
+    if (
+        codec_raw != "av1"
+        and not (priority_paths and filepath in priority_paths)
+        and not (existing and existing.get("force_reencode"))
+    ):
+        under, mbmin, floor = _under_quality_floor(entry)
+        if under and config.get("enforce_quality_floor", True):
+            if not (existing and existing.get("status") == FileStatus.FLAGGED_UNDERSIZED.value):
+                logging.info(
+                    f"  Under quality floor → parked: {os.path.basename(filepath)} "
+                    f"({mbmin:.1f} MB/min < {floor:.0f} floor)"
+                )
+                state.set_file(
+                    filepath,
+                    FileStatus.FLAGGED_UNDERSIZED,
+                    stage="scan",
+                    reason=f"source below quality floor: {mbmin:.1f} MB/min < {floor:.0f} MB/min",
+                )
+            return ("skip", None)
 
     if codec_raw == "av1":
         # Priority override (2026-05-22). If the operator has put this

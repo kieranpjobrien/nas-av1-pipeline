@@ -35,6 +35,14 @@ class FileStatus(str, Enum):
         ─→ FLAGGED_CORRUPT          ffprobe could not determine the video
                                     codec — file is unreadable / truncated.
                                     User should delete and re-acquire.
+        ─→ FLAGGED_UNDERSIZED       source bitrate is below the quality floor
+                                    for its resolution (see QUALITY_FLOOR_MBMIN).
+                                    Re-encoding junk only bakes the junk into
+                                    AV1 and burns GPU time, so we park it and
+                                    let Sonarr/Radarr grab a proper release.
+                                    AUTO-RESETS when the file is replaced on
+                                    disk — unlike FLAGGED_MANUAL, this is a
+                                    machine judgement, not an operator park.
 
     Each file is owned by one thread start to finish; no handoffs. The 'stage'
     field tracks which substep is active. Adding a state here is the first
@@ -57,6 +65,7 @@ class FileStatus(str, Enum):
     FLAGGED_UNDETERMINED = "flagged_undetermined"
     FLAGGED_MANUAL = "flagged_manual"
     FLAGGED_CORRUPT = "flagged_corrupt"
+    FLAGGED_UNDERSIZED = "flagged_undersized"
 
 
 # Status groupings used by the orchestrator + UI for rapid filtering.
@@ -71,6 +80,7 @@ TERMINAL_STATUSES: frozenset[FileStatus] = frozenset(
         FileStatus.FLAGGED_UNDETERMINED,
         FileStatus.FLAGGED_MANUAL,
         FileStatus.FLAGGED_CORRUPT,
+        FileStatus.FLAGGED_UNDERSIZED,
     }
 )
 
@@ -92,6 +102,7 @@ FLAGGED_STATUSES: frozenset[FileStatus] = frozenset(
         FileStatus.FLAGGED_UNDETERMINED,
         FileStatus.FLAGGED_MANUAL,
         FileStatus.FLAGGED_CORRUPT,
+        FileStatus.FLAGGED_UNDERSIZED,
     }
 )
 

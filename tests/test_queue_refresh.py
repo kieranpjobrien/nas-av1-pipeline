@@ -37,6 +37,14 @@ def _orch(tmp_path) -> Orchestrator:
 
 
 def _h264_entry(filepath: str, size_bytes: int, filename: str | None = None) -> dict:
+    """A healthy 1080p H.264 source.
+
+    Duration is derived from size at 30 MB/min so the entry clears the
+    1080p quality floor (18 MB/min) regardless of the size the caller
+    picks. These fixtures exist to exercise queue ORDERING, and a fixed
+    100-minute runtime made the small ones (200 MB => 2 MB/min) look like
+    exactly the junk sources the floor is there to reject.
+    """
     return {
         "filepath": filepath,
         "filename": filename or filepath.rsplit("/", 1)[-1].rsplit("\\", 1)[-1],
@@ -45,7 +53,7 @@ def _h264_entry(filepath: str, size_bytes: int, filename: str | None = None) -> 
         "audio_streams": [{"codec_raw": "eac3", "channels": 6, "language": "eng"}],
         "subtitle_streams": [],
         "file_size_bytes": size_bytes,
-        "duration_seconds": 6000,
+        "duration_seconds": (size_bytes / 1_000_000) / 30.0 * 60.0,
         "overall_bitrate_kbps": 2700,
     }
 
@@ -114,10 +122,7 @@ class TestCategoriseEntry:
         orch = _orch(tmp_path)
         entry = _av1_entry(r"\\NAS\Movies\A.mkv", 2_000_000_000)
         category, item = categorise_entry(entry, build_config(), orch.state, orch.control)
-        assert category == "full_gamut", (
-            f"AV1 + FLAC audio needs transcode → must route to full_gamut, "
-            f"got {category}"
-        )
+        assert category == "full_gamut", f"AV1 + FLAC audio needs transcode → must route to full_gamut, got {category}"
         assert item is not None
 
     def test_av1_with_only_gap_work_lands_in_gap_filler(self, tmp_path):
@@ -308,8 +313,7 @@ class TestCategoriseEntry:
         params = resolve_encode_params(cfg, item)
         # 4K_HDR base CQ is 22; blockbuster grade adds +3 -> 25.
         assert params["content_grade"] == "blockbuster", (
-            f"expected blockbuster grade, got {params['content_grade']!r} — "
-            f"item is missing tmdb data the grader needs"
+            f"expected blockbuster grade, got {params['content_grade']!r} — item is missing tmdb data the grader needs"
         )
         assert params["cq"] == 25, f"expected cq=25 (base 22 + 3 offset), got {params['cq']}"
         assert params["base_cq"] == 22
@@ -338,8 +342,7 @@ class TestPriorityBump:
         ]
         _sort_full_gamut(queue, {"encode_queue_order": "largest_first"}, {"B", "D"})
         assert [it["filepath"] for it in queue] == ["B", "D", "C", "A"], (
-            "priority smallest-first: B(1GB) before D(2GB); non-priority largest-first: "
-            "C(10GB) before A(5GB)"
+            "priority smallest-first: B(1GB) before D(2GB); non-priority largest-first: C(10GB) before A(5GB)"
         )
 
     def test_no_priority_paths_falls_back_to_size_only(self):
