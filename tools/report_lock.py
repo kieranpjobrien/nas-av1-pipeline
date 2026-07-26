@@ -13,6 +13,7 @@ Usage:
 """
 
 import json
+import logging
 import os
 import shutil
 import time
@@ -20,6 +21,11 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from paths import MEDIA_REPORT, MEDIA_REPORT_LOCK
+
+# Absolute backstop for a lock whose owner pid is alive. Far beyond any
+# legitimate hold (the largest report write is seconds), but finite, so a
+# recycled pid or a wedged owner can never block writers indefinitely.
+_LIVE_OWNER_STALE_SECS = 900.0
 
 
 def _pid_alive(pid: int) -> bool:
@@ -78,21 +84,41 @@ def _file_lock(lock_path: Path, timeout: float = 120.0):
             except (OSError, ValueError):
                 pass
 
-            # (2) Age fallback — ONLY when the PID probe was inconclusive
-            # (missing/corrupt pid). Pre-2026-07-25 this ran unconditionally,
-            # so a LIVE owner lost its lock after 60s and two writers then
-            # shared the one fixed .tmp path — writer B truncating A's bytes
-            # mid-write, and A's release deleting B's lock file. A big report
-            # write (~30 MB, two parses, fsync) can legitimately exceed 60s
-            # under encoder + Defender contention.
-            if not owner_alive:
-                try:
-                    age = time.time() - os.path.getmtime(lock_str)
-                    if age > 60:
-                        os.remove(lock_str)
-                        continue
-                except OSError:
-                    pass
+            # (2) Age fallback. Two thresholds, deliberately far apart:
+            #
+            #   * PID probe inconclusive (missing/corrupt pid) -> 60s. Cheap
+            #     to reclaim, nothing to protect.
+            #   * Owner is ALIVE -> _LIVE_OWNER_STALE_SECS. Pre-2026-07-25 the
+            #     60s cutoff ran unconditionally, so a live owner lost its lock
+            #     mid-write and two writers then shared the one fixed .tmp path
+            #     (writer B truncating A's bytes; A's release deleting B's lock).
+            #     A big report write (~30 MB, parses, fsync) can legitimately
+            #     pass 60s under encoder + Defender contention.
+            #
+            # But "never break a live owner" is too absolute, and that is a
+            # regression I shipped on 2026-07-25: the agents.registry lock sat
+            # held for 11.5 HOURS by a live pid, so every heartbeat timed out at
+            # 120s and could never recover. A pid can be recycled onto an
+            # unrelated live process, or the owner can wedge while holding it.
+            # The backstop is far beyond any legitimate hold, so it still stops
+            # the theft-mid-write class while guaranteeing eventual recovery.
+            try:
+                age = time.time() - os.path.getmtime(lock_str)
+                threshold = _LIVE_OWNER_STALE_SECS if owner_alive else 60
+                if age > threshold:
+                    if owner_alive:
+                        logging.warning(
+                            "report_lock: breaking lock %s held %.0fs by LIVE pid %s "
+                            "(past the %.0fs backstop — recycled pid or wedged owner)",
+                            os.path.basename(lock_str),
+                            age,
+                            owner_pid,
+                            threshold,
+                        )
+                    os.remove(lock_str)
+                    continue
+            except OSError:
+                pass
 
             if time.monotonic() > deadline:
                 raise TimeoutError(f"Could not acquire lock {lock_str} within {timeout}s")
