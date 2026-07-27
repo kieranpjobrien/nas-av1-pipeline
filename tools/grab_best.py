@@ -56,8 +56,25 @@ def usable(rel) -> bool:
     return (rel.get("size") or 0) > 0
 
 
-def pick(releases, want_single_episode=True):
-    """Largest usable release, preferring single episodes over season packs."""
+_UPSCALE = re.compile(r"(UPSCALE|UPSCALED|AI[\s._-]?UPSCALE)", re.I)
+
+
+def is_2160(rel) -> bool:
+    return bool(re.search(r"(2160p|4K|UHD)", rel.get("title") or "", re.I))
+
+
+def pick(releases, want_single_episode=True, prefer_4k=True):
+    """Best usable release.
+
+    Operator's standard (2026-07-28): modern series deserve 4K. So prefer a
+    genuine 2160p release when one exists, and only fall back to largest-
+    overall otherwise. Without this a 1080p remux can outweigh a real 2160p
+    release on raw size alone and win, which is the wrong call for anything
+    made in the UHD era.
+
+    AI upscales are excluded from the 4K preference - they are 2160p in name
+    only and carry no more real detail than the 1080p they came from.
+    """
     usable_rels = [r for r in releases if usable(r)]
     if not usable_rels:
         return None
@@ -65,6 +82,10 @@ def pick(releases, want_single_episode=True):
         singles = [r for r in usable_rels if _SXXEXX.search(r.get("title") or "")]
         if singles:
             usable_rels = singles
+    if prefer_4k:
+        real_4k = [r for r in usable_rels if is_2160(r) and not _UPSCALE.search(r.get("title") or "")]
+        if real_4k:
+            return max(real_4k, key=lambda r: r.get("size") or 0)
     return max(usable_rels, key=lambda r: r.get("size") or 0)
 
 
