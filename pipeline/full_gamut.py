@@ -409,7 +409,7 @@ def _prepare_for_encode_locked(
                     # the user's queue action.
                     if existing and existing.get("force_reencode"):
                         logging.info(
-                            f"  prep: qualify=already_compliant but force_reencode=true → "
+                            f"  prep: qualify=already_compliant but force_reencode=true -> "
                             f"proceeding with re-encode (CQ downgrade): {filename}"
                         )
                     else:
@@ -427,7 +427,7 @@ def _prepare_for_encode_locked(
                         if _cur is not None and _tgt is not None and _cur != _tgt:
                             logging.info(
                                 f"  prep: qualify=already_compliant but cq off-target "
-                                f"(cur={_cur} tgt={_tgt}) → proceeding with re-encode: {filename}"
+                                f"(cur={_cur} tgt={_tgt}) -> proceeding with re-encode: {filename}"
                             )
                         else:
                             logging.info(f"  prep: already compliant: {filename}")
@@ -1116,7 +1116,7 @@ def _purge_stale_source_path(filepath: str, final_path: str, state: PipelineStat
         state.remove_ghosts([filepath])
     except Exception as e:  # noqa: BLE001
         logging.warning(f"  Stale-entry cleanup: state row remove failed for {os.path.basename(filepath)}: {e}")
-    logging.info(f"  Removed stale source-path entry: {os.path.basename(filepath)} → {os.path.basename(final_path)}")
+    logging.info(f"  Removed stale source-path entry: {os.path.basename(filepath)} -> {os.path.basename(final_path)}")
     return True
 
 

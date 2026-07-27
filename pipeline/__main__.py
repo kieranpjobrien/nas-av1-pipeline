@@ -61,6 +61,21 @@ from pipeline.state import FileStatus, PipelineState, is_terminal  # noqa: E402
 
 def setup_logging(staging_dir: str):
     log_file = os.path.join(staging_dir, "pipeline.log")
+    # Force UTF-8 with replacement on stdout BEFORE any handler binds to it.
+    #
+    # 2026-07-28: a log message containing a non-ASCII arrow raised
+    # UnicodeEncodeError from the console's cp1252 codec, and because logging
+    # propagates that out of the emit() call it killed the GPU worker thread.
+    # The other threads kept logging, so the process looked alive while no
+    # encode had started for 1.5 hours. The file handler was already UTF-8, so
+    # the message appeared in the log and the crash was invisible there.
+    #
+    # 34 log calls across pipeline/ carry non-ASCII. Rather than police every
+    # one forever, make the stream physically unable to raise on encoding.
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
+    except (AttributeError, ValueError):  # pragma: no cover - exotic stdout
+        pass
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(message)s",
@@ -68,8 +83,11 @@ def setup_logging(staging_dir: str):
             logging.FileHandler(log_file, encoding="utf-8"),
             logging.StreamHandler(sys.stdout),
         ],
+        # force=True so our handlers win even if something already configured
+        # logging. Without it basicConfig silently no-ops when the root logger
+        # has handlers, and the pipeline would run with no file log at all.
+        force=True,
     )
-    sys.stdout.reconfigure(line_buffering=True)
 
 
 def _build_full_gamut_item(entry: dict) -> dict:
@@ -347,7 +365,7 @@ def categorise_entry(
                     pass
             if file_mtime > flag_time + 60:
                 logging.info(
-                    f"  Auto-reset {st} → pending: file refreshed on disk since flag was set "
+                    f"  Auto-reset {st} -> pending: file refreshed on disk since flag was set "
                     f"({os.path.basename(filepath)}, "
                     f"file_mtime={file_mtime:.0f} > flag_time={flag_time:.0f})"
                 )
@@ -418,7 +436,7 @@ def categorise_entry(
                     )
                     return ("skip", None)
                 logging.info(
-                    f"  Auto-reset {st} → pending: state was {st}, report "
+                    f"  Auto-reset {st} -> pending: state was {st}, report "
                     f"codec={codec_raw}, ffprobe codec={live_codec or 'unknown'} — "
                     f"genuinely not AV1, re-encoding {os.path.basename(filepath)}"
                 )
@@ -472,7 +490,7 @@ def categorise_entry(
         if under and config.get("enforce_quality_floor", True):
             if not (existing and existing.get("status") == FileStatus.FLAGGED_UNDERSIZED.value):
                 logging.info(
-                    f"  Under quality floor → parked: {os.path.basename(filepath)} "
+                    f"  Under quality floor -> parked: {os.path.basename(filepath)} "
                     f"({mbmin:.1f} MB/min < {floor:.0f} floor)"
                 )
                 state.set_file(
