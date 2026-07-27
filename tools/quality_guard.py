@@ -159,10 +159,58 @@ def has_replacement(item) -> bool:
     return False
 
 
+# ---------------------------------------------------------------------------
+# Upgrade detection
+#
+# An absolute floor cannot catch everything. Colin from Accounts sat at
+# 46 MB/min - comfortably above the 18 floor - while a 110 MB/min release of
+# the SAME quality tier was available. Sonarr ranks by tier, not size, so it
+# considered the small file equivalent and would never upgrade it.
+#
+# So also ask: how does this file compare to the best thing actually on offer?
+# One indexer query per series/movie, not per file.
+# ---------------------------------------------------------------------------
+
+UPGRADE_RATIO = 1.8  # flag when the best available is this much bigger
+
+
+def best_available_mbmin(kind, arr_id, minutes):
+    """MB/min of the largest non-junk release an indexer currently offers."""
+    try:
+        if kind == "series":
+            rel = arr(SONARR, f"/api/v3/release?seriesId={arr_id}")
+        else:
+            rel = arr(RADARR, f"/api/v3/release?movieId={arr_id}")
+    except Exception:  # noqa: BLE001
+        return 0.0
+    best = 0.0
+    for r in rel:
+        title = (r.get("title") or "").upper()
+        # Skip foreign-dub releases: bigger, but not better for this library.
+        if any(t in title for t in ("GERMAN", "FRENCH", "ITALIAN", "SPANISH", "NORDIC", "POLISH", "MULTI")):
+            continue
+        best = max(best, ((r.get("size") or 0) / 1e6) / minutes)
+    return best
+
+
+def find_upgradable(files, ratio=UPGRADE_RATIO):
+    """Files where a substantially better release exists right now."""
+    seen, out = {}, []
+    for f in files:
+        key = (f["kind"], f["arr_id"])
+        if key not in seen:
+            seen[key] = best_available_mbmin(f["kind"], f["arr_id"], f["minutes"])
+        best = seen[key]
+        if best and best >= f["mbmin"] * ratio:
+            out.append({**f, "best_mbmin": round(best, 1), "gain": round(best / f["mbmin"], 1)})
+    return out
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--execute", action="store_true")
     ap.add_argument("--limit", type=int, default=0, help="cap remediations this run")
+    ap.add_argument("--upgrades", action="store_true", help="also report files a much better release exists for")
     args = ap.parse_args()
 
     bad = audit()
