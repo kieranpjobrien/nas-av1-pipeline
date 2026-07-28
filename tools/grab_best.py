@@ -56,11 +56,46 @@ def usable(rel) -> bool:
     return (rel.get("size") or 0) > 0
 
 
-_UPSCALE = re.compile(r"(UPSCALE|UPSCALED|AI[\s._-]?UPSCALE)", re.I)
+_UPSCALE = re.compile(r"(?:UPSCALE|UPSCALED|AI.?UPSCALE)", re.I)
+
+# HARD CEILING on a single TV episode, 2026-07-28.
+#
+# "Take the largest available" with no upper bound queued a 124 GB Game of
+# Thrones episode and House episodes to match - almost certainly season packs
+# or absurd remuxes mis-parsed as single episodes. 3,907 jobs / 26 TB were
+# queued before the operator caught it.
+#
+# Operator's rule: no TV episode over 20 GB, and that only for the rarest
+# exceptions; 10 GB is the working maximum.
+EPISODE_MAX_GB = 10.0
+EPISODE_ABSOLUTE_MAX_GB = 20.0
+# Movies legitimately run larger than episodes (a UHD remux feature is 60-90 GB),
+# but not unboundedly.
+MOVIE_MAX_GB = 80.0
+
+
+def within_size_cap(rel, *, is_episode: bool) -> bool:
+    """Reject releases too large to plausibly be what we asked for.
+
+    A single episode above EPISODE_ABSOLUTE_MAX_GB is almost always a season
+    pack or a mis-parse, not a better copy of one episode.
+    """
+    gb = (rel.get("size") or 0) / 1e9
+    cap = EPISODE_ABSOLUTE_MAX_GB if is_episode else MOVIE_MAX_GB
+    return gb <= cap
+
+
+_IS_2160 = re.compile(r"(?:2160p|UHD|4K)", re.I)
 
 
 def is_2160(rel) -> bool:
-    return bool(re.search(r"(2160p|4K|UHD)", rel.get("title") or "", re.I))
+    """True for a genuine 2160p/UHD release.
+
+    Module-level compiled pattern on purpose: an earlier in-place patch turned
+    the inline word-boundary escapes into literal backspace bytes, so this
+    matched NOTHING and the 4K preference silently never fired once.
+    """
+    return bool(_IS_2160.search(rel.get("title") or ""))
 
 
 def pick(releases, want_single_episode=True, prefer_4k=True):
@@ -75,13 +110,18 @@ def pick(releases, want_single_episode=True, prefer_4k=True):
     AI upscales are excluded from the 4K preference - they are 2160p in name
     only and carry no more real detail than the 1080p they came from.
     """
-    usable_rels = [r for r in releases if usable(r)]
+    usable_rels = [r for r in releases if usable(r) and within_size_cap(r, is_episode=want_single_episode)]
     if not usable_rels:
         return None
     if want_single_episode:
         singles = [r for r in usable_rels if _SXXEXX.search(r.get("title") or "")]
         if singles:
             usable_rels = singles
+        # Prefer to stay under the working maximum; only exceed it when nothing
+        # sensible exists below it.
+        modest = [r for r in usable_rels if (r.get("size") or 0) / 1e9 <= EPISODE_MAX_GB]
+        if modest:
+            usable_rels = modest
     if prefer_4k:
         real_4k = [r for r in usable_rels if is_2160(r) and not _UPSCALE.search(r.get("title") or "")]
         if real_4k:
