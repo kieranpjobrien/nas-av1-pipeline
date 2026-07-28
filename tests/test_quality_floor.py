@@ -48,11 +48,11 @@ def test_mbmin_none_when_duration_unknown():
 @pytest.mark.parametrize(
     ("res", "mb", "minutes", "expect_under"),
     [
-        ("720p", 400, 47, True),  # Fargo: 8.5 < 12
-        ("1080p", 400, 44, True),  # Ally McBeal: 9.1 < 18
-        ("1080p", 1200, 44, False),  # 27 MB/min, healthy
-        ("480p", 400, 44, False),  # 9.1 > 8 floor for SD
-        ("2160p", 900, 44, True),  # 20 < 25
+        ("720p", 400, 47, True),  # Fargo: 8.5 < 40
+        ("1080p", 400, 44, True),  # Ally McBeal: 9.1 < 50
+        ("1080p", 4000, 44, False),  # 91 MB/min, healthy
+        ("480p", 1400, 44, False),  # 32 MB/min > 25 floor for SD
+        ("2160p", 2000, 44, True),  # 45 < 80
     ],
 )
 def test_floor_by_resolution(res, mb, minutes, expect_under):
@@ -77,7 +77,7 @@ def test_undersized_source_is_parked_not_queued(state):
 
 
 def test_healthy_source_still_encodes(state):
-    entry = _entry(mb=1200, minutes=44, res="1080p")
+    entry = _entry(mb=4000, minutes=44, res="1080p")
     category, item = categorise_entry(entry, {}, state, _Control())
     assert category == "full_gamut"
     assert item["filepath"] == entry["filepath"]
@@ -110,9 +110,9 @@ def test_animation_gets_a_lower_floor(state):
     Real case 2026-07-26: Bob's Burgers S01 at 15-17 MB/min (1080p) was
     parked by the live-action floor of 18 on the first run. Those are fine.
     """
-    live = _entry(mb=350, minutes=22, res="1080p")  # 15.9 MB/min
+    live = _entry(mb=800, minutes=22, res="1080p")  # 36.4 MB/min
     under_live, _, _ = _under_quality_floor(live)
-    assert under_live is True, "15.9 MB/min is genuinely low for live action"
+    assert under_live is True, "36.4 MB/min is below the 50 live-action floor"
 
     toon = dict(live)
     toon["tmdb"] = {"genres": ["Animation", "Comedy"]}
@@ -121,7 +121,7 @@ def test_animation_gets_a_lower_floor(state):
 
 
 def test_anime_library_counts_as_animation():
-    e = _entry(mb=350, minutes=22, res="1080p")
+    e = _entry(mb=800, minutes=22, res="1080p")
     e["library_type"] = "anime"
     under, _, _ = _under_quality_floor(e)
     assert under is False
@@ -159,7 +159,7 @@ def test_replacement_release_unparks_the_file(state):
 
     import time
 
-    better = _entry(mb=1400, minutes=47, res="1080p")
+    better = _entry(mb=4000, minutes=47, res="1080p")
     better["file_mtime"] = time.time() + 3600  # Sonarr dropped a proper release
     category, _ = categorise_entry(better, {}, state, _Control())
     assert category == "full_gamut", "a replacement release must un-park the file"

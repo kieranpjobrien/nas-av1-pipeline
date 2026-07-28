@@ -63,9 +63,12 @@ def test_processable_files_still_queued(tmp_path):
             "video": {"codec_raw": "h264", "codec": "H.264", "resolution_class": "1080p"},
             "audio_streams": [{"codec_raw": "eac3", "channels": 6, "language": "eng"}],
             "subtitle_streams": [],
-            "file_size_bytes": 2_000_000_000,
+            # 10 GB over 100 min = 100 MB/min, comfortably above the 50 MB/min
+            # floor set 2026-07-28. The old fixture (2 GB / 100 min = 20) now
+            # reads as junk and would be parked rather than queued.
+            "file_size_bytes": 10_000_000_000,
             "duration_seconds": 6000,
-            "overall_bitrate_kbps": 2700,
+            "overall_bitrate_kbps": 13000,
         },
     ]
     report_path = _write_report(tmp_path, files)

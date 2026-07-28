@@ -39,9 +39,9 @@ def _orch(tmp_path) -> Orchestrator:
 def _h264_entry(filepath: str, size_bytes: int, filename: str | None = None) -> dict:
     """A healthy 1080p H.264 source.
 
-    Duration is derived from size at 30 MB/min so the entry clears the
-    1080p quality floor (18 MB/min) regardless of the size the caller
-    picks. These fixtures exist to exercise queue ORDERING, and a fixed
+    Duration is derived from size at 90 MB/min so the entry clears the
+    1080p quality floor (50 MB/min as of 2026-07-28) regardless of the
+    size the caller picks. These fixtures exist to exercise queue ORDERING, and a fixed
     100-minute runtime made the small ones (200 MB => 2 MB/min) look like
     exactly the junk sources the floor is there to reject.
     """
@@ -53,7 +53,7 @@ def _h264_entry(filepath: str, size_bytes: int, filename: str | None = None) -> 
         "audio_streams": [{"codec_raw": "eac3", "channels": 6, "language": "eng"}],
         "subtitle_streams": [],
         "file_size_bytes": size_bytes,
-        "duration_seconds": (size_bytes / 1_000_000) / 30.0 * 60.0,
+        "duration_seconds": (size_bytes / 1_000_000) / 90.0 * 60.0,
         "overall_bitrate_kbps": 2700,
     }
 

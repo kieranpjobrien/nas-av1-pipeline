@@ -221,13 +221,33 @@ def _stamp_force_reencode(
 # junk permanently into AV1, which is strictly worse than leaving the
 # source alone until a proper release lands.
 QUALITY_FLOOR_MBMIN: dict[str, float] = {
-    "480p": 8.0,
-    "576p": 8.0,
-    "720p": 12.0,
-    "1080p": 18.0,
-    "1440p": 20.0,
-    "4k": 25.0,
-    "2160p": 25.0,
+    # Operator's standard, 2026-07-28: "unless we are forced - minimum of
+    # 50 MB/min". The previous floors (18 for 1080p) were far too low and are
+    # precisely why junk kept clearing them - 250 MB Miracle Workers episodes,
+    # 300 MB Brooklyn Nine-Nine, 330 MB Always Sunny all passed.
+    #
+    # "Unless forced" is honoured by the remediation tools, which never delete
+    # a file unless a compliant replacement is confirmed available. Where the
+    # best release in existence is below the floor, the file stays.
+    "480p": 25.0,
+    "576p": 25.0,
+    "720p": 40.0,
+    "1080p": 50.0,
+    "1440p": 65.0,
+    "4k": 80.0,
+    "2160p": 80.0,
+}
+
+# What to AIM for, not merely tolerate. Masters of the Air at ~60 min should be
+# ~10 GB, i.e. ~170 MB/min. Used by the grab tools to rank candidates.
+QUALITY_TARGET_MBMIN: dict[str, float] = {
+    "480p": 40.0,
+    "576p": 40.0,
+    "720p": 80.0,
+    "1080p": 170.0,
+    "1440p": 220.0,
+    "4k": 300.0,
+    "2160p": 300.0,
 }
 
 

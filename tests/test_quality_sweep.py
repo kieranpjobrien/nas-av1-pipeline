@@ -13,14 +13,14 @@ from tools.quality_sweep import TIER_FLOOR_MBMIN, floor_for
 class TestFloorFor:
     def test_live_action_1080p(self):
         e = {"video": {"resolution_class": "1080p"}}
-        assert floor_for(e) == 18.0
+        assert floor_for(e) == 50.0
 
     def test_animation_is_scaled_down(self):
         e = {"video": {"resolution_class": "1080p"}, "tmdb": {"genres": ["Animation"]}}
         floor = floor_for(e)
         assert floor is not None
-        assert floor < 18.0, "animation must get a lower floor than live action"
-        assert floor > 8.0, "but not so low it waves junk through"
+        assert floor < 50.0, "animation must get a lower floor than live action"
+        assert floor > 25.0, "but not so low it waves junk through"
 
     def test_unknown_resolution_is_unjudgeable(self):
         assert floor_for({"video": {"resolution_class": "potato"}}) is None
@@ -31,7 +31,7 @@ class TestTierFloors:
         """A real 1080p remux is untouched Blu-ray video (150-225 MB/min).
         The tier floor only needs to be high enough to catch a re-encode
         wearing the tag — Brooklyn Nine-Nine sat at 14."""
-        assert TIER_FLOOR_MBMIN["Bluray-1080p Remux"] > 18.0
+        assert TIER_FLOOR_MBMIN["Bluray-1080p Remux"] > 50.0
 
     def test_brooklyn_nine_nine_case_would_be_caught(self):
         assert 14.0 < TIER_FLOOR_MBMIN["Bluray-1080p Remux"]

@@ -41,11 +41,14 @@ RADARR = ("http://192.168.4.43:27484", "2aeb7de56ea44035a438447a5911f77a")
 # Floor for what a quality TIER implies, MB/min. Well below the true figure
 # for each tier so only egregious mislabels trip it.
 TIER_FLOOR_MBMIN = {
-    "Bluray-2160p Remux": 60.0,
-    "Bluray-1080p Remux": 45.0,
-    "Bluray-2160p": 40.0,
-    "Bluray-1080p": 22.0,
-    "Bluray-720p": 15.0,
+    # A release claiming a tier must at least look like that tier. Raised
+    # 2026-07-28 alongside the 50 MB/min standard - the old remux floor of 45
+    # was below the plain 1080p floor of 50, which made no sense.
+    "Bluray-2160p Remux": 150.0,
+    "Bluray-1080p Remux": 100.0,
+    "Bluray-2160p": 100.0,
+    "Bluray-1080p": 60.0,
+    "Bluray-720p": 45.0,
 }
 
 
