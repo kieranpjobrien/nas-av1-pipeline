@@ -232,7 +232,7 @@ def extract_info(filepath: str, probe_data: dict, library_type: str) -> dict:
         # Reconstruct the flags list from is_forced / is_hi + any remaining
         # non-language dotted parts. This keeps backward compatibility with
         # the media-report consumers that read the `flags` list directly.
-        suffix = sub.stem[len(Path(filepath).stem):].lstrip(".")
+        suffix = sub.stem[len(Path(filepath).stem) :].lstrip(".")
         flags: list[str] = []
         for part in (p for p in suffix.split(".") if p):
             if part.lower() == sub.language:
@@ -846,6 +846,12 @@ def _scan_body(args) -> None:
         current_summary = current.get("summary", {}) or {}
         current_summary.update(summary)
         current["summary"] = current_summary
+        # Legacy top-level mirror. Nothing here used to update it, so it kept a
+        # value from an old scan format forever - the report said 8336 while it
+        # actually held 2999 entries. Consumers that read the top level rather
+        # than summary got a number nearly 3x reality.
+        current["total_files"] = len(merged)
+        current["scan_date"] = current_summary.get("scan_date", current.get("scan_date", ""))
 
     patch_report(_scanner_patch)
     output_path = args.output
@@ -894,12 +900,12 @@ def _scan_body(args) -> None:
                 print("  Reconciliation skipped: --limit produces a deliberately partial scan")
             elif len(current_paths) >= _MIN_HEALTHY_SCAN:
                 _cur.execute("SELECT filepath FROM pipeline_files WHERE status IN ('pending', 'error')")
-                stale_pending = [fp for fp, in _cur.fetchall() if fp not in current_paths]
+                stale_pending = [fp for (fp,) in _cur.fetchall() if fp not in current_paths]
                 for fp in stale_pending:
                     _cur.execute("DELETE FROM pipeline_files WHERE filepath = ?", (fp,))
 
                 _cur.execute("SELECT filepath FROM pipeline_files WHERE status = 'done'")
-                stale_done = [fp for fp, in _cur.fetchall() if fp not in current_paths]
+                stale_done = [fp for (fp,) in _cur.fetchall() if fp not in current_paths]
                 if len(stale_done) > _DONE_DROP_CAP:
                     stale_done_capped = True
                     stale_done = stale_done[:_DONE_DROP_CAP]

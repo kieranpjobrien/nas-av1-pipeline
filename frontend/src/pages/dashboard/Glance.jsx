@@ -820,7 +820,7 @@ export function Glance({ data, pipelineData, throughputPerDay, workersActive, wo
             }}
           >
             {[
-              { k: "video", label: "AV1 Video", pct: completion.pct_video, done: completion.av1, colour: "var(--accent)" },
+              { k: "video", label: "AV1/HEVC Video", pct: completion.pct_video, done: completion.av1, colour: "var(--accent)" },
               { k: "audio", label: "EAC-3 Audio", pct: completion.pct_audio, done: completion.eac3_done, colour: "#22d3ee" },
               { k: "subs", label: "English Subs", pct: completion.pct_subs, done: completion.subs_done, colour: "#a78bfa" },
               { k: "foreign_subs", label: "No Foreign Subs", pct: completion.pct_no_foreign_subs, done: completion.no_foreign_subs, colour: "#c084fc" },

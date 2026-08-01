@@ -484,7 +484,7 @@ export function PipelinePage({ wsData, onFileClick }) {
             {/* Breakdown bars */}
             <div style={{ display: "flex", justifyContent: "center", gap: 16, marginTop: 16, flexWrap: "wrap" }}>
               {[
-                { key: "video", label: "AV1 Video", pct: completion.pct_video, count: completion.av1, colour: PALETTE.accent },
+                { key: "video", label: "AV1/HEVC Video", pct: completion.pct_video, count: completion.av1, colour: PALETTE.accent },
                 { key: "audio", label: "EAC-3 Audio", pct: completion.pct_audio, count: completion.eac3_done, colour: PALETTE.cyan || "#22d3ee" },
                 { key: "subs", label: "1 Eng Sub", pct: completion.pct_subs, count: completion.subs_done, colour: "#a78bfa" },
                 { key: "foreign_subs", label: "No Foreign Subs", pct: completion.pct_no_foreign_subs || 0, count: completion.no_foreign_subs || 0, colour: "#c084fc" },
