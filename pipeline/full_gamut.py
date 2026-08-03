@@ -479,6 +479,27 @@ def _prepare_for_encode_locked(
             from tools.probe_source_integrity import probe_file as _probe_source
 
             probe_result = _probe_source(actual_input)
+            if not probe_result.healthy and probe_result.unreadable:
+                # We could not read the file. That says nothing about its
+                # contents, so it must NOT become a corruption verdict -
+                # flagged_corrupt is terminal and parks the file forever.
+                # Send it back to PENDING so the next pass retries it.
+                # 2026-08-03: 218 healthy files across 19 series were parked
+                # this way, flagged during bulk-fetch windows when the NAS
+                # share was saturated. All re-probed fine.
+                logging.warning(
+                    f"  prep: source unreadable right now — {probe_result.fatal}. "
+                    f"Returning to PENDING for retry (NOT flagging corrupt)."
+                )
+                state.set_file(
+                    filepath,
+                    FileStatus.PENDING,
+                    error=f"source read failed at prep (will retry): {probe_result.fatal}",
+                    stage="prep_source_integrity",
+                    source_unreadable_at=__import__("time").time(),
+                )
+                _cleanup(local_path, remuxed_path, None)
+                return None
             if not probe_result.healthy:
                 broken_summary = (
                     probe_result.fatal or f"decode errors in windows={','.join(probe_result.windows_failed)}"

@@ -75,24 +75,49 @@ class ProbeResult:
     sample_errors: list[str] = field(default_factory=list)
     probe_time_secs: float = 0.0
     fatal: Optional[str] = None  # set if the probe itself failed to run
+    # True when we could not READ the file, as distinct from having read it
+    # and found it broken. "I couldn't reach it" is not a verdict on content,
+    # and must never be recorded as one - see probe_file().
+    unreadable: bool = False
 
     def to_dict(self) -> dict:
         return asdict(self)
 
 
-def _probe_duration(filepath: str, timeout: int = 30) -> float:
-    """Return the duration in seconds, or 0.0 if probe fails."""
+def _probe_duration(filepath: str, timeout: int = 30, max_retries: int = 2) -> float:
+    """Return the duration in seconds, or 0.0 if the probe fails.
+
+    Retries, for the same reason ``_decode_window`` does. This function gates
+    the whole integrity check - a 0.0 here condemns the file without any
+    frame ever being decoded - and until 2026-08-03 it had no retry at all
+    while the decoder below it had two. One SMB timeout under load was enough
+    to mark a healthy file corrupt.
+
+    That is exactly what happened: 218 files across 19 series were flagged,
+    heavily clustered during bulk-fetch windows, and 14 of 14 re-probed
+    perfectly fine afterwards.
+    """
     cmd = [FFPROBE, "-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", filepath]
-    try:
-        out = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        return 0.0
-    if out.returncode != 0:
-        return 0.0
-    try:
-        return float(out.stdout.strip() or "0")
-    except ValueError:
-        return 0.0
+    attempts = max_retries + 1
+    for attempt in range(1, attempts + 1):
+        try:
+            out = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            if attempt < attempts:
+                time.sleep(2 * attempt)  # back off; the share may be saturated
+                continue
+            return 0.0
+        if out.returncode == 0:
+            try:
+                secs = float(out.stdout.strip() or "0")
+            except ValueError:
+                secs = 0.0
+            if secs > 0:
+                return secs
+        if attempt < attempts:
+            time.sleep(2 * attempt)
+            continue
+    return 0.0
 
 
 def _decode_window(
@@ -174,10 +199,19 @@ def probe_file(filepath: str) -> ProbeResult:
     """Probe one source file at start / middle / end. Return the result."""
     t0 = time.monotonic()
     if not Path(filepath).exists():
-        return ProbeResult(filepath=filepath, healthy=False, fatal="file missing")
+        return ProbeResult(filepath=filepath, healthy=False, fatal="file missing", unreadable=True)
     duration = _probe_duration(filepath)
     if duration <= 0:
-        return ProbeResult(filepath=filepath, healthy=False, fatal="duration probe failed (corrupt container?)")
+        # Unreadable, NOT judged corrupt. We never decoded a frame, so we have
+        # no evidence about the content - only that the read did not complete.
+        # Callers must park this for a later retry rather than flag it
+        # terminally (rule 12: never substitute a failure for a verdict).
+        return ProbeResult(
+            filepath=filepath,
+            healthy=False,
+            fatal="could not read file to determine duration (probe failed, not a corruption verdict)",
+            unreadable=True,
+        )
     result = ProbeResult(filepath=filepath, duration_seconds=duration)
     # Three windows: start, middle, end. For files < 3 min we just probe
     # the whole thing.
