@@ -9,3 +9,4 @@ echo. >> "%LOG%"
 echo ==== %DATE% %TIME% ==== >> "%LOG%"
 uv run python -m tools.indexer_health --execute >> "%LOG%" 2>&1
 uv run python -m tools.kill_doomed --execute >> "%LOG%" 2>&1
+uv run python -m tools.sab_unpause --execute >> "%LOG%" 2>&1
