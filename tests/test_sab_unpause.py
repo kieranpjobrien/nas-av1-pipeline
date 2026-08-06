@@ -10,7 +10,7 @@ The risk in automating this is resuming a pause that IS legitimate, so these
 pin the refusals as hard as the resume.
 """
 
-from tools.sab_unpause import MIN_FREE_GB, diagnose
+from tools.sab_unpause import MIN_FREE_GB, diagnose, find_husks, is_husk
 
 
 def _q(paused=True, free_gb=2700.0, pause_int="0", status="Paused"):
@@ -59,3 +59,51 @@ class TestRefusals:
     def test_missing_free_space_field_does_not_resume(self):
         ok, _ = diagnose({"paused": True, "pause_int": "0"})
         assert not ok
+
+
+class TestHuskDetection:
+    """The 2026-08-06 23:38 pause: a leftover dir with no payload and no
+    nzo_data. SAB won't list it as an orphan (nothing to resume) but it owns
+    the name, so the re-grab dies on FileExistsError creating __ADMIN__."""
+
+    def _mk(self, tmp_path, name, *, nzo=False, payload=False, admin=True):
+        d = tmp_path / name
+        d.mkdir()
+        if admin:
+            a = d / "__ADMIN__"
+            a.mkdir()
+            (a / "SABnzbd_attrib").write_text("x")
+            if nzo:
+                (a / "SABnzbd_nzo_data").write_text("x")
+        if payload:
+            (d / "part.par2").write_bytes(b"x" * 100)
+        return d
+
+    def test_the_felicity_case_is_a_husk(self, tmp_path):
+        d = self._mk(tmp_path, "Felicity.S03.NTSC.DVD.REMUX-MNeRD")
+        assert is_husk(str(d))
+
+    def test_a_resumable_job_is_not_a_husk(self, tmp_path):
+        d = self._mk(tmp_path, "Show.S01E01", nzo=True)
+        assert not is_husk(str(d)), "has nzo_data - SAB can resume it, do not delete"
+
+    def test_a_dir_with_real_data_is_not_a_husk(self, tmp_path):
+        d = self._mk(tmp_path, "Show.S01E02", payload=True)
+        assert not is_husk(str(d)), "holds downloaded bytes - deleting loses them"
+
+    def test_partial_download_without_nzo_data_is_kept(self, tmp_path):
+        """Payload but no nzo_data still must not be binned - the bytes are real."""
+        d = self._mk(tmp_path, "Show.S01E03", nzo=False, payload=True)
+        assert not is_husk(str(d))
+
+
+class TestFindHusks:
+    def test_skips_dirs_owned_by_a_live_job(self, tmp_path):
+        for n in ("LiveJob", "DeadHusk"):
+            (tmp_path / n / "__ADMIN__").mkdir(parents=True)
+        found = find_husks(str(tmp_path), live_names={"LiveJob"})
+        assert [f.split("\\")[-1].split("/")[-1] for f in found] == ["DeadHusk"]
+
+    def test_missing_base_dir_is_not_an_error(self):
+        """Running from a machine that isn't the download server."""
+        assert find_husks("/definitely/not/here") == []
