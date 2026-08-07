@@ -90,6 +90,54 @@ def find_husks(base: str = INCOMPLETE_DIR, live_names: set[str] | None = None) -
     return out
 
 
+# Signatures SAB logs immediately before auto-pausing on a write failure.
+DISK_ERROR_SIGNATURES = (
+    "Fatal error in Downloader",
+    "Disk error on creating file",
+    "FileNotFoundError",
+    "FileExistsError",
+    "No space left on device",
+)
+
+
+def paused_by_disk_error(log_text: str) -> bool:
+    """True only if the most recent Pausing was preceded by a write failure.
+
+    2026-08-08 00:00: the operator paused SAB by hand to let post-processing
+    drain. This watchdog resumed it nine minutes later, because an indefinite
+    manual pause and a disk-error pause look identical through the API - both
+    are just ``paused=true`` with ``pause_int=0``.
+
+    So stop asking "is it paused?" and start asking "did something break?".
+    Only a pause with an error immediately before it is ours to undo; a bare
+    Pausing line is a human decision and must be left alone.
+    """
+    idx = log_text.rfind("Pausing")
+    if idx == -1:
+        return False
+    # Look only at the window just before the pause, not the whole log - an
+    # error from hours earlier says nothing about this pause.
+    window = log_text[max(0, idx - 4000) : idx]
+    return any(sig in window for sig in DISK_ERROR_SIGNATURES)
+
+
+def recent_sab_log(minutes: int = 30) -> str:
+    """Container log tail. Empty string if it cannot be read."""
+    import subprocess
+
+    try:
+        out = subprocess.run(
+            ["docker", "logs", f"--since={minutes}m", "sabnzbd"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            errors="replace",
+        )
+        return (out.stdout or "") + (out.stderr or "")
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
 def diagnose(queue: dict) -> tuple[bool, str]:
     """(should_resume, reason) for a queue payload.
 
@@ -106,7 +154,11 @@ def diagnose(queue: dict) -> tuple[bool, str]:
         return False, "could not read free space"
     if free_gb < MIN_FREE_GB:
         return False, f"only {free_gb:.1f} GB free - pause is legitimate, leaving it"
-    return True, f"paused with {free_gb:.0f} GB free"
+    # Last gate, and the important one: only undo a pause we can prove was
+    # caused by a write failure. A bare Pausing line is the operator's call.
+    if not paused_by_disk_error(recent_sab_log()):
+        return False, "no disk error before the pause - treating as a manual pause, leaving it"
+    return True, f"paused after a disk error, {free_gb:.0f} GB free"
 
 
 def main() -> None:
