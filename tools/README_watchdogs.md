@@ -33,16 +33,29 @@ did not find executable at 'C:\Users\kiera\AppData\Roaming\uv\python\cpython-3.1
 LastTaskResult : 103
 ```
 
-The Task Scheduler context cannot execute the uv-managed interpreter, and
-pointing the launcher at `.venv\Scripts\python.exe` does not help - that binary
-trampolines to the same base. Same policy blocks `uv run pytest` and the
-pre-commit hooks. Fixing it properly needs admin ("Run with highest
-privileges") or a venv built on a non-uv Python.
+**Corrected 2026-08-15.** This was originally recorded as an Application
+Control policy needing admin to fix. That was wrong, and the wrong note kept
+the pipeline dying with every session. A probe task showed:
+
+```
+APPDATA=C:\Users\kiera\AppData\Roaming     <- environment is fine
+BASE_PY=MISSING                            <- uv's python invisible to the task
+VENV_PY_OK 3.13.14                         <- venv python runs, falls back to Store 3.13
+pipeline import OK / server deps OK
+```
+
+So a scheduled task works perfectly well **provided it invokes
+`.venv\Scripts\python.exe` directly and never `uv run`** - only uv's managed
+interpreter is unreachable from that context. `NASCleanup-Pipeline` and
+`NASCleanup-Dashboard` now run that way, with parent `svchost.exe`, which is
+what finally stopped them dying with the session.
+
+These acquisition tools still run from cron on the download server, for two
+independent reasons: it reacts in 10 minutes instead of 6 hours, and
+`sab_unpause` / `usenet_server_health` need `docker logs` on that host.
 
 The cost of not noticing: the task never ran between 2026-08-03 and 08-07,
-straight through a 5h34m SAB outage it existed to catch. Running these on the
-server sidesteps the problem entirely and reacts in 10 minutes instead of 6
-hours.
+straight through a 5h34m SAB outage it existed to catch.
 
 **When editing any of these tools, re-deploy them** - the server copies are
 snapshots, not symlinks:
