@@ -46,9 +46,13 @@ pipeline import OK / server deps OK
 
 So a scheduled task works perfectly well **provided it invokes
 `.venv\Scripts\python.exe` directly and never `uv run`** - only uv's managed
-interpreter is unreachable from that context. `NASCleanup-Pipeline` and
-`NASCleanup-Dashboard` now run that way, with parent `svchost.exe`, which is
-what finally stopped them dying with the session.
+interpreter is unreachable from that context.
+
+That is recorded as a fact about the environment, NOT as a recommendation.
+The operator does not want the encode pipeline or the dashboard driven by
+Task Scheduler; both are started by hand when wanted. The tasks that briefly
+existed for them (`NASCleanup-Pipeline`, `NASCleanup-Dashboard`) were removed
+on 2026-08-15.
 
 These acquisition tools still run from cron on the download server, for two
 independent reasons: it reacts in 10 minutes instead of 6 hours, and
