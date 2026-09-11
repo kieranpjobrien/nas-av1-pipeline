@@ -1141,6 +1141,45 @@ def _purge_stale_source_path(filepath: str, final_path: str, state: PipelineStat
     return True
 
 
+def _report_entry_for(filepath: str, final_path: str) -> dict | None:
+    """The media_report row for this file, or None. Plain read — no lock needed."""
+    try:
+        from paths import MEDIA_REPORT  # noqa: PLC0415
+        from server.helpers import read_json_safe  # noqa: PLC0415
+
+        report = read_json_safe(MEDIA_REPORT) or {}
+        return next(
+            (f for f in report.get("files", []) if f.get("filepath") in (filepath, final_path)),
+            None,
+        )
+    except Exception:  # noqa: BLE001 - integrity check must not die on a report read
+        return None
+
+
+# Animation is drawn, not filmed: flat cel shading, hard edges, large uniform
+# areas and no sensor grain. AV1 eats it. Archer lands at 4.7-5.0% of source,
+# i.e. just under the 5% AV1 floor, so 35 perfectly good encodes were deleted
+# and re-encoded and deleted again (one auto-retry each) before landing in
+# ERROR. The floor exists to catch "ffmpeg wrote 3 seconds and lied in the
+# header", which is an order of magnitude below this - 2% still catches that
+# while leaving legitimate animation alone. (2026-09-11)
+ANIMATION_MIN_RATIO = 0.02
+AV1_MIN_RATIO = 0.05
+DEFAULT_MIN_RATIO = 0.3
+
+
+def _is_animation(entry: dict | None) -> bool:
+    genres = ((entry or {}).get("tmdb") or {}).get("genres") or []
+    return any("animation" in str(g).lower() for g in genres)
+
+
+def _min_bitrate_ratio(out_codec: str, entry: dict | None) -> float:
+    """Floor for output-bitrate-as-a-fraction-of-source, by codec and content."""
+    if out_codec not in ("av1", "av1_nvenc"):
+        return DEFAULT_MIN_RATIO
+    return ANIMATION_MIN_RATIO if _is_animation(entry) else AV1_MIN_RATIO
+
+
 def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
     """Upload encoded file to NAS, verify, replace original, tag, report, Plex.
 
@@ -1284,11 +1323,12 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
     # Codec-aware floor: AV1 is 2-3x more efficient than H.264/HEVC, so a 30%-of-
     # source threshold (safe for H.264-in/H.264-out) wrongly rejects legitimate
     # AV1 encodes of simple content (sitcoms, animation) that compress to 5-15%.
-    # We use an absolute 200 kbps floor unconditionally, plus a codec-aware ratio
-    # floor: 5% for AV1 (catches "truncated or silent video" only), 30% for
-    # everything else.
+    # We use an absolute 200 kbps floor unconditionally, plus a content-aware
+    # ratio floor: 2% for animation, 5% for other AV1, 30% for everything else.
+    # See _min_bitrate_ratio.
     #
     # Also captures the full probe for encode_history below — one ffprobe call, reused.
+    _entry = _report_entry_for(filepath, final_path)
     output_probe = _probe_full(dest_path)
     if output_probe.get("error"):
         # Probe failure used to be a warning that fell through — so a file ffprobe couldn't
@@ -1315,8 +1355,9 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
         )
         input_bitrate_kbps = int((input_size / input_duration * 8 / 1000)) if input_duration > 0 else 0
         # AV1 is much more efficient than H.264/HEVC — use a lower ratio floor so
-        # well-compressed AV1 output of simple content doesn't trip the check.
-        min_ratio = 0.05 if out_codec in ("av1", "av1_nvenc") else 0.3
+        # well-compressed AV1 output of simple content doesn't trip the check,
+        # and lower still for animation, which compresses harder than anything.
+        min_ratio = _min_bitrate_ratio(out_codec, _entry)
         min_abs_kbps = 200
         integrity_ok = (
             bool(out_codec)
@@ -1327,7 +1368,8 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
             logging.error(
                 f"  Output integrity check FAILED: codec={out_codec!r} "
                 f"output_bitrate={out_bitrate_kbps}kbps input_bitrate={input_bitrate_kbps}kbps "
-                f"(minimum: {min_abs_kbps}kbps and >={min_ratio * 100:.0f}% of source)"
+                f"(minimum: {min_abs_kbps}kbps and >={min_ratio * 100:.0f}% of source"
+                f"{', animation floor' if _is_animation(_entry) else ''})"
             )
             try:
                 os.remove(dest_path)
@@ -1372,19 +1414,8 @@ def finalize_upload(filepath: str, state: PipelineState, config: dict) -> bool:
         from pipeline.compliance import Category, categorise, check_compliance
         from pipeline.compliance_fixers import FIXERS
 
-        # Resolve item from media_report so it has tmdb/library_type for the check.
-        try:
-            from paths import MEDIA_REPORT  # noqa: PLC0415
-            from server.helpers import read_json_safe  # noqa: PLC0415
-
-            _report = read_json_safe(MEDIA_REPORT) or {}
-            _entry = next(
-                (f for f in _report.get("files", []) if f.get("filepath") in (filepath, final_path)),
-                None,
-            )
-        except Exception:
-            _entry = None
-
+        # _entry was resolved once above for the integrity floor — reuse it rather
+        # than re-reading the whole media_report a second time per file.
         # Build the item shape compliance expects. ``finalize_upload`` doesn't
         # have ``item`` in scope (the queue item is consumed by ``full_gamut``
         # earlier and not threaded through to upload) — only the state DB
