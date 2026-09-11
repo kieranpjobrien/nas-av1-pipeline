@@ -210,6 +210,12 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--execute", action="store_true")
     ap.add_argument("--limit", type=int, default=0, help="cap remediations this run")
+    ap.add_argument(
+        "--force",
+        action="store_true",
+        help="delete every violation, even where no replacement exists yet "
+        "(operator override 2026-07-28: 'delete everything, that simple')",
+    )
     ap.add_argument("--upgrades", action="store_true", help="also report files a much better release exists for")
     args = ap.parse_args()
 
@@ -234,7 +240,7 @@ def main() -> None:
     removed = skipped = 0
     series_ids, movie_ids = set(), set()
     for b in todo:
-        if not has_replacement(b):
+        if not args.force and not has_replacement(b):
             skipped += 1
             continue
         api = SONARR if b["kind"] == "series" else RADARR
