@@ -200,14 +200,30 @@ def apply_plan(plan: dict) -> tuple[int, int]:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--match", required=True, help="substring of the filepath to process")
+    ap.add_argument("--match", default="", help="substring of the filepath to process")
+    ap.add_argument(
+        "--suspect",
+        action="store_true",
+        help="target files whose tags claim EVERY audio track is foreign. That is "
+        "almost always a lying tag rather than a genuinely foreign-only file - it is "
+        "exactly the Bluey shape - and strip_foreign_tracks refuses to touch them "
+        "because stripping would leave no audio at all.",
+    )
     ap.add_argument("--execute", action="store_true")
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--model", default="tiny")
     args = ap.parse_args()
+    if not args.match and not args.suspect:
+        ap.error("pass --match or --suspect")
 
-    rep = json.load(urllib.request.urlopen(DASHBOARD, timeout=180))
-    files = [f for f in (rep.get("files") or []) if args.match.lower() in f.get("filepath", "").lower()]
+    rep = json.load(urllib.request.urlopen(DASHBOARD, timeout=300))
+    files = list(rep.get("files") or [])
+    if args.match:
+        files = [f for f in files if args.match.lower() in f.get("filepath", "").lower()]
+    if args.suspect:
+        from tools.strip_foreign_tracks import plan_file
+
+        files = [f for f in files if plan_file(f)["skip"].startswith("would leave zero audio")]
     files = [f for f in files if len(f.get("audio_streams") or []) > 1]
     if args.limit:
         files = files[: args.limit]
