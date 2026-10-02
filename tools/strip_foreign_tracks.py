@@ -48,6 +48,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+# Redirected stdout on Windows defaults to cp1252, so printing a filename with
+# a macron killed the 2026-09-15 batch run at file 62 of 1062 - after 61
+# successful strips, and purely in the progress line, not the mux. Media
+# filenames are full of accents; the log must never be able to stop the work.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 from pipeline.config import KEEP_LANGS  # noqa: E402
 from pipeline.gap_filler import GapAnalysis  # noqa: E402
 from pipeline.qualify import equivalence_bucket  # noqa: E402
