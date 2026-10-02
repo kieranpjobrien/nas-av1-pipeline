@@ -123,10 +123,10 @@ def duration_secs(path: str) -> float:
         return 0.0
 
 
-def detect(path: str, audio_index: int, model, dur: float) -> tuple[str | None, float]:
+def detect(path: str, audio_index: int, model, dur: float, points=None) -> tuple[str | None, float]:
     """Majority language across several samples. (iso639-1, mean confidence)."""
     votes: list[tuple[str, float]] = []
-    for frac in SAMPLE_POINTS:
+    for frac in points or SAMPLE_POINTS:
         offset = max(0.0, dur * frac)
         if dur and offset + SAMPLE_SECS > dur:
             offset = max(0.0, dur - SAMPLE_SECS - 1)
@@ -174,14 +174,14 @@ def detect(path: str, audio_index: int, model, dur: float) -> tuple[str | None, 
     return winner, (sum(confs) / len(confs)) * share
 
 
-def plan(path: str, original_language: str, model) -> dict:
+def plan(path: str, original_language: str, model, points=None) -> dict:
     tracks = [t for t in identify(path).get("tracks", []) if t.get("type") == "audio"]
     dur = duration_secs(path)
     allowed = {"en", (original_language or "en").lower()[:2]}
 
     detections = []
     for i, t in enumerate(tracks):
-        lang, conf = detect(path, i, model, dur)
+        lang, conf = detect(path, i, model, dur, points)
         pr = t.get("properties") or {}
         detections.append(
             {
@@ -276,9 +276,18 @@ def main() -> int:
     ap.add_argument("--execute", action="store_true")
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--model", default="small")
+    ap.add_argument(
+        "--deep",
+        action="store_true",
+        help="eight sample points instead of three, for files the normal pass could "
+        "not identify. Bluey S03E37 The Decider reads zh/en/zh - the right shape - "
+        "at a flat 0.66, just under the floor; more windows is the honest fix for "
+        "that, not a lower floor. Pair with --model medium.",
+    )
     ap.add_argument("--original-language", default="en")
     ap.add_argument("--root", default=r"\\KieranNAS\Media")
     args = ap.parse_args()
+    points = (0.12, 0.24, 0.36, 0.48, 0.60, 0.70, 0.80, 0.88) if args.deep else None
 
     paths = []
     for dirpath, _d, names in os.walk(args.root):
@@ -301,7 +310,7 @@ def main() -> int:
         aud = [t for t in info.get("tracks", []) if t.get("type") == "audio"]
         if len(aud) < 2 and all((t.get("properties") or {}).get("default_track") for t in aud):
             continue  # single correctly-flagged track: nothing to decide
-        p = plan(path, args.original_language, model)
+        p = plan(path, args.original_language, model, points)
         desc = " ".join(
             f"a{d['audio_index'] + 1}:{d['heard'] or '?'}({d['conf']:.2f})"
             f"{'*' if d['audio_index'] == p['default_index'] else ''}"

@@ -31,7 +31,7 @@ def build_plan(monkeypatch, tracks, heard, original_language="en"):
         },
     )
     monkeypatch.setattr(fx, "duration_secs", lambda _p: 1300.0)
-    monkeypatch.setattr(fx, "detect", lambda _p, i, _m, _d: heard[i])
+    monkeypatch.setattr(fx, "detect", lambda _p, i, _m, _d, _pts=None: heard[i])
     return fx.plan("X.mkv", original_language, fake_model())
 
 
