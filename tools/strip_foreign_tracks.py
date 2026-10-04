@@ -148,9 +148,42 @@ def plan_file(entry: dict) -> dict:
     }
 
 
+def live_track_counts(path: str) -> tuple[int, int]:
+    """(audio, subtitle) counts as the file is RIGHT NOW, not as the report says."""
+    from pipeline import local_mux
+
+    tracks = (local_mux.local_identify(path) or {}).get("tracks", [])
+    return (
+        sum(1 for t in tracks if t.get("type") == "audio"),
+        sum(1 for t in tracks if t.get("type") == "subtitles"),
+    )
+
+
+def plan_is_stale(plan: dict, n_audio: int, n_subs: int) -> bool:
+    """True when the plan refers to tracks the file no longer has."""
+    planned_audio = plan["audio_keep"] + plan["audio_drop"]
+    planned_subs = plan["sub_keep"] + plan["sub_drop"]
+    if planned_audio and max(planned_audio) >= n_audio:
+        return True
+    return bool(planned_subs) and max(planned_subs) >= n_subs
+
+
 def apply_plan(plan: dict, config: dict) -> bool:
-    """Hand the plan to the gap filler's mux + verify + atomic replace."""
+    """Hand the plan to the gap filler's mux + verify + atomic replace.
+
+    The plan was built from media_report.json, which can be stale: the pipeline
+    re-encodes files while this runs, and an encode changes the track layout.
+    Acting on a stale plan sends mkvmerge indices that no longer exist - all 31
+    "audio_keep_ids is an empty list" refusals in the 2026-10-03 batch were
+    exactly that, every planned index pointing past the end of the real file.
+    The gate below turns those into an honest skip instead of a traceback.
+    """
     from pipeline.gap_filler import _strip_tracks_locally
+
+    n_audio, n_subs = live_track_counts(plan["filepath"])
+    if plan_is_stale(plan, n_audio, n_subs):
+        print(f"      SKIP: report is stale for this file (disk has {n_audio} audio / {n_subs} subs) — rescan needed")
+        return True  # not a failure; nothing was attempted
 
     gaps = GapAnalysis(
         needs_track_removal=True,

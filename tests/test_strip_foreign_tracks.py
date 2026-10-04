@@ -9,6 +9,7 @@ Three rules, in priority order:
 
 import pytest
 
+import tools.strip_foreign_tracks as sft
 from tools.strip_foreign_tracks import allowed_audio_langs, plan_file, stream_lang
 
 
@@ -156,6 +157,38 @@ class TestForeignFilmsKeepSomethingReadable:
         """An untagged sub might be anything; it cannot justify binning the rest."""
         p = plan_file(entry("ja", audio=[{"language": "jpn"}], subs=[{"language": "und"}, {"language": "jpn"}]))
         assert p["sub_drop"] == []
+
+
+class TestStalePlansAreRefused:
+    """The plan comes from media_report.json; the pipeline re-encodes files
+    while this runs, and an encode changes the track layout. All 31
+    'audio_keep_ids is an empty list' refusals in the 2026-10-03 batch were
+    planned indices pointing past the end of the real file."""
+
+    def test_plan_matching_the_file_is_not_stale(self):
+        p = plan_file(
+            entry(
+                "en", audio=[{"language": "eng"}, {"language": "spa"}], subs=[{"language": "eng"}, {"language": "fre"}]
+            )
+        )
+        assert not sft.plan_is_stale(p, n_audio=2, n_subs=2)
+
+    def test_fewer_audio_tracks_on_disk_is_stale(self):
+        p = plan_file(entry("en", audio=[{"language": "eng"}, {"language": "spa"}]))
+        assert sft.plan_is_stale(p, n_audio=1, n_subs=0)
+
+    def test_fewer_subs_on_disk_is_stale(self):
+        p = plan_file(entry("en", audio=[{"language": "eng"}], subs=[{"language": "eng"}, {"language": "fre"}]))
+        assert sft.plan_is_stale(p, n_audio=1, n_subs=1)
+
+    def test_extra_tracks_on_disk_are_fine(self):
+        """More tracks than planned is harmless - we address the ones we named."""
+        p = plan_file(entry("en", audio=[{"language": "eng"}, {"language": "spa"}]))
+        assert not sft.plan_is_stale(p, n_audio=5, n_subs=0)
+
+    def test_a_file_with_no_tracks_at_all_is_stale(self):
+        p = plan_file(entry("en", audio=[{"language": "eng"}, {"language": "spa"}]))
+        assert sft.plan_is_stale(p, n_audio=0, n_subs=0)
 
 
 class TestAnimationDualAudio:
