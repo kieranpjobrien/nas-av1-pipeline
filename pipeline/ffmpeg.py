@@ -49,6 +49,103 @@ def format_duration(secs: float) -> str:
     return f"{secs / 3600:.0f}h {(secs % 3600) / 60:.0f}m"
 
 
+# Values each colour option will actually accept. ffprobe reports what the
+# container says; the ENCODER parses a narrower enum, and the three lists are
+# not the same.
+#
+# 2026-10-19: this cost the whole IT Crowd series - 21 episodes stuck in error.
+# PAL 480p sources tag their transfer characteristic "bt470bg", which is a legal
+# value for primaries and for colorspace but NOT for color_trc, where the
+# BT.470 System B/G curve is called "gamma28". Passing it through verbatim made
+# av1_nvenc reject the entire command:
+#
+#   [av1_nvenc] Unable to parse option value "bt470bg"
+#   [av1_nvenc] Error setting option color_trc to value bt470bg.
+#   Error opening output files: Invalid argument
+#
+# An unparseable tag must never cost the encode. Map the known aliases, and
+# fall back to BT.709 for anything the encoder would refuse - virtually all SDR
+# content is BT.709 anyway, so the fallback matches reality.
+_TRC_VALUES = {
+    "bt709",
+    "gamma22",
+    "gamma28",
+    "smpte170m",
+    "smpte240m",
+    "linear",
+    "log100",
+    "log316",
+    "iec61966-2-4",
+    "bt1361e",
+    "iec61966-2-1",
+    "bt2020-10",
+    "bt2020-12",
+    "smpte2084",
+    "smpte428",
+    "arib-std-b67",
+}
+_PRIMARIES_VALUES = {
+    "bt709",
+    "bt470m",
+    "bt470bg",
+    "smpte170m",
+    "smpte240m",
+    "film",
+    "bt2020",
+    "smpte428",
+    "smpte431",
+    "smpte432",
+    "jedec-p22",
+}
+_MATRIX_VALUES = {
+    "rgb",
+    "bt709",
+    "fcc",
+    "bt470bg",
+    "smpte170m",
+    "smpte240m",
+    "ycgco",
+    "bt2020nc",
+    "bt2020c",
+    "smpte2085",
+    "chroma-derived-nc",
+    "chroma-derived-c",
+    "ictcp",
+}
+# Container spellings that mean a real curve under a different name.
+_TRC_ALIASES = {
+    "bt470bg": "gamma28",  # PAL - the IT Crowd case
+    "bt470m": "gamma22",  # NTSC
+    "bt470": "gamma22",
+    "smpte428_1": "smpte428",
+    "iec61966_2_1": "iec61966-2-1",
+    "iec61966_2_4": "iec61966-2-4",
+    "arib_std_b67": "arib-std-b67",
+}
+
+
+def sanitise_color_tags(
+    primaries: Optional[str], transfer: Optional[str], matrix: Optional[str]
+) -> tuple[str, str, str]:
+    """Source colour tags, coerced to values the encoder will accept.
+
+    Returns ``(primaries, transfer, matrix)``, each guaranteed to be a value
+    ``av1_nvenc`` parses. Unknown or absent tags become BT.709.
+    """
+
+    def pick(value: Optional[str], allowed: set[str], aliases: Optional[dict] = None) -> str:
+        v = (value or "").strip().lower()
+        if aliases and v in aliases:
+            v = aliases[v]
+        return v if v in allowed else "bt709"
+
+    return (
+        pick(primaries, _PRIMARIES_VALUES),
+        pick(transfer, _TRC_VALUES, _TRC_ALIASES),
+        pick(matrix, _MATRIX_VALUES),
+    )
+
+
 def _probe_source_color(input_path: str) -> dict[str, Optional[str]]:
     """ffprobe the source's video colour tags. Returns a dict with
     color_primaries / color_transfer / color_space / color_range —
@@ -762,9 +859,11 @@ def build_ffmpeg_cmd(
         # fallback matches reality; rare exceptions get their
         # source tags preserved.
         src_color = _probe_source_color(input_path)
-        primaries = src_color["color_primaries"] or "bt709"
-        transfer = src_color["color_transfer"] or "bt709"
-        matrix = src_color["color_space"] or "bt709"
+        primaries, transfer, matrix = sanitise_color_tags(
+            src_color["color_primaries"],
+            src_color["color_transfer"],
+            src_color["color_space"],
+        )
         rng = src_color["color_range"] or "tv"
         cmd.extend(
             [
