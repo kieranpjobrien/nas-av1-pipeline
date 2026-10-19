@@ -65,21 +65,53 @@ def _resolve_one(filepath: str) -> str | None:
         return None
     bn = os.path.basename(filepath)
     cleaned = _try_cleaned_basename(bn)
-    if not cleaned:
+    if cleaned:
+        candidate = os.path.join(parent, cleaned)
+        if os.path.exists(candidate):
+            return candidate
+        # Also try a directory-listing match (case-insensitive) — handles
+        # subtle case differences in titles like "We Got Us a Pippi Virgin".
+        cleaned_lower = cleaned.lower()
+        try:
+            for entry in os.listdir(parent):
+                if entry.lower() == cleaned_lower:
+                    return os.path.join(parent, entry)
+        except OSError:
+            pass
+
+    # Fallback: compare on alphanumerics only, within the same folder.
+    #
+    # The dashed-series pattern only covers TV. Films get renamed in ways it
+    # cannot see, and a remux changes the extension outright. On 2026-10-19
+    # these five sat in flagged_corrupt as "source missing" while the files
+    # were right there:
+    #
+    #   Dr. No (1962).mkv                  -> Dr No (1962).mkv
+    #   A.I. Artificial Intelligence.mkv   -> A I Artificial Intelligence.mkv
+    #   Moonlight (2016).mp4               -> Moonlight (2016).mkv
+    #
+    # Ignoring punctuation and extension catches all three shapes. The match
+    # stays strict in the way that matters - same folder, and every letter and
+    # digit identical in order - so it cannot pair two different titles.
+    return _resolve_by_normalised_name(parent, bn)
+
+
+def _normalise(name: str) -> str:
+    """Letters and digits only, lowercased, extension dropped."""
+    return re.sub(r"[^a-z0-9]", "", os.path.splitext(name)[0].lower())
+
+
+def _resolve_by_normalised_name(parent: str, basename: str) -> str | None:
+    target = _normalise(basename)
+    if not target:
         return None
-    candidate = os.path.join(parent, cleaned)
-    if os.path.exists(candidate):
-        return candidate
-    # Also try a directory-listing match (case-insensitive) — handles
-    # subtle case differences in titles like "We Got Us a Pippi Virgin".
-    cleaned_lower = cleaned.lower()
     try:
-        for entry in os.listdir(parent):
-            if entry.lower() == cleaned_lower:
-                return os.path.join(parent, entry)
+        entries = os.listdir(parent)
     except OSError:
-        pass
-    return None
+        return None
+    matches = [e for e in entries if e.lower().endswith((".mkv", ".mp4", ".m2ts", ".avi")) and _normalise(e) == target]
+    # Exactly one, or we do not guess.
+    return os.path.join(parent, matches[0]) if len(matches) == 1 else None
 
 
 def main() -> int:
@@ -95,9 +127,15 @@ def main() -> int:
 
     con = sqlite3.connect(str(PIPELINE_STATE_DB))
     con.row_factory = sqlite3.Row
+    # Match either column. The rename-ghost note lands in `reason` rather than
+    # `error` depending on which path flagged it - the flagged_corrupt rows on
+    # 2026-10-19 carried "source missing on disk (renamed/deleted)" in `reason`
+    # with `error` NULL, so an error-only filter silently found nothing and
+    # reported a clean run.
     rows = con.execute(
-        "SELECT filepath, status, error, reason FROM pipeline_files WHERE status = ? AND COALESCE(error, '') LIKE ?",
-        (args.status, f"%{args.error_like}%"),
+        "SELECT filepath, status, error, reason FROM pipeline_files "
+        "WHERE status = ? AND (COALESCE(error, '') LIKE ? OR COALESCE(reason, '') LIKE ?)",
+        (args.status, f"%{args.error_like}%", f"%{args.error_like}%"),
     ).fetchall()
 
     print(f"Inspecting {len(rows)} rows with status={args.status!r} matching error~={args.error_like!r}\n")
