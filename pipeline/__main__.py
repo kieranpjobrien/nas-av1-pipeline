@@ -188,16 +188,29 @@ def _stamp_force_reencode(
     the guard at full_gamut.py:689. (2026-05-22 incident: 183 priority
     AV1 paths got silently DONE'd before this stamp was added.)
     """
-    # Pick a sane non-terminal status. Existing rows here are guaranteed
-    # non-terminal (terminal-skip ran above) so just reuse whatever it
-    # had, otherwise PENDING.
+    # Pick a sane NON-TERMINAL status.
+    #
+    # This used to assume existing rows were already non-terminal ("terminal-skip
+    # ran above") and reuse whatever they had. That assumption was false, and it
+    # is how flagged_corrupt grew to 94 rows of which almost none were corrupt:
+    # a FLAGGED_CORRUPT row reaching here kept its corrupt status while its
+    # reason was overwritten with
+    #
+    #   force_reencode set by categorise_entry: finished-video audio needs
+    #   transcode to eac-3
+    #
+    # - so 42 files whose only fault was AAC/Opus audio were reported to the
+    # operator as corrupt. Stamping force_reencode means "we intend to re-encode
+    # this", which is inherently non-terminal, so a terminal status must never
+    # survive the stamp.
+    status_to_use = FileStatus.PENDING
     if existing and existing.get("status"):
         try:
-            status_to_use = FileStatus(existing["status"])
+            candidate = FileStatus(existing["status"])
         except ValueError:
-            status_to_use = FileStatus.PENDING
-    else:
-        status_to_use = FileStatus.PENDING
+            candidate = FileStatus.PENDING
+        if not is_terminal(candidate):
+            status_to_use = candidate
     state.set_file(
         filepath,
         status_to_use,
