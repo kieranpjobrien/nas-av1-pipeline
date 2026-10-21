@@ -370,6 +370,62 @@ def check_no_stale_tmp_on_nas(skip_ssh: bool = False) -> InvariantResult:
 # --------------------------------------------------------------------------
 
 
+CONTAINER_UPDATE_STATUS = r"\\KieranNAS\Media\.heartbeat\docker_update.json"
+# The nightly updater runs at 04:41. Two missed nights is a real fault, not a
+# blip; one is a reboot or a slow pull.
+CONTAINER_UPDATE_MAX_AGE_H = 50.0
+
+
+def check_container_updates_running() -> InvariantResult:
+    """The download stack must actually be receiving security updates.
+
+    watchtower failed 234 consecutive scheduled runs between 2026-06-06 and
+    2026-10-22 - "toomanyrequests" on the pull, no retry - while reporting
+    "Failed=0 Updated=0". Nothing outside that box could see it, so it went
+    unnoticed for five months, straight through the in-the-wild exploitation of
+    the Plex2Shell RCE (CVE-2026-96652/96654/96655/96656). Plex happened to be
+    patched by luck of timing.
+
+    The updater now writes its outcome to the NAS, where this can read it.
+    """
+    name = "container_updates_running"
+    severity: Severity = "HIGH"
+    try:
+        with open(CONTAINER_UPDATE_STATUS, encoding="utf-8") as fh:
+            status = json.load(fh)
+    except FileNotFoundError:
+        return InvariantResult(name, severity, False, "updater has never written a status file")
+    except (OSError, json.JSONDecodeError) as exc:
+        return InvariantResult(name, severity, True, f"status file unreadable ({type(exc).__name__}) - skipped")
+
+    try:
+        when = datetime.fromisoformat(status["when"])
+    except (KeyError, ValueError):
+        return InvariantResult(name, severity, False, "status file has no usable timestamp")
+
+    now = datetime.now(when.tzinfo) if when.tzinfo else datetime.now()
+    age_h = (now - when).total_seconds() / 3600
+    failed = int(status.get("pull_failed") or 0)
+    blind = int(status.get("blind_containers") or 0)
+
+    problems = []
+    if age_h > CONTAINER_UPDATE_MAX_AGE_H:
+        problems.append(f"last ran {age_h:.0f}h ago")
+    if failed:
+        problems.append(f"{failed} image(s) failed to pull: {status.get('failed_services', '')}")
+    if blind:
+        problems.append(f"{blind} container(s) cannot see the NAS")
+
+    if problems:
+        return InvariantResult(name, severity, False, "; ".join(problems), violations=problems, details=status)
+    return InvariantResult(
+        name,
+        severity,
+        True,
+        f"stack updated {age_h:.0f}h ago, {status.get('pulled_ok', 0)} image(s) current",
+    )
+
+
 def check_no_zombie_mkvmerge(skip_ssh: bool = False) -> InvariantResult:
     """mkvmerge/ffmpeg processes running > 1 hour on the NAS are zombies."""
     name = "no_zombie_mkvmerge"
@@ -1229,6 +1285,7 @@ def _invariant_runners(skip_ssh: bool) -> list[Callable[[], InvariantResult]]:
         check_heavy_worker_running,
         check_media_report_not_collapsed,
         check_no_undersized_sources,
+        check_container_updates_running,
     ]
 
 
