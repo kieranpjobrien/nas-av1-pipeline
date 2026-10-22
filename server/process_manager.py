@@ -11,61 +11,91 @@ from server.helpers import STAGING_DIR, drop_file, remove_file
 
 _PROJECT_ROOT = str(Path(__file__).parent.parent)
 
+
+def _console_python() -> str:
+    """python.exe, even when the server itself is running under pythonw.exe.
+
+    2026-10-23: the dashboard was moved to pythonw so no console Ctrl+C could
+    reach it. That made ``sys.executable`` pythonw.exe, so every managed child
+    was launched with it too - and pythonw is a GUI-subsystem binary with NO
+    console. CREATE_NO_WINDOW is meaningless for such a process: it does not
+    get a hidden console, it gets none at all. Every console grandchild the
+    pipeline and scanner spawn (ffprobe, ffmpeg, mkvmerge - thousands of them)
+    then had to allocate its OWN console, and each one flashed a window on
+    screen. The operator was getting roughly five popups a second.
+
+    A console-subsystem python.exe launched WITH CREATE_NO_WINDOW does have a
+    console, just an invisible one, and its children inherit it silently. So
+    the server stays on pythonw and its children go back to python.exe.
+    """
+    exe = sys.executable
+    if sys.platform != "win32":
+        return exe
+    base = os.path.basename(exe)
+    if not base.lower().startswith("pythonw"):
+        return exe
+    candidate = os.path.join(os.path.dirname(exe), base.replace("pythonw", "python", 1))
+    return candidate if os.path.exists(candidate) else exe
+
+
+# Resolved once at import. Children must never inherit a windowless interpreter.
+PY = _console_python()
+
 PROCESS_CONFIGS: dict[str, dict] = {
     "scanner": {
-        "cmd": [sys.executable, "-m", "tools.scanner"],
+        "cmd": [PY, "-m", "tools.scanner"],
         "cwd": _PROJECT_ROOT,
     },
     "pipeline": {
-        "cmd": [sys.executable, "-m", "pipeline"],
+        "cmd": [PY, "-m", "pipeline"],
         "cwd": _PROJECT_ROOT,
     },
     "gap_filler": {
-        "cmd": [sys.executable, "-m", "pipeline", "--gap-filler-only"],
+        "cmd": [PY, "-m", "pipeline", "--gap-filler-only"],
         "cwd": _PROJECT_ROOT,
     },
     "reclaim": {
         # In-place VMAF-gated de-bloat (tools/reclaim_debloat.py). No arg -> runs
         # until candidates are exhausted or the UI stops it. force_kill matches on
         # module "tools.reclaim_debloat" and reaps its ffmpeg children.
-        "cmd": [sys.executable, "-m", "tools.reclaim_debloat"],
+        "cmd": [PY, "-m", "tools.reclaim_debloat"],
         "cwd": _PROJECT_ROOT,
     },
     "strip_tags": {
-        "cmd": [sys.executable, "-m", "tools.maintain", "clean-names", "--execute", "--movies"],
+        "cmd": [PY, "-m", "tools.maintain", "clean-names", "--execute", "--movies"],
         "cwd": _PROJECT_ROOT,
     },
     "duplicates": {
-        "cmd": [sys.executable, "-m", "tools.duplicates", "--delete", "--execute"],
+        "cmd": [PY, "-m", "tools.duplicates", "--delete", "--execute"],
         "cwd": _PROJECT_ROOT,
     },
     "subtitles": {
-        "cmd": [sys.executable, "-m", "tools.subtitles"],
+        "cmd": [PY, "-m", "tools.subtitles"],
         "cwd": _PROJECT_ROOT,
     },
     "integrity": {
-        "cmd": [sys.executable, "-m", "tools.integrity", "--from-state", "--workers", "1"],
+        "cmd": [PY, "-m", "tools.integrity", "--from-state", "--workers", "1"],
         "cwd": _PROJECT_ROOT,
     },
     "plex_sync": {
         "cmd": [
-            sys.executable,
+            PY,
             "-c",
             "import subprocess, sys; "
             "print('Triggering Plex library scan...', flush=True); "
-            "subprocess.run([sys.executable, '-m', 'tools.plex_metadata', 'scan']); "
+            "subprocess.run([PY, '-m', 'tools.plex_metadata', 'scan']); "
             "print('Running metadata audit...', flush=True); "
-            "subprocess.run([sys.executable, '-m', 'tools.plex_metadata', 'audit', '--json', "
+            "subprocess.run([PY, '-m', 'tools.plex_metadata', 'audit', '--json', "
             f"r'{STAGING_DIR / 'plex_audit.json'}']); "
             "print('Applying rules...', flush=True); "
-            "subprocess.run([sys.executable, '-m', 'tools.plex_metadata', 'apply-rules', '--execute']); "
+            "subprocess.run([PY, '-m', 'tools.plex_metadata', 'apply-rules', '--execute']); "
             "print('Plex sync complete.', flush=True)",
         ],
         "cwd": _PROJECT_ROOT,
     },
     "detect_languages": {
         "cmd": [
-            sys.executable,
+            PY,
             "-m",
             "tools.detect_languages",
             "--workers",
@@ -77,12 +107,12 @@ PROCESS_CONFIGS: dict[str, dict] = {
         "cwd": _PROJECT_ROOT,
     },
     "detect_languages_whisper": {
-        "cmd": [sys.executable, "-m", "tools.detect_languages", "--whisper", "--apply", "--min-confidence", "0.85"],
+        "cmd": [PY, "-m", "tools.detect_languages", "--whisper", "--apply", "--min-confidence", "0.85"],
         "cwd": _PROJECT_ROOT,
     },
     "detect_languages_retry": {
         "cmd": [
-            sys.executable,
+            PY,
             "-m",
             "tools.detect_languages",
             "--whisper",
@@ -94,23 +124,23 @@ PROCESS_CONFIGS: dict[str, dict] = {
         "cwd": _PROJECT_ROOT,
     },
     "detect_languages_spotcheck": {
-        "cmd": [sys.executable, "-m", "tools.detect_languages", "--spot-check", "200"],
+        "cmd": [PY, "-m", "tools.detect_languages", "--spot-check", "200"],
         "cwd": _PROJECT_ROOT,
     },
     "apply_languages": {
-        "cmd": [sys.executable, "-m", "tools.detect_languages", "--apply", "--min-confidence", "0.85"],
+        "cmd": [PY, "-m", "tools.detect_languages", "--apply", "--min-confidence", "0.85"],
         "cwd": _PROJECT_ROOT,
     },
     "tmdb_enrich": {
-        "cmd": [sys.executable, "-m", "tools.tmdb", "--enrich-and-apply"],
+        "cmd": [PY, "-m", "tools.tmdb", "--enrich-and-apply"],
         "cwd": _PROJECT_ROOT,
     },
     "tmdb_apply": {
-        "cmd": [sys.executable, "-m", "tools.tmdb", "--apply"],
+        "cmd": [PY, "-m", "tools.tmdb", "--apply"],
         "cwd": _PROJECT_ROOT,
     },
     "rewatchables": {
-        "cmd": [sys.executable, "-m", "tools.rewatchables"],
+        "cmd": [PY, "-m", "tools.rewatchables"],
         "cwd": _PROJECT_ROOT,
     },
 }
