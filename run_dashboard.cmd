@@ -1,32 +1,35 @@
 @echo off
-REM Launch the dashboard (also the pipeline's process supervisor) in its OWN
-REM console, isolated from every other job's console control events.
-REM
-REM 2026-10-07, after six silent deaths in six days: the cause is a console
-REM Ctrl+C, caught red-handed in dashboard.log -
-REM
-REM   INFO:  127.0.0.1:63415 - "GET /api/health HTTP/1.1" 200 OK
-REM   ^C[Wed 07/10/2026 21:51:12.66] dashboard starting
-REM
-REM uvicorn handles SIGINT by shutting down cleanly, which is why there was
-REM never a traceback, never a Windows Application crash event, and never a
-REM captured exit code - it was not crashing, it was being interrupted.
-REM
-REM `start /b` runs a child in the CALLER'S console, so every job launched this
-REM way joined one control-event group: a break delivered to any of them hit
-REM all of them. Each new .cmd launched while working was killing the server.
-REM
-REM `start "title" /min` gives this one its own console window instead, so a
-REM break elsewhere cannot reach it. Minimised, not hidden, so it is visible in
-REM the taskbar if you want to stop it by hand.
-REM
-REM Deliberately NOT a scheduled task; the operator starts these by hand.
-REM Nothing survives a LOGOFF regardless (0xC000026B).
+REM Launch the dashboard (also the pipeline's process supervisor) with NO CONSOLE.
 REM
 REM   Start-Process explorer.exe -ArgumentList "D:\MediaProject\run_dashboard.cmd"
+REM
+REM History of this one line, because it has been wrong twice:
+REM
+REM  1. `start /b python.exe` - ran the child in the CALLER'S console, so every
+REM     job launched this way shared one control-event group and a Ctrl+C
+REM     delivered to any of them killed all of them. Six silent deaths.
+REM  2. `start "title" /min cmd /c python.exe` - meant to give it its own
+REM     console. It died again on 2026-10-22, same signature: dashboard.log
+REM     ending in ^C, and
+REM
+REM       [07/10 21:52:22] dashboard EXITED code 0
+REM
+REM     Exit code 0 is a GRACEFUL shutdown - uvicorn handling SIGINT - not a
+REM     crash. The watchdog died in the same instant, mid-recovery, with
+REM     "health check failed (1/2)" then ^C in its own log.
+REM
+REM  3. pythonw.exe. It is a GUI-subsystem binary: it has no console at all, so
+REM     there is no console group to join and no CTRL_C_EVENT can reach it.
+REM     This is not a better guess about grouping, it removes the mechanism.
+REM
+REM Redirection still works - cmd sets up the file handles before the process
+REM starts, so stdout/stderr land in the log exactly as before.
+REM
+REM Nothing survives a LOGOFF regardless (0xC000026B). Lock the screen instead.
 
 cd /d D:\MediaProject
 set PYTHONUTF8=1
 set PYTHONIOENCODING=utf-8
 
-start "AV1 Dashboard" /min cmd /c ""D:\MediaProject\.venv\Scripts\python.exe" -u -m server >> "F:\AV1_Staging\dashboard.log" 2>&1 & echo [%%DATE%% %%TIME%%] dashboard EXITED code %%ERRORLEVEL%% >> "F:\AV1_Staging\dashboard.log""
+echo [%DATE% %TIME%] dashboard starting (pythonw, no console) >> "F:\AV1_Staging\dashboard.log"
+start "" /b "D:\MediaProject\.venv\Scripts\pythonw.exe" -u -m server >> "F:\AV1_Staging\dashboard.log" 2>&1
