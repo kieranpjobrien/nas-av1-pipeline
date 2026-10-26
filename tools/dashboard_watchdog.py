@@ -39,6 +39,14 @@ import time
 import urllib.error
 import urllib.request
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from pipeline.no_console import install as _install_no_console  # noqa: E402
+
+# This also runs under pythonw, and shells out to powershell for the death
+# snapshot and to explorer for the restart. Both would open a window each.
+_install_no_console()
+
 HEALTH = "http://127.0.0.1:8000/api/health"
 LAUNCHER = r"D:\MediaProject\run_dashboard.cmd"
 JOURNAL = r"F:\AV1_Staging\dashboard_deaths.json"

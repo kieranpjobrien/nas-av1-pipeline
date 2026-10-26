@@ -27,6 +27,13 @@ _json_encoder.JSONEncoder.item_separator = ", "
 from fastapi import FastAPI  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402
 
+from pipeline.no_console import install as _install_no_console  # noqa: E402
+
+# The server runs under pythonw (no console) so no console Ctrl+C can kill it.
+# Without this, every subprocess it spawns - ffmpeg -version in routers/admin,
+# among others - opens its own window. Must run before any subprocess is made.
+_install_no_console()
+
 from server.audit import AuditLogMiddleware  # noqa: E402
 from server.helpers import FRONTEND_DIST  # noqa: E402
 from server.middleware import BearerTokenMiddleware  # noqa: E402
