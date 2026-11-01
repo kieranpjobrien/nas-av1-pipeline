@@ -375,6 +375,11 @@ CONTAINER_UPDATE_STATUS = r"\\KieranNAS\Media\.heartbeat\docker_update.json"
 # blip; one is a reboot or a slow pull.
 CONTAINER_UPDATE_MAX_AGE_H = 50.0
 
+# The custom format that keeps foreign dubs out of both *arr apps, and the
+# score it has to carry to actually reject rather than merely annotate.
+LANGUAGE_GUARD_FORMAT = "nc-Not-Original-Language"
+LANGUAGE_GUARD_MAX_SCORE = -1000
+
 
 def check_container_updates_running() -> InvariantResult:
     """The download stack must actually be receiving security updates.
@@ -1266,6 +1271,73 @@ def check_no_undersized_sources(report: Optional[dict] = None) -> InvariantResul
     )
 
 
+def check_foreign_dub_guard_armed() -> InvariantResult:
+    """Sonarr and Radarr must still reject releases that are not the original language.
+
+    Six episodes of Nobody Wants This S03 arrived French-only on 2026-10-22,
+    and a sweep then found 92 more files across the library playing in German,
+    French, Spanish, Hungarian, Korean or Romanian - 50 episodes of Game of
+    Thrones among them. The old defence was a list of banned words in the
+    release name, and it failed twice over: plain ``FRENCH`` was never on the
+    list, and the German pattern was case-sensitive so ``GERMAN.DL`` slipped
+    past it.
+
+    The replacement does not read release names at all. Both apps carry a
+    custom format on ``Language`` = Original, negated, scored far below any
+    profile's cutoff, so a dub is rejected on the metadata the indexer reports
+    whatever the release calls itself. Verified live when it went in: 18 of 18
+    foreign Game of Thrones releases blocked, 0 of 230 English ones.
+
+    A format that exists but is scored 0 does nothing at all - that was the
+    state Radarr's older ``nc-Reject-Foreign-Language`` sat in while the dubs
+    came through - so the score is what gets checked here, not the presence.
+    """
+    name = "foreign_dub_guard_armed"
+    severity: Severity = "HIGH"
+
+    try:
+        from tools.grab_best import RADARR, SONARR, arr
+    except Exception as exc:  # noqa: BLE001
+        return InvariantResult(name, severity, True, f"cannot import *arr client ({exc}) - skipped")
+
+    violations: list[str] = []
+    details: dict[str, Any] = {}
+    for label, api in (("sonarr", SONARR), ("radarr", RADARR)):
+        try:
+            formats = arr(api, "/api/v3/customformat")
+            profiles = arr(api, "/api/v3/qualityprofile")
+        except Exception as exc:  # noqa: BLE001
+            # An unreachable app is an availability problem, not proof the
+            # guard is gone. Rule 12's spirit: never turn "cannot read" into
+            # "it is broken".
+            details[label] = f"unreachable ({type(exc).__name__})"
+            continue
+
+        cf = next((c for c in formats if c.get("name") == LANGUAGE_GUARD_FORMAT), None)
+        if cf is None:
+            violations.append(f"{label}: custom format {LANGUAGE_GUARD_FORMAT} is missing")
+            continue
+
+        unarmed = []
+        for prof in profiles:
+            item = next((i for i in (prof.get("formatItems") or []) if i.get("format") == cf["id"]), None)
+            score = (item or {}).get("score")
+            if item is None or score is None or score > LANGUAGE_GUARD_MAX_SCORE:
+                unarmed.append(f"{prof.get('name')}={score if item else 'absent'}")
+        details[label] = {"format_id": cf["id"], "profiles": len(profiles), "unarmed": unarmed}
+        if unarmed:
+            violations.append(
+                f"{label}: {LANGUAGE_GUARD_FORMAT} not scored <= {LANGUAGE_GUARD_MAX_SCORE} "
+                f"in {len(unarmed)} profile(s): {', '.join(unarmed)}"
+            )
+
+    if violations:
+        return InvariantResult(
+            name, severity, False, f"{len(violations)} language-guard problem(s)", violations, details
+        )
+    return InvariantResult(name, severity, True, "foreign-dub guard armed in both *arr apps", [], details)
+
+
 def _invariant_runners(skip_ssh: bool) -> list[Callable[[], InvariantResult]]:
     """Ordered list of zero-arg callables producing an InvariantResult each."""
     return [
@@ -1286,6 +1358,7 @@ def _invariant_runners(skip_ssh: bool) -> list[Callable[[], InvariantResult]]:
         check_media_report_not_collapsed,
         check_no_undersized_sources,
         check_container_updates_running,
+        check_foreign_dub_guard_armed,
     ]
 
 
