@@ -990,6 +990,105 @@ def check_no_done_with_foreign_audio(report: Optional[dict] = None) -> Invariant
 
 
 # --------------------------------------------------------------------------
+# HIGH - flagged_foreign_audio rows the file itself contradicts
+# --------------------------------------------------------------------------
+
+
+def check_no_flagged_foreign_with_original_audio(report: Optional[dict] = None) -> InvariantResult:
+    """Surface FLAGGED_FOREIGN_AUDIO rows whose file DOES carry the original language.
+
+    The mirror image of ``no_done_with_foreign_audio``: that one catches a
+    wrong-language file marked finished, this one catches a right-language
+    file parked in the review queue. Both are invisible without a check,
+    but this direction is the quieter failure - a flagged row is skipped by
+    the picker forever, so the file simply never encodes and nothing in the
+    logs complains.
+
+    2026-11-02: nineteen rows sat in flagged_foreign_audio. Eleven were
+    English-original episodes (Bob's Burgers x5, It's Always Sunny x3,
+    Futurama, plus two films with no TMDb original_language) holding a single
+    English track - the flag contradicted the file in every one. They had
+    been invisible for days and only surfaced because the operator asked how
+    the pipeline was doing. The remaining rows were correct: genuinely
+    foreign films held English-dub-only, which is the Amelie case the policy
+    exists for.
+
+    The comparison is deliberately the same as the DONE-side invariant: a
+    row violates only when a track PROVES the original language is present.
+    An ``und`` track proves nothing and is not counted, so a file awaiting
+    whisper never fails this check.
+
+    HIGH, not CRITICAL: nothing is lost, the file is just parked. But it is
+    parked silently and indefinitely, which is why it needs a watcher.
+    """
+    name = "no_flagged_foreign_with_original_audio"
+    severity: Severity = "HIGH"
+
+    if report is None:
+        report = _load_media_report()
+    if report is None:
+        return InvariantResult(name, severity, True, "media_report.json not present - skipped")
+
+    conn = _open_state_db()
+    if conn is None:
+        return InvariantResult(name, severity, True, "state DB unavailable - skipped")
+    try:
+        rows = conn.execute(
+            "SELECT filepath FROM pipeline_files WHERE LOWER(status) = 'flagged_foreign_audio'"
+        ).fetchall()
+    except sqlite3.Error:
+        return InvariantResult(name, severity, True, "state DB query failed - skipped")
+    finally:
+        conn.close()
+    flagged_paths = {r[0] for r in rows}
+    if not flagged_paths:
+        return InvariantResult(name, severity, True, "no flagged_foreign_audio rows", details={"flagged": 0})
+
+    from pipeline.qualify import _languages_equivalent  # noqa: PLC0415
+
+    NOT_A_LANGUAGE = {"und", "unk", "zxx"}
+    offenders: list[str] = []
+    evaluated = 0
+    for entry in report.get("files", []) or []:
+        fp = entry.get("filepath")
+        if not fp or fp not in flagged_paths:
+            continue
+        tmdb = entry.get("tmdb") or {}
+        original = (tmdb.get("original_language") or "").lower().strip()
+        if not original:
+            # No ground truth to contradict the flag with. The operator's
+            # override list is the right tool for these, not this check.
+            continue
+        evaluated += 1
+        for s in entry.get("audio_streams") or []:
+            tag = (s.get("language") or "").lower().strip()
+            detected = (s.get("detected_language") or "").lower().strip()
+            if any(
+                cand and cand not in NOT_A_LANGUAGE and _languages_equivalent(cand, original)
+                for cand in (tag, detected)
+            ):
+                offenders.append(fp)
+                break
+
+    passed = not offenders
+    if offenders:
+        message = (
+            f"{len(offenders)} of {len(flagged_paths)} flagged_foreign_audio row(s) have an "
+            f"original-language track on file - the flag is wrong and they will never encode"
+        )
+    else:
+        message = f"all {evaluated} evaluable flagged_foreign_audio row(s) genuinely lack the original language"
+    return InvariantResult(
+        name,
+        severity,
+        passed,
+        message,
+        violations=offenders[:50],
+        details={"flagged": len(flagged_paths), "evaluated": evaluated, "offenders": len(offenders)},
+    )
+
+
+# --------------------------------------------------------------------------
 # HIGH - heavy gap_filler worker disabled with non-empty queue
 # --------------------------------------------------------------------------
 
@@ -1345,6 +1444,7 @@ def _invariant_runners(skip_ssh: bool) -> list[Callable[[], InvariantResult]]:
         check_no_done_with_deferred_reason,
         check_no_done_with_error_reason,
         check_no_done_with_foreign_audio,
+        check_no_flagged_foreign_with_original_audio,
         check_no_elevated_breaker_counters,
         check_no_stale_active_rows,
         lambda: check_no_stale_tmp_on_nas(skip_ssh=skip_ssh),
