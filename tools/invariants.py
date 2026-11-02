@@ -380,6 +380,21 @@ CONTAINER_UPDATE_MAX_AGE_H = 50.0
 LANGUAGE_GUARD_FORMAT = "nc-Not-Original-Language"
 LANGUAGE_GUARD_MAX_SCORE = -1000
 
+# The custom format that keeps AI-upscaled releases out, and release titles
+# that prove whether its pattern still works. A score alone says nothing here:
+# the format sat at -10000 in both Radarr profiles for weeks with a pattern
+# that could not match anything, so the probes are the actual check.
+UPSCALE_GUARD_FORMAT = "Upscale (reject)"
+UPSCALE_GUARD_MAX_SCORE = -1000
+UPSCALE_GUARD_MUST_MATCH = (
+    "About.Time.-2013-.BluRay.2160p.AI.Upscale.DTS-HD.MA.5.1.10Bit.x265-ZAX",
+    "Some.Film.2011.2160p.Topaz.Upscaled.WEB-DL-GRP",
+)
+UPSCALE_GUARD_MUST_NOT_MATCH = (
+    "About.Time.2013.BluRay.1080p.DTS-HD.MA.5.1.AVC.REMUX-FraMeSToR",
+    "Corpse.Bride.2005.2160p.UHD.Blu-ray.Remux.HDR.HEVC.TrueHD.Atmos-FraMeSToR",
+)
+
 
 def check_container_updates_running() -> InvariantResult:
     """The download stack must actually be receiving security updates.
@@ -1437,6 +1452,105 @@ def check_foreign_dub_guard_armed() -> InvariantResult:
     return InvariantResult(name, severity, True, "foreign-dub guard armed in both *arr apps", [], details)
 
 
+def check_upscale_guard_armed() -> InvariantResult:
+    """The upscale-reject format must exist, be scored, AND actually match.
+
+    Radarr grabbed ``About.Time.-2013-.BluRay.2160p.AI.Upscale...`` on
+    2026-11-02 while carrying a custom format called "Upscale (reject)" scored
+    -10000 in both of its profiles. Presence was right, score was right, and
+    the guard had never blocked a single release, because the pattern was::
+
+        (?i)\\x08(upscale|upscaled|ai[ ._-]?upscale)\\x08
+
+    Those are literal backspace characters - ``"\\b"`` written in a
+    double-quoted string becomes the backspace escape instead of the two
+    characters a regex needs for a word boundary. No release title contains a
+    backspace, so the format matched nothing, and every inspection that only
+    asked "does it exist and is it scored" reported it healthy.
+
+    Hence this check compiles the live pattern and runs it against known
+    release titles in both directions. ``check_foreign_dub_guard_armed`` can
+    check score alone because it keys on a Language specification with no
+    pattern to get wrong; a ReleaseTitleSpecification has to be exercised.
+
+    Sonarr had no such format at all, so TV carried the same exposure with no
+    guard even attempted; both apps are checked.
+    """
+    name = "upscale_guard_armed"
+    severity: Severity = "HIGH"
+
+    try:
+        from tools.grab_best import RADARR, SONARR, arr
+    except Exception as exc:  # noqa: BLE001
+        return InvariantResult(name, severity, True, f"cannot import *arr client ({exc}) - skipped")
+
+    violations: list[str] = []
+    details: dict[str, Any] = {}
+    for label, api in (("sonarr", SONARR), ("radarr", RADARR)):
+        try:
+            formats = arr(api, "/api/v3/customformat")
+            profiles = arr(api, "/api/v3/qualityprofile")
+        except Exception as exc:  # noqa: BLE001
+            # Unreachable is an availability problem, not proof the guard is
+            # gone (rule 12: never turn "cannot read" into "it is broken").
+            details[label] = f"unreachable ({type(exc).__name__})"
+            continue
+
+        cf = next((c for c in formats if c.get("name") == UPSCALE_GUARD_FORMAT), None)
+        if cf is None:
+            violations.append(f"{label}: custom format {UPSCALE_GUARD_FORMAT} is missing")
+            continue
+
+        info: dict[str, Any] = {"format_id": cf["id"]}
+
+        patterns = [
+            (f.get("value") or "")
+            for spec in (cf.get("specifications") or [])
+            if spec.get("implementation") == "ReleaseTitleSpecification"
+            for f in (spec.get("fields") or [])
+            if f.get("name") == "value"
+        ]
+        if not patterns:
+            violations.append(f"{label}: {UPSCALE_GUARD_FORMAT} has no release-title pattern")
+        for pattern in patterns:
+            try:
+                rx = re.compile(pattern, re.IGNORECASE)
+            except re.error as exc:
+                violations.append(f"{label}: pattern does not compile ({exc}): {pattern!r}")
+                continue
+            missed = [t for t in UPSCALE_GUARD_MUST_MATCH if not rx.search(t)]
+            false_pos = [t for t in UPSCALE_GUARD_MUST_NOT_MATCH if rx.search(t)]
+            if missed:
+                violations.append(
+                    f"{label}: pattern {pattern!r} matches no upscale marker - "
+                    f"missed {len(missed)} of {len(UPSCALE_GUARD_MUST_MATCH)} known upscale titles"
+                )
+            if false_pos:
+                violations.append(f"{label}: pattern {pattern!r} also rejects {len(false_pos)} genuine release(s)")
+            info["pattern_ok"] = not missed and not false_pos
+
+        unarmed = []
+        for prof in profiles:
+            item = next((i for i in (prof.get("formatItems") or []) if i.get("format") == cf["id"]), None)
+            score = (item or {}).get("score")
+            if item is None or score is None or score > UPSCALE_GUARD_MAX_SCORE:
+                unarmed.append(f"{prof.get('name')}={score if item else 'absent'}")
+        info["profiles"] = len(profiles)
+        info["unarmed"] = unarmed
+        details[label] = info
+        if unarmed:
+            violations.append(
+                f"{label}: {UPSCALE_GUARD_FORMAT} not scored <= {UPSCALE_GUARD_MAX_SCORE} "
+                f"in {len(unarmed)} profile(s): {', '.join(unarmed)}"
+            )
+
+    if violations:
+        return InvariantResult(
+            name, severity, False, f"{len(violations)} upscale-guard problem(s)", violations, details
+        )
+    return InvariantResult(name, severity, True, "upscale guard armed and matching in both *arr apps", [], details)
+
+
 def _invariant_runners(skip_ssh: bool) -> list[Callable[[], InvariantResult]]:
     """Ordered list of zero-arg callables producing an InvariantResult each."""
     return [
@@ -1459,6 +1573,7 @@ def _invariant_runners(skip_ssh: bool) -> list[Callable[[], InvariantResult]]:
         check_no_undersized_sources,
         check_container_updates_running,
         check_foreign_dub_guard_armed,
+        check_upscale_guard_armed,
     ]
 
 
