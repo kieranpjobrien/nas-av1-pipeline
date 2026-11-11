@@ -205,6 +205,67 @@ def _probe_source_color(input_path: str) -> dict[str, Optional[str]]:
     }
 
 
+# Dolby Vision profiles with no HDR10 base layer. Re-encoding these destroys
+# the image because the pixel data is not what a plain decoder assumes.
+DV_SINGLE_LAYER_PROFILES = (4, 5)
+
+
+def probe_dv_profile(input_path: str) -> Optional[int]:
+    """Dolby Vision profile of the source, or None if it carries no DV.
+
+    Read from the DOVI configuration record ffprobe reports as stream side
+    data. Returns the profile number so the caller can tell the two cases
+    apart, because only some of them matter:
+
+      * Profile 5 is single-layer with no HDR10 fallback and stores colour as
+        ICtCp rather than YCbCr. av1_nvenc cannot carry a DV RPU, so a
+        re-encode drops the RPU and leaves the ICtCp planes to be decoded as
+        ordinary YCbCr - skin goes magenta, greens go fluorescent, and it is
+        the pixels that are wrong so nothing downstream can repair it.
+      * Profile 4 is single-layer too, same hazard.
+      * Profiles 7 and 8 carry a conformant HDR10 base layer. Re-encoding
+        loses Dolby Vision but the colour that remains is correct HDR10,
+        which is an acceptable trade and must not be refused.
+
+    2026-11-11: found via Sideways, source Sideways.2004.MULTI.DV.2160p.WEB
+    H265-LOST. Measured saturation on the AV1 output was satmax 195 against
+    83 on a known-good control. 24 WEB-DV titles had been re-encoded; 7
+    measured abnormal. The 186 disc-sourced DV titles were unaffected,
+    exactly as the profile split predicts.
+    """
+    out = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=side_data_list",
+            "-of",
+            "json",
+            input_path,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if out.returncode != 0:
+        return None
+    try:
+        info = json.loads(out.stdout)
+        s = (info.get("streams") or [{}])[0]
+    except (json.JSONDecodeError, IndexError, AttributeError):
+        return None
+    for sd in s.get("side_data_list") or []:
+        if "dv_profile" in sd:
+            try:
+                return int(sd["dv_profile"])
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
 def get_duration(filepath: str) -> Optional[float]:
     """Get file duration via ffprobe."""
     try:
@@ -586,6 +647,27 @@ def build_ffmpeg_cmd(
             support every codec/profile (e.g. 10-bit H.264, MPEG-4 ASP), so we
             need a graceful fallback path.
     """
+    # REFUSE-TO-BUILD: single-layer Dolby Vision (profile 4 / 5) has no HDR10
+    # base layer and stores colour as ICtCp. av1_nvenc cannot carry the RPU, so
+    # encoding one produces a file whose pixels decode to magenta skin and
+    # fluorescent greens — unrecoverable, because the tags are not the problem.
+    # Same class as the zero-audio refusal below: the only correct action is to
+    # re-source the title, so fail loudly instead of emitting a command.
+    # Profiles 7 / 8 keep a conformant HDR10 base layer and are allowed through.
+    # Checked before any parameter resolution so the refusal cannot be masked by
+    # an unrelated config problem.
+    dv_profile = item.get("dv_profile")
+    if dv_profile is None:
+        dv_profile = probe_dv_profile(input_path)
+    if dv_profile in DV_SINGLE_LAYER_PROFILES:
+        raise ValueError(
+            f"build_ffmpeg_cmd refused: source is single-layer Dolby Vision "
+            f"(profile {dv_profile}) with no HDR10 base layer ({input_path}). "
+            "Re-encoding drops the RPU and leaves ICtCp planes decoded as YCbCr, "
+            "which destroys colour irreversibly. Re-source from a disc-based DV "
+            "(profile 7/8) or plain HDR10 release instead."
+        )
+
     is_hdr = item.get("hdr", False)
     params = resolve_encode_params(config, item)
 

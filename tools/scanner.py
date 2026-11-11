@@ -127,6 +127,31 @@ def extract_info(filepath: str, probe_data: dict, library_type: str) -> dict:
         color_primaries = video.get("color_primaries", "")
         is_hdr = color_transfer in ("smpte2084", "arib-std-b67") or color_primaries == "bt2020"
 
+        # Dolby Vision profile, from the DOVI configuration record ffprobe
+        # reports as stream side data.
+        #
+        # 2026-11-11: Sideways went purple - skin magenta, greens fluorescent.
+        # Its source was Sideways.2004.MULTI.DV.2160p.WEB.H265-LOST, Dolby
+        # Vision Profile 5, and the pipeline re-encoded it to AV1. Profile 5 is
+        # single-layer with no HDR10 fallback and stores colour as ICtCp rather
+        # than YCbCr; av1_nvenc cannot carry a DV RPU, so the RPU was dropped
+        # and the ICtCp planes are now read as ordinary YCbCr. The damage is in
+        # the pixels, so no retag or remux recovers it - the file has to be
+        # grabbed again.
+        #
+        # Profiles 7 and 8 carry a conformant HDR10 base layer, so re-encoding
+        # those loses Dolby Vision but leaves correct HDR10 colour. Only
+        # single-layer profiles (5, and 4 for the same reason) corrupt, which is
+        # why the profile number is recorded rather than a bare "has DV" flag.
+        dv_profile = None
+        for sd in video.get("side_data_list") or []:
+            if "dv_profile" in sd:
+                try:
+                    dv_profile = int(sd["dv_profile"])
+                except (TypeError, ValueError):
+                    dv_profile = None
+                break
+
         # Bit depth
         bit_depth = video.get("bits_per_raw_sample")
         if bit_depth:
@@ -150,6 +175,8 @@ def extract_info(filepath: str, probe_data: dict, library_type: str) -> dict:
             "hdr": is_hdr,
             "bit_depth": bit_depth,
             "pixel_format": video.get("pix_fmt", "unknown"),
+            "dv_profile": dv_profile,
+            "dv_single_layer": dv_profile in (4, 5),
         }
 
     audio_info = []
